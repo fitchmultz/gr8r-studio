@@ -101,9 +101,6 @@ export function seed() {
     projOrder: projects.map(p => p.id),
     savedViews: [],
     recentSearches: [],
-    sessions: [{ id: 'se1', dev: 'MacBook Pro · Chrome', loc: 'San Francisco, US', at: 'Active now', cur: true }],
-    invoices: [],
-    tfa: false,
     notifPrefs: {
       email_mention: true,
       email_assign: true,

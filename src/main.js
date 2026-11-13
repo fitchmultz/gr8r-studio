@@ -42,7 +42,6 @@ import './overlays/popovers.js';
 import './overlays/context-menu.js';
 import './overlays/palette.js';
 import './pages/settings.js';
-import './pages/auth.js';
 import './pages/design-system.js';
 import './actions/actions.js';
 import './actions/events.js';
@@ -69,9 +68,7 @@ import { ROUTE_NAMES, render, go } from './shell/render.js';
     document.body.appendChild(l);
   }
   const h = (location.hash || '').slice(1);
-  const authRoutes = ['login', 'signup', 'forgot', 'reset', 'verify', 'onboarding'];
-  if (authRoutes.includes(h)) S.ui.auth = h;
-  else if (h && ROUTE_NAMES[h]) S.ui.route = h;
+  if (h && ROUTE_NAMES[h]) S.ui.route = h;
   else S.ui.route = S.prefs.home || 'home';
   render();
   initSync();

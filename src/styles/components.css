@@ -734,3 +734,12 @@
 .select-menu .mi[aria-selected='true'] {
   font-weight: 500;
 }
+
+.link {
+  color: var(--accent);
+  font-weight: 500;
+}
+.link:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
