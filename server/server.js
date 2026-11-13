@@ -53,9 +53,9 @@ export function startServer({ port = 0, host = '127.0.0.1', token, dataFile, dis
     const m = /^Bearer (.+)$/.exec(req.headers.authorization || '');
     return !!m && timingSafeEqual(createHash('sha256').update(m[1]).digest(), tokenKey);
   };
-  const send = (res, code, body, type = 'application/json') => {
+  const send = (res, code, body, type = 'application/json', extra = {}) => {
     const buf = Buffer.isBuffer(body) ? body : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
-    res.writeHead(code, { 'content-type': type, 'content-length': buf.length });
+    res.writeHead(code, { 'content-type': type, 'content-length': buf.length, ...extra });
     res.end(buf);
   };
   const readBody = req =>
@@ -76,6 +76,12 @@ export function startServer({ port = 0, host = '127.0.0.1', token, dataFile, dis
     });
 
   async function api(req, res, url) {
+    /* The client fetches its sync token here before it can authenticate.
+       Anyone who can reach this server can already read a token embedded in
+       the client bundle, so this adds no exposure on a private deployment —
+       and it keeps GR8R_TOKEN a pure runtime setting: rotating it only
+       restarts the server. */
+    if (url.pathname === '/api/config' && req.method === 'GET') return send(res, 200, { token }, 'application/json', { 'cache-control': 'no-store' });
     if (!authorized(req)) return send(res, 401, { error: 'unauthorized' });
     if (url.pathname === '/api/state' && req.method === 'GET') return send(res, 200, store);
     if (url.pathname === '/api/sync' && req.method === 'POST') {

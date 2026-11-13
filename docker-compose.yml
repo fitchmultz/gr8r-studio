@@ -1,0 +1,20 @@
+# One container: the built app and the sync API.
+# GR8R_TOKEN authorizes the API at runtime; the client fetches it from
+# /api/config at startup, so no token is needed at build time.
+services:
+  gr8r:
+    build:
+      context: .
+      args:
+        VITE_SYNC_URL: /api
+    environment:
+      GR8R_TOKEN: ${GR8R_TOKEN:?export GR8R_TOKEN first}
+      PORT: 4180
+    ports:
+      - '4180:4180'
+    volumes:
+      - gr8r-data:/app/server/data
+    restart: unless-stopped
+
+volumes:
+  gr8r-data:

@@ -24,6 +24,14 @@ test('rejects requests without a valid token', async t => {
   assert.equal((await fetch(base + '/api/state', { headers: { authorization: 'Bearer wrong' } })).status, 401);
 });
 
+test('serves the runtime token to unauthenticated clients', async t => {
+  const { base } = await withServer(t);
+  const r = await fetch(base + '/api/config');
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('cache-control'), 'no-store');
+  assert.equal((await r.json()).token, 'secret');
+});
+
 test('a fresh server starts empty', async t => {
   const { base } = await withServer(t);
   const j = await (await fetch(base + '/api/state', { headers: auth })).json();

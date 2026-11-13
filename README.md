@@ -90,11 +90,13 @@ browser keeps its own standalone copy (no sync).
 Run the bundled server to keep one workspace in sync across devices:
 
 ```bash
-VITE_SYNC_URL=/api VITE_SYNC_TOKEN=<secret> npm run build
+VITE_SYNC_URL=/api npm run build
 cd server && GR8R_TOKEN=<secret> npm start    # app + sync API on :4180
 ```
 
-- `GR8R_TOKEN` is the single shared bearer token. `PORT`, `HOST`, `GR8R_DATA`
+- `GR8R_TOKEN` is the single shared bearer token. The client fetches it from
+  `GET /api/config` at startup, so rotating it only needs a server restart.
+  `PORT`, `HOST`, `GR8R_DATA`
   (state file) and `DIST` (static dir) can be overridden through the environment.
 - The server keeps the workspace blob and a revision in `server/data/state.json`.
   `POST /api/sync` accepts a push whose `baseRev` matches the current revision
@@ -103,3 +105,14 @@ cd server && GR8R_TOKEN=<secret> npm start    # app + sync API on :4180
   every 30 seconds, and when another tab on the same device changes state.
 - Two devices that edit offline at the same time: the last push wins, and the
   earlier device's offline edits are replaced when it reconnects.
+
+### Docker
+
+```bash
+GR8R_TOKEN=<secret> docker compose up --build -d    # app + sync API on :4180
+```
+
+The client fetches its sync token from `/api/config` at startup, so changing
+`GR8R_TOKEN` just takes another `docker compose up -d` — no rebuild. Workspace
+state lives in the `gr8r-data` volume (mounted at
+`/app/server/data`); override paths with `GR8R_DATA` / `DIST` to mount your own.
