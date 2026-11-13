@@ -89,9 +89,13 @@ browser keeps its own standalone copy (no sync).
 
 Run the bundled server to keep one workspace in sync across devices:
 
+Keep the server behind a private network or an authenticated reverse proxy.
+Anyone who can reach `/api/config` can obtain the shared token and read or
+change the workspace. The token is not a user login.
+
 ```bash
 VITE_SYNC_URL=/api npm run build
-cd server && GR8R_TOKEN=<secret> npm start    # app + sync API on :4180
+cd server && GR8R_TOKEN=<secret> npm start    # app + sync API on 127.0.0.1:4180
 ```
 
 - `GR8R_TOKEN` is the single shared bearer token. The client fetches it from
@@ -116,3 +120,29 @@ The client fetches its sync token from `/api/config` at startup, so changing
 `GR8R_TOKEN` just takes another `docker compose up -d` — no rebuild. Workspace
 state lives in the `gr8r-data` volume (mounted at
 `/app/server/data`); override paths with `GR8R_DATA` / `DIST` to mount your own.
+
+### Open the app through Tailscale
+
+The Compose file publishes port 4180 on loopback only. Use
+[Tailscale Serve](https://tailscale.com/docs/solutions/host-private-server-docker)
+on the host to provide private HTTPS access without another proxy or container.
+
+1. Join the host to your tailnet and start the app with Docker Compose.
+2. Check `tailscale serve status` so you do not replace an existing service.
+3. If HTTPS port 443 is free, run `tailscale serve --bg 4180`.
+   If another app uses 443, use a separate port:
+
+   ```bash
+   tailscale serve --bg --https=8443 4180
+   ```
+
+4. Open the HTTPS URL printed by Serve from a device connected to your tailnet.
+   Bookmark that URL or add it to your phone's home screen.
+
+Serve manages the HTTPS certificate and resumes after a host or Tailscale
+restart. Tailnet access rules control who can reach the app. Do not enable
+Tailscale Funnel, which would publish it to the internet.
+
+Check `tailscale serve status` and `docker compose ps` after an update. To stop
+only the app's HTTPS listener on port 8443, run
+`tailscale serve --https=8443 off`. Do not reset all Serve routes.
