@@ -99,6 +99,8 @@ cd server && GR8R_TOKEN=<secret> npm start    # app + sync API on :4180
   `PORT`, `HOST`, `GR8R_DATA`
   (state file) and `DIST` (static dir) can be overridden through the environment.
 - The server keeps the workspace blob and a revision in `server/data/state.json`.
+  A push advances the revision only after the state file is written. An unreadable
+  or invalid existing state file stops startup instead of starting an empty workspace.
   `POST /api/sync` accepts a push whose `baseRev` matches the current revision
   and answers `409` with the newer state otherwise; the client then adopts it.
 - Clients save locally first, push (debounced) on every change, and pull at boot,
