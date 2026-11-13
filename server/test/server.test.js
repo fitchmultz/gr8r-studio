@@ -13,7 +13,10 @@ const state = marker => ({ data: { tasks: [{ id: 't1', title: marker }] }, prefs
 async function withServer(t, opts = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gr8r-test-'));
   const srv = await startServer({ token: 'secret', dataFile: path.join(tmp, 'state.json'), distDir: tmp, ...opts });
-  t.after(() => srv.close());
+  t.after(async () => {
+    await srv.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
   return { ...srv, tmp, base: `http://127.0.0.1:${srv.port}` };
 }
 const auth = { authorization: 'Bearer secret' };
@@ -50,6 +53,60 @@ test('accepts a push at the current revision and returns the next one', async t 
   const j = await (await fetch(base + '/api/state', { headers: auth })).json();
   assert.equal(j.rev, 1);
   assert.equal(j.state.data.tasks[0].title, 'first');
+});
+
+test('a failed disk write keeps the last saved state and revision', async t => {
+  const { base, tmp, dataFile } = await withServer(t);
+  const send = (baseRev, title) =>
+    fetch(base + '/api/sync', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ baseRev, state: state(title) }),
+    });
+  assert.equal((await send(0, 'saved')).status, 200);
+  fs.chmodSync(tmp, 0o500);
+  try {
+    assert.equal((await send(1, 'not saved')).status, 500);
+    const current = await (await fetch(base + '/api/state', { headers: auth })).json();
+    assert.deepEqual(current, { rev: 1, state: state('saved') });
+    assert.deepEqual(JSON.parse(fs.readFileSync(dataFile, 'utf8')), current);
+  } finally {
+    fs.chmodSync(tmp, 0o700);
+  }
+  assert.equal((await send(1, 'retried')).status, 200);
+  assert.equal((await (await fetch(base + '/api/state', { headers: auth })).json()).rev, 2);
+});
+
+test('an unreadable workspace prevents startup instead of starting empty', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gr8r-unreadable-'));
+  const dataFile = path.join(tmp, 'state.json');
+  const first = await startServer({ token: 'secret', dataFile, distDir: tmp });
+  let second;
+  try {
+    assert.equal(
+      (
+        await fetch(`http://127.0.0.1:${first.port}/api/sync`, {
+          method: 'POST',
+          headers: { ...auth, 'content-type': 'application/json' },
+          body: JSON.stringify({ baseRev: 0, state: state('kept') }),
+        })
+      ).status,
+      200,
+    );
+    await first.close();
+    fs.chmodSync(dataFile, 0o000);
+    await assert.rejects(
+      async () => {
+        second = await startServer({ token: 'secret', dataFile, distDir: tmp });
+      },
+      { code: 'EACCES' },
+    );
+  } finally {
+    fs.chmodSync(dataFile, 0o600);
+    if (first.server.listening) await first.close();
+    await second?.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('rejects a stale push with the current state', async t => {
