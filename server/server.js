@@ -2,7 +2,7 @@
    authoritative synced workspace state. See README "Self-hosting".
 
    GR8R_TOKEN=<secret> npm start
-   Environment: PORT (4180), HOST (0.0.0.0), GR8R_TOKEN (required),
+   Environment: PORT (4180), HOST (127.0.0.1), GR8R_TOKEN (required),
    GR8R_DATA (state file), DIST (static directory). */
 import { createServer } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
@@ -150,7 +150,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   }
   const { port, dataFile, distDir } = await startServer({
     port: +(process.env.PORT || 4180),
-    host: process.env.HOST || '0.0.0.0',
+    host: process.env.HOST || '127.0.0.1',
     token: process.env.GR8R_TOKEN,
     dataFile: process.env.GR8R_DATA,
     distDir: process.env.DIST,
