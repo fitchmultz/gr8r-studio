@@ -1,5 +1,5 @@
 /* ---------- optional sync with a self-hosted server (README: Self-hosting) ---------- */
-import { getRev, hydrate, setOnSave, stampRev } from './store.js';
+import { getPendingSave, getRev, hydrate, setOnSave, stampRev } from './store.js';
 import { render } from '../shell/render.js';
 import { toast } from '../ui/toast.js';
 
@@ -20,13 +20,11 @@ const warnAuth = () => {
   toast("Sync is off — the server rejected this device's token. Check GR8R_TOKEN.", { kind: 'err' });
 };
 
-let pending = null;
 let pushing = false;
 let pushT = 0;
 
-export function queuePush(blob) {
+function queuePush() {
   if (!syncOn) return;
-  pending = blob;
   clearTimeout(pushT);
   pushT = setTimeout(push, 1000);
 }
@@ -58,9 +56,8 @@ async function push() {
   if (!syncOn || pushing) return;
   pushing = true;
   try {
-    while (pending) {
-      const blob = pending;
-      pending = null;
+    while (getPendingSave()) {
+      const blob = getPendingSave();
       let r;
       try {
         r = await authedFetch('/sync', {
@@ -69,31 +66,26 @@ async function push() {
           body: JSON.stringify({ baseRev: getRev(), state: { data: blob.data, prefs: blob.prefs, views: blob.views, collapsed: blob.collapsed } }),
         });
       } catch {
-        /* offline or server down: keep the blob queued; the next pull or save retries it */
-        pending = pending || blob;
+        /* The store retains the pending snapshot, including across reloads. */
         return;
       }
       if (!r) {
         /* no token yet: the next pull or save re-fetches the config first */
-        pending = pending || blob;
         return;
       }
       if (r.status === 409) {
         const j = await r.json();
         if (!j.state) {
           /* the server lost its data: retry this blob at revision 0 to re-seed it */
-          stampRev(0, blob);
-          pending = pending || blob;
+          stampRev(j.rev);
           continue;
         }
-        pending = null; /* last writer wins: anything queued mid-flight is stale */
         adopt(j.rev, j.state);
         toast('Loaded a newer version from your other device', { kind: 'info' });
         return;
       }
       if (!r.ok) {
         if (r.status === 401) warnAuth();
-        pending = pending || blob;
         return;
       }
       authWarned = false;
@@ -105,7 +97,8 @@ async function push() {
 }
 
 async function pull() {
-  if (!syncOn) return;
+  if (!syncOn || pushing) return;
+  if (getPendingSave()) return push();
   try {
     const r = await authedFetch('/state');
     if (!r) return;
@@ -115,11 +108,8 @@ async function pull() {
     }
     authWarned = false;
     const j = await r.json();
+    if (getPendingSave() || pushing) return;
     if (j.state && j.rev > getRev()) adopt(j.rev, j.state);
-    if (pending) {
-      clearTimeout(pushT);
-      pushT = setTimeout(push, 500);
-    }
   } catch {
     /* offline: the next interval retries (and re-fetches the config if needed) */
   }
