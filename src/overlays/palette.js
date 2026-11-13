@@ -97,31 +97,24 @@ export function paletteItems() {
   const sc = pl.mode === 'search' ? pl.scope : 'all';
   const lim = sc === 'all' ? 4 : 12;
   if (pl.mode === 'search' && !q) {
-    groups.push({
-      name: 'Recent searches',
-      items: D().recentSearches.map(s => ({
-        icon: 'history',
-        name: s,
-        run: () => {
-          pl.q = s;
-          pl.hl = 0;
-          render();
-        },
-      })),
-    });
+    if (D().recentSearches.length)
+      groups.push({
+        name: 'Recent searches',
+        items: D().recentSearches.map(s => ({
+          icon: 'history',
+          name: s,
+          run: () => {
+            pl.q = s;
+            pl.hl = 0;
+            render();
+          },
+        })),
+      });
     groups.push({
       name: 'Suggested',
       items: [
         { icon: 'clock-alert', name: 'Overdue tasks', run: () => A.goTasks({ dataset: { f: 'overdue' } }) },
         { icon: 'user', name: 'Tasks assigned to me', run: () => go('mytasks') },
-        {
-          icon: 'signal-high',
-          name: 'High priority in Website Redesign',
-          run: () => {
-            go('project', { id: 'p1', tab: 'v:v1' });
-          },
-        },
-        { icon: 'paperclip', name: 'Files in Website Redesign', run: () => go('project', { id: 'p1', tab: 'files' }) },
       ],
     });
     return groups;

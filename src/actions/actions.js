@@ -1504,7 +1504,7 @@ A.submitInvite = () => {
   const raw = $('#inv-emails').value;
   S.ui.inviteDraft = raw;
   const role = $('#inv-role').value;
-  const team = $('#inv-team').value;
+  const team = $('#inv-team')?.value || '';
   const list = raw
     .split(/[\s,;]+/)
     .map(s => s.trim())
