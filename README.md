@@ -38,7 +38,7 @@ src/
     base.css  components.css  shell.css  panels.css  overlays.css  states.css  motion.css  responsive.css
     views/              list, board, table, calendar, timeline, projects & files
     pages/              settings, auth & onboarding
-  core/                 utilities, constants, icons, store (state + lookups), theme
+  core/                 utilities, constants, icons, store (state + lookups), theme, optional sync
   data/seed.js          starter workspace data
   ui/                   shared render helpers, toasts, the select dropdown
   shell/                render loop and router, sidebar/topbar layout, skeletons, view engine
@@ -48,6 +48,9 @@ src/
   overlays/             task drawer, modals, popovers, context menu, command palette
   features/             teams, subtasks, archive (rendering)
   actions/              user actions, event wiring, keyboard shortcuts, drag and drop
+server/
+  server.js             optional self-hosted sync server: serves dist/ and the sync API
+  test/                 server protocol tests (node --test)
 ```
 
 ### Layers
@@ -74,9 +77,29 @@ Dependencies point downward:
 
 ## Continuous integration
 
-Every push and pull request runs lint, the format check and a production build
-(`.github/workflows/ci.yml`).
+Every push and pull request runs lint, the format check, a production build and the
+server tests (`.github/workflows/ci.yml`).
 
 ## Deploy
 
-`vercel.json` builds with Vite and serves `dist/`.
+`vercel.json` builds with Vite and serves `dist/` — a static deploy works, but each
+browser keeps its own standalone copy (no sync).
+
+## Self-hosting with sync
+
+Run the bundled server to keep one workspace in sync across devices:
+
+```bash
+VITE_SYNC_URL=/api VITE_SYNC_TOKEN=<secret> npm run build
+cd server && GR8R_TOKEN=<secret> npm start    # app + sync API on :4180
+```
+
+- `GR8R_TOKEN` is the single shared bearer token. `PORT`, `HOST`, `GR8R_DATA`
+  (state file) and `DIST` (static dir) can be overridden through the environment.
+- The server keeps the workspace blob and a revision in `server/data/state.json`.
+  `POST /api/sync` accepts a push whose `baseRev` matches the current revision
+  and answers `409` with the newer state otherwise; the client then adopts it.
+- Clients save locally first, push (debounced) on every change, and pull at boot,
+  every 30 seconds, and when another tab on the same device changes state.
+- Two devices that edit offline at the same time: the last push wins, and the
+  earlier device's offline edits are replaced when it reconnects.
