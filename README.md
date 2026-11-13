@@ -39,7 +39,7 @@ src/
     views/              list, board, table, calendar, timeline, projects & files
     pages/              settings, auth & onboarding
   core/                 utilities, constants, icons, store (state + lookups), theme
-  data/seed.js          demo workspace data
+  data/seed.js          starter workspace data
   ui/                   shared render helpers, toasts, the select dropdown
   shell/                render loop and router, sidebar/topbar layout, skeletons, view engine
   components/           task list renderer
