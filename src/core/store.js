@@ -32,10 +32,15 @@ export function load() {
   return null;
 }
 export const saved = load();
+
+/* rev is the sync server's revision for this workspace; 0 when never synced. */
+let rev = saved?.rev || 0;
+export const getRev = () => rev;
+
 export const S = {
-  data: saved?.data || seed(),
-  prefs: Object.assign({}, DEFAULT_PREFS, saved?.prefs || {}),
-  views: saved?.views || {},
+  data: null,
+  prefs: {},
+  views: {},
   ui: {
     fx: {},
     auth: null,
@@ -45,7 +50,7 @@ export const S = {
     route: 'home',
     params: {},
     history: [],
-    collapsed: !!saved?.collapsed,
+    collapsed: false,
     mnav: false,
     expanded: { p1: true },
     drawer: null,
@@ -82,15 +87,41 @@ export const S = {
     drafts: {},
   },
 };
+hydrate(saved);
+
+/* hydrate: point S's persisted sections at a saved blob (or the seed when absent). */
+export function hydrate(b) {
+  S.data = b?.data || seed();
+  S.prefs = Object.assign({}, DEFAULT_PREFS, b?.prefs || {});
+  S.views = b?.views || {};
+  S.ui.collapsed = !!b?.collapsed;
+}
+
+/* The persisted blob: everything a device needs to boot, plus the last-synced rev. */
+export const blobNow = r => ({ rev: r, data: S.data, prefs: S.prefs, views: S.views, collapsed: S.ui.collapsed });
+function persist(blob) {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(blob));
+  } catch {
+    /* storage full or blocked: keep working in memory */
+  }
+}
+/* stampRev: record the server's revision; persist the pushed blob when given
+   (exactly what the server holds), otherwise the current state. */
+export function stampRev(r, blob) {
+  rev = r;
+  persist(blob ? { ...blob, rev: r } : blobNow(r));
+}
+
+let onSave = null;
+export const setOnSave = fn => (onSave = fn);
 export let _saveT;
 export function save() {
   clearTimeout(_saveT);
   _saveT = setTimeout(() => {
-    try {
-      localStorage.setItem(STORE_KEY, JSON.stringify({ data: S.data, prefs: S.prefs, views: S.views, collapsed: S.ui.collapsed }));
-    } catch {
-      /* storage full or blocked: keep working in memory */
-    }
+    const blob = blobNow(rev);
+    persist(blob);
+    onSave?.(blob);
   }, 150);
 }
 

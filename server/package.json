@@ -1,0 +1,11 @@
+{
+  "name": "gr8r-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-hosted sync server for Gr8r Studio: serves the built app and the sync API.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test 'test/*.test.js'"
+  }
+}

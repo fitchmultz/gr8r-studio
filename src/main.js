@@ -54,6 +54,7 @@ import './features/archive.js';
 import './actions/teams.js';
 import './actions/subtasks.js';
 import './actions/archive.js';
+import { initSync } from './core/sync.js';
 import { S, D } from './core/store.js';
 import { A } from './actions/actions.js';
 import { ROUTE_NAMES, render, go } from './shell/render.js';
@@ -73,6 +74,7 @@ import { ROUTE_NAMES, render, go } from './shell/render.js';
   else if (h && ROUTE_NAMES[h]) S.ui.route = h;
   else S.ui.route = S.prefs.home || 'home';
   render();
+  initSync();
 })();
 
 // Dev-only handle for debugging and screenshot tooling; stripped from production builds.
