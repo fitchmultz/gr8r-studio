@@ -1,15 +1,14 @@
 # Build the client, then ship the sync server with the built app.
-# The client token is baked into the bundle at build time (single-user app) and
-# is delivered through a BuildKit secret mount so it never lands in image
-# history. GR8R_TOKEN stays a runtime secret for the API.
+# The client fetches its sync token from GET /api/config at runtime, so no
+# token is needed at build time: rotating GR8R_TOKEN only restarts the
+# container, and a cached build can never ship a stale token.
 FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
 ARG VITE_SYNC_URL=/api
-RUN --mount=type=secret,id=vite_token,required=true \
-    VITE_SYNC_URL=$VITE_SYNC_URL VITE_SYNC_TOKEN="$(cat /run/secrets/vite_token)" npm run build
+RUN VITE_SYNC_URL=$VITE_SYNC_URL npm run build
 
 FROM node:22-alpine
 WORKDIR /app

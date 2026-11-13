@@ -1,14 +1,12 @@
 # One container: the built app and the sync API.
-# GR8R_TOKEN authorizes the API at runtime and is baked into the client
-# bundle at build time, so export it before running compose.
+# GR8R_TOKEN authorizes the API at runtime; the client fetches it from
+# /api/config at startup, so no token is needed at build time.
 services:
   gr8r:
     build:
       context: .
       args:
         VITE_SYNC_URL: /api
-      secrets:
-        - vite_token
     environment:
       GR8R_TOKEN: ${GR8R_TOKEN:?export GR8R_TOKEN first}
       PORT: 4180
@@ -20,7 +18,3 @@ services:
 
 volumes:
   gr8r-data:
-
-secrets:
-  vite_token:
-    environment: GR8R_TOKEN

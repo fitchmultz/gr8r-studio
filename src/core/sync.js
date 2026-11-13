@@ -3,12 +3,20 @@ import { getRev, hydrate, setOnSave, stampRev } from './store.js';
 import { render } from '../shell/render.js';
 import { toast } from '../ui/toast.js';
 
-/* Build-time config: VITE_SYNC_URL ('/api' when this server serves the app) and
-   VITE_SYNC_TOKEN. Unset → the app stays standalone. */
+/* Sync config: VITE_SYNC_URL ('/api' when this server serves the app), unset →
+   the app stays standalone. The token is fetched from GET /api/config at
+   startup so rotating GR8R_TOKEN only restarts the server; VITE_SYNC_TOKEN
+   remains as a build-time fallback. */
 const BASE = import.meta.env.VITE_SYNC_URL;
-const TOKEN = import.meta.env.VITE_SYNC_TOKEN || '';
-const auth = TOKEN ? { authorization: 'Bearer ' + TOKEN } : {};
+let TOKEN = import.meta.env.VITE_SYNC_TOKEN || '';
+let auth = TOKEN ? { authorization: 'Bearer ' + TOKEN } : {};
 const syncOn = !!BASE;
+let authWarned = false;
+const warnAuth = () => {
+  if (authWarned) return;
+  authWarned = true;
+  toast("Sync is off — the server rejected this device's token. Check GR8R_TOKEN.", { kind: 'err' });
+};
 
 let pending = null;
 let pushing = false;
@@ -54,9 +62,11 @@ async function push() {
         return;
       }
       if (!r.ok) {
+        if (r.status === 401) warnAuth();
         pending = pending || blob;
         return;
       }
+      authWarned = false;
       stampRev((await r.json()).rev, blob);
     }
   } finally {
@@ -68,7 +78,11 @@ async function pull() {
   if (!syncOn) return;
   try {
     const r = await fetch(BASE + '/state', { headers: auth });
-    if (!r.ok) return;
+    if (!r.ok) {
+      if (r.status === 401) warnAuth();
+      return;
+    }
+    authWarned = false;
     const j = await r.json();
     if (j.state && j.rev > getRev()) adopt(j.rev, j.state);
     if (pending) {
@@ -86,8 +100,20 @@ function adopt(rev, state) {
   render();
 }
 
-export function initSync() {
+export async function initSync() {
   if (!syncOn) return;
+  try {
+    const r = await fetch(BASE + '/config');
+    if (r.ok) {
+      const t = (await r.json()).token;
+      if (t) {
+        TOKEN = t;
+        auth = { authorization: 'Bearer ' + TOKEN };
+      }
+    }
+  } catch {
+    /* server not reachable yet: the pull below and its interval retry */
+  }
   setOnSave(queuePush);
   pull();
   setInterval(pull, 30000);
