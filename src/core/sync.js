@@ -4,9 +4,11 @@ import { render } from '../shell/render.js';
 import { toast } from '../ui/toast.js';
 
 /* Sync config: VITE_SYNC_URL ('/api' when this server serves the app), unset →
-   the app stays standalone. The token is fetched from GET /api/config at
-   startup so rotating GR8R_TOKEN only restarts the server; VITE_SYNC_TOKEN
-   remains as a build-time fallback. */
+   the app stays standalone. The token comes from GET /api/config: fetched
+   lazily before the first request and refreshed once on a 401, so a failed
+   boot fetch or a server-side token rotation recovers on the next pull
+   instead of stranding the page unauthenticated. VITE_SYNC_TOKEN remains as
+   a build-time fallback. */
 const BASE = import.meta.env.VITE_SYNC_URL;
 let TOKEN = import.meta.env.VITE_SYNC_TOKEN || '';
 let auth = TOKEN ? { authorization: 'Bearer ' + TOKEN } : {};
@@ -29,6 +31,29 @@ export function queuePush(blob) {
   pushT = setTimeout(push, 1000);
 }
 
+async function loadConfig() {
+  try {
+    const r = await fetch(BASE + '/config');
+    if (!r.ok) return false;
+    const t = (await r.json()).token;
+    if (!t) return false;
+    TOKEN = t;
+    auth = { authorization: 'Bearer ' + TOKEN };
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/* Authenticated request: pick up the token if we never got one; on a 401,
+   the server may have rotated its token, so refresh it once and try again. */
+async function authedFetch(path, opts = {}) {
+  if (!TOKEN && !(await loadConfig())) return null;
+  let r = await fetch(BASE + path, { ...opts, headers: { ...auth, ...(opts.headers || {}) } });
+  if (r.status === 401 && (await loadConfig())) r = await fetch(BASE + path, { ...opts, headers: { ...auth, ...(opts.headers || {}) } });
+  return r;
+}
+
 async function push() {
   if (!syncOn || pushing) return;
   pushing = true;
@@ -38,13 +63,18 @@ async function push() {
       pending = null;
       let r;
       try {
-        r = await fetch(BASE + '/sync', {
+        r = await authedFetch('/sync', {
           method: 'POST',
-          headers: { ...auth, 'content-type': 'application/json' },
+          headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ baseRev: getRev(), state: { data: blob.data, prefs: blob.prefs, views: blob.views, collapsed: blob.collapsed } }),
         });
       } catch {
         /* offline or server down: keep the blob queued; the next pull or save retries it */
+        pending = pending || blob;
+        return;
+      }
+      if (!r) {
+        /* no token yet: the next pull or save re-fetches the config first */
         pending = pending || blob;
         return;
       }
@@ -77,7 +107,8 @@ async function push() {
 async function pull() {
   if (!syncOn) return;
   try {
-    const r = await fetch(BASE + '/state', { headers: auth });
+    const r = await authedFetch('/state');
+    if (!r) return;
     if (!r.ok) {
       if (r.status === 401) warnAuth();
       return;
@@ -90,7 +121,7 @@ async function pull() {
       pushT = setTimeout(push, 500);
     }
   } catch {
-    /* offline: the next interval retries */
+    /* offline: the next interval retries (and re-fetches the config if needed) */
   }
 }
 
@@ -100,20 +131,8 @@ function adopt(rev, state) {
   render();
 }
 
-export async function initSync() {
+export function initSync() {
   if (!syncOn) return;
-  try {
-    const r = await fetch(BASE + '/config');
-    if (r.ok) {
-      const t = (await r.json()).token;
-      if (t) {
-        TOKEN = t;
-        auth = { authorization: 'Bearer ' + TOKEN };
-      }
-    }
-  } catch {
-    /* server not reachable yet: the pull below and its interval retry */
-  }
   setOnSave(queuePush);
   pull();
   setInterval(pull, 30000);
