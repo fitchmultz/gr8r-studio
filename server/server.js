@@ -112,20 +112,27 @@ export function startServer({ port = 0, host = '127.0.0.1', token, dataFile, dis
   }
 
   const server = createServer((req, res) => {
-    const url = new URL(req.url, 'http://localhost');
-    if (url.pathname.startsWith('/api/')) {
-      api(req, res, url).catch(e => {
-        console.error(e);
-        if (!res.headersSent) send(res, 500, { error: 'internal' });
-      });
-      return;
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      if (url.pathname.startsWith('/api/')) {
+        api(req, res, url).catch(e => {
+          console.error(e);
+          if (!res.headersSent && !res.destroyed) send(res, 500, { error: 'internal' });
+        });
+        return;
+      }
+      if (req.method !== 'GET') return send(res, 405, { error: 'method not allowed' });
+      serveStatic(res, url);
+    } catch {
+      /* a malformed request target or undecodable path must never take the server down */
+      if (!res.headersSent && !res.destroyed) send(res, 400, { error: 'bad request' });
     }
-    if (req.method !== 'GET') return send(res, 405, { error: 'method not allowed' });
-    serveStatic(res, url);
   });
 
   return new Promise(resolve => {
-    server.listen(port, host, () => resolve({ server, port: server.address().port, close: () => new Promise(done => server.close(done)) }));
+    server.listen(port, host, () =>
+      resolve({ server, port: server.address().port, dataFile: DATA, distDir: DIST, close: () => new Promise(done => server.close(done)) }),
+    );
   });
 }
 
@@ -135,10 +142,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     console.error('gr8r-server: GR8R_TOKEN is required (the sync bearer token).');
     process.exit(1);
   }
-  const { port } = await startServer({
+  const { port, dataFile, distDir } = await startServer({
     port: +(process.env.PORT || 4180),
     host: process.env.HOST || '0.0.0.0',
     token: process.env.GR8R_TOKEN,
+    dataFile: process.env.GR8R_DATA,
+    distDir: process.env.DIST,
   });
-  console.log(`gr8r-server: http://localhost:${port} (state in ${path.join(HERE, 'data', 'state.json')})`);
+  console.log(`gr8r-server: http://localhost:${port} (state in ${dataFile}, app in ${distDir})`);
 }

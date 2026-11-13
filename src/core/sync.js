@@ -28,27 +28,37 @@ async function push() {
     while (pending) {
       const blob = pending;
       pending = null;
-      const r = await fetch(BASE + '/sync', {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({ baseRev: getRev(), state: { data: blob.data, prefs: blob.prefs, views: blob.views, collapsed: blob.collapsed } }),
-      });
+      let r;
+      try {
+        r = await fetch(BASE + '/sync', {
+          method: 'POST',
+          headers: { ...auth, 'content-type': 'application/json' },
+          body: JSON.stringify({ baseRev: getRev(), state: { data: blob.data, prefs: blob.prefs, views: blob.views, collapsed: blob.collapsed } }),
+        });
+      } catch {
+        /* offline or server down: keep the blob queued; the next pull or save retries it */
+        pending = pending || blob;
+        return;
+      }
       if (r.status === 409) {
         const j = await r.json();
         if (!j.state) {
-          /* the server lost its data (fresh install): re-seed it from this device */
+          /* the server lost its data: retry this blob at revision 0 to re-seed it */
           stampRev(0, blob);
+          pending = pending || blob;
           continue;
         }
+        pending = null; /* last writer wins: anything queued mid-flight is stale */
         adopt(j.rev, j.state);
         toast('Loaded a newer version from your other device', { kind: 'info' });
         return;
       }
-      if (!r.ok) throw new Error('push failed: ' + r.status);
+      if (!r.ok) {
+        pending = pending || blob;
+        return;
+      }
       stampRev((await r.json()).rev, blob);
     }
-  } catch {
-    /* offline or server down: local state is safe in localStorage; the next save or poll retries */
   } finally {
     pushing = false;
   }

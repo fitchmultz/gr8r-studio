@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { startServer } from '../server.js';
 
 const state = marker => ({ data: { tasks: [{ id: 't1', title: marker }] }, prefs: {}, views: {}, collapsed: false });
@@ -93,4 +96,56 @@ test('serves the built app with a hash-routing fallback', async t => {
   assert.equal(asset.headers.get('content-type'), 'text/javascript; charset=utf-8');
   const fallback = await fetch(base + '/anything/else');
   assert.match(await fallback.text(), /gr8r/);
+});
+
+test('a malformed request path gets 400 and the server keeps serving', async t => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gr8r-badpath-'));
+  fs.writeFileSync(path.join(tmp, 'index.html'), '<!doctype html><title>gr8r</title>');
+  const { base } = await withServer(t, { distDir: tmp });
+  assert.equal((await fetch(base + '/%')).status, 400);
+  const raw = await new Promise((resolve, reject) => {
+    const sock = net.connect(+new URL(base).port, '127.0.0.1', () => sock.write('GET //[ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'));
+    let data = '';
+    sock.on('data', c => (data += c));
+    sock.on('end', () => resolve(data));
+    sock.on('error', reject);
+  });
+  assert.match(raw, /^HTTP\/1\.1 400/);
+  assert.match(await (await fetch(base + '/')).text(), /gr8r/);
+});
+
+test('the CLI requires a token and honors GR8R_DATA, DIST and PORT', async t => {
+  const serverPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'server.js');
+  const noToken = spawn(process.execPath, [serverPath], { env: { ...process.env, GR8R_TOKEN: '' } });
+  assert.equal(await new Promise(done => noToken.on('exit', done)), 1);
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gr8r-cli-'));
+  fs.mkdirSync(path.join(tmp, 'dist'));
+  fs.writeFileSync(path.join(tmp, 'dist', 'index.html'), '<!doctype html><title>cli</title>');
+  const dataFile = path.join(tmp, 'data', 'state.json');
+  const child = spawn(process.execPath, [serverPath], {
+    env: { ...process.env, GR8R_TOKEN: 'secret', PORT: '4191', HOST: '127.0.0.1', GR8R_DATA: dataFile, DIST: path.join(tmp, 'dist') },
+  });
+  t.after(() => child.kill());
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('server did not start')), 5000);
+    child.stdout.on('data', d => {
+      if (/gr8r-server:/.test(String(d))) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    child.stderr.on('data', d => {
+      clearTimeout(timer);
+      reject(new Error(String(d)));
+    });
+  });
+  assert.match(await (await fetch('http://127.0.0.1:4191/')).text(), /cli/);
+  const push = await fetch('http://127.0.0.1:4191/api/sync', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ baseRev: 0, state: state('cli') }),
+  });
+  assert.equal(push.status, 200);
+  assert.ok(fs.existsSync(dataFile), 'state written at GR8R_DATA');
 });
