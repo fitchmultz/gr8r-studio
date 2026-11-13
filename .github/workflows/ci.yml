@@ -19,3 +19,6 @@ jobs:
       - run: npm run format:check
       - run: npm run build
       - run: npm test
+      - run: docker build --build-arg VITE_SYNC_URL=/api --secret id=vite_token,env=VITE_SYNC_TOKEN .
+        env:
+          VITE_SYNC_TOKEN: ci-placeholder

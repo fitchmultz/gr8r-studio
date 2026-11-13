@@ -103,3 +103,13 @@ cd server && GR8R_TOKEN=<secret> npm start    # app + sync API on :4180
   every 30 seconds, and when another tab on the same device changes state.
 - Two devices that edit offline at the same time: the last push wins, and the
   earlier device's offline edits are replaced when it reconnects.
+
+### Docker
+
+```bash
+GR8R_TOKEN=<secret> docker compose up --build -d    # app + sync API on :4180
+```
+
+The client token is baked into the bundle at build time, so export `GR8R_TOKEN`
+before building. Workspace state lives in the `gr8r-data` volume (mounted at
+`/app/server/data`); override paths with `GR8R_DATA` / `DIST` to mount your own.

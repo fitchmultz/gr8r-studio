@@ -1,0 +1,9 @@
+node_modules
+dist
+server/data
+.git
+.github
+docs
+.env*
+*.log
+README.md
