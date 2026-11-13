@@ -6,3 +6,6 @@ __MACOSX/
 *.log
 .env*
 server/data/
+
+# compose deployments keep GR8R_TOKEN in .env
+.env
