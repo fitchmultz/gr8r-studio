@@ -14,14 +14,14 @@
     "test": "node --test 'server/test/*.test.js'"
   },
   "engines": {
-    "node": ">=18"
+    "node": "^20.19.0 || >=22.12.0"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.5",
-    "eslint": "^9.39.5",
-    "globals": "^15.15.0",
-    "lucide": "^0.460.0",
-    "prettier": "^3.9.9",
-    "vite": "^6.4.4"
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.14.0",
+    "globals": "^17.14.0",
+    "lucide": "^1.72.0",
+    "prettier": "^3.10.1",
+    "vite": "^8.3.8"
   }
 }

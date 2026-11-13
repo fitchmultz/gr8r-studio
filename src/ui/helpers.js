@@ -21,7 +21,7 @@ export function avStack(ids, max = 4, cls = 'sm') {
 export function stIcon(st, s = 14) {
   const c = `var(--st-${st})`;
   const r = 5.4;
-  let inner = '';
+  let inner;
   if (st === 'backlog') inner = `<circle cx="7" cy="7" r="${r}" fill="none" stroke="${c}" stroke-width="1.5" stroke-dasharray="1.9 2.1"/>`;
   else if (st === 'todo') inner = `<circle cx="7" cy="7" r="${r}" fill="none" stroke="${c}" stroke-width="1.5"/>`;
   else if (st === 'progress')
