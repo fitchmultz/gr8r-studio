@@ -15,6 +15,7 @@ import {
   duplicateTask,
   promoteSubtask,
   queryTasks,
+  removeMember,
   removeSubtask,
   searchWorkspace,
   updateProject,
@@ -169,6 +170,62 @@ test('duplicating projects/tasks and moving+completing recurring tasks preserve 
   assert.equal(moveDone.spawned.project, beta.id);
   assert.equal(moveDone.spawned.key, 'BET-202');
   assert.equal(moveDone.spawned.desc, 'Hello &amp; world');
+});
+
+test('stale dependencies, removed members, and archived project queries preserve invariants cleanly', () => {
+  const { data } = createDefaultState(FIXED_NOW);
+  data.members.push({ id: 'm2', name: 'Sam Rivera', email: 'sam@example.com', role: 'Member' });
+
+  const alpha = createProject(data, { name: 'Alpha', key: 'ALP', lead: 'm2', members: ['m2'], status: 'active' }, { now: FIXED_NOW });
+  const beta = createProject(data, { name: 'Beta', key: 'BET', status: 'active' }, { now: FIXED_NOW });
+
+  const depArchived = createTask(data, { project: alpha.id, title: 'Dep Archived' }, { now: FIXED_NOW });
+  const depMoved = createTask(data, { project: alpha.id, title: 'Dep Moved' }, { now: FIXED_NOW });
+  const rec = createTask(
+    data,
+    {
+      project: alpha.id,
+      title: 'Weekly Rollup',
+      assignee: 'm2',
+      deps: [depArchived.id, depMoved.id],
+      due: '2026-11-14',
+      recur: 'Weekly',
+      subtasks: [{ title: 'Check logs', assignee: 'm2' }],
+    },
+    { now: FIXED_NOW },
+  );
+
+  applyTaskPatch(data, depArchived.id, { archived: true }, { now: FIXED_NOW + 100 });
+  applyTaskPatch(data, depMoved.id, { project: beta.id }, { now: FIXED_NOW + 200 });
+  assert.equal(rec.deps.includes(depMoved.id), false);
+
+  removeMember(data, 'm2');
+  assert.equal(alpha.lead, data.me);
+  assert.equal(rec.assignee, null);
+  assert.equal(rec.subtasks[0].assignee, null);
+
+  alpha.lead = 'm_legacy_removed';
+  const alphaDup = duplicateProject(data, alpha.id, { now: FIXED_NOW + 300 });
+  assert.equal(alphaDup.lead, data.me);
+
+  const recDup = duplicateTask(data, rec.id, { now: FIXED_NOW + 400 });
+  assert.deepEqual(recDup.deps, []);
+
+  const doneRes = applyTaskPatch(data, rec.id, { status: 'done' }, { now: FIXED_NOW + 500 });
+  assert.equal(doneRes.completed, true);
+  assert.ok(doneRes.spawned);
+  assert.deepEqual(doneRes.spawned.deps, []);
+
+  updateProject(data, beta.id, { archived: true }, { now: FIXED_NOW + 600 });
+  assert.equal(
+    queryTasks(data, {}).some(t => t.project === beta.id),
+    false,
+  );
+  assert.equal(queryTasks(data, { project: beta.id }).length, 1);
+  assert.equal(
+    queryTasks(data, { archived: 'ALL' }).some(t => t.project === beta.id),
+    true,
+  );
 });
 
 test('subtask lifecycle, promotion, and workspace queries share identical invariants', () => {

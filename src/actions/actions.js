@@ -19,6 +19,7 @@ import {
   duplicateTask as domainDuplicateTask,
   makeProjectKey,
   nextTaskKey,
+  removeMember as domainRemoveMember,
   removeSubtask as domainRemoveSubtask,
   toggleReaction as domainToggleReaction,
   updateProject as domainUpdateProject,
@@ -456,12 +457,12 @@ A.editTask = el => {
     desc: htmlToMarkdown(t.desc),
     project: t.project,
     status: t.status,
-    assignee: t.assignee,
+    assignee: mem(t.assignee)?.id || null,
     priority: t.priority,
     due: t.due,
     start: t.start,
     labels: [...t.labels],
-    subtasks: t.subtasks.map(s => ({ ...s })),
+    subtasks: t.subtasks.map(s => ({ ...s, assignee: mem(s.assignee)?.id || null })),
     files: [],
     recur: t.recur,
     more: false,
@@ -1133,7 +1134,16 @@ A.newProject = () => {
 A.editProject = el => {
   const p = proj(el.dataset.id);
   S.ui.pop = null;
-  S.ui.pform = { name: p.name, desc: p.desc, icon: p.icon, color: p.color, team: p.team, lead: p.lead, due: p.due, tmpl: 'blank' };
+  S.ui.pform = {
+    name: p.name,
+    desc: p.desc,
+    icon: p.icon,
+    color: p.color,
+    team: p.team,
+    lead: mem(p.lead)?.id || D().me,
+    due: p.due,
+    tmpl: 'blank',
+  };
   S.ui.errors = {};
   openModal({ type: 'project', edit: p.id });
 };
@@ -1380,11 +1390,7 @@ A.removeMember = el => {
       const snap = snapshot();
       if (
         mutate(() => {
-          D().members = D().members.filter(x => x !== m);
-          D().tasks.forEach(t => {
-            if (t.assignee === m.id) t.assignee = null;
-          });
-          D().projects.forEach(p => (p.members = p.members.filter(x => x !== m.id)));
+          domainRemoveMember(D(), m);
         })
       ) {
         if (S.ui.route === 'member') go('members');

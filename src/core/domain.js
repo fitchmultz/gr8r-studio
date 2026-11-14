@@ -111,6 +111,31 @@ export function resolveMember(data, ref) {
   throw new DomainError(`Member not found: ${ref}`, 400);
 }
 
+function validMemberId(data, id) {
+  return id && findMember(data, id) ? id : null;
+}
+
+export function removeMember(data, memberOrRef) {
+  const m = typeof memberOrRef === 'object' && memberOrRef?.id ? findMember(data, memberOrRef.id) : findMember(data, String(memberOrRef ?? '').trim());
+  if (!m) throw new DomainError(`Member not found: ${memberOrRef}`, 404);
+  if (m.id === data.me) throw new DomainError('Cannot remove workspace owner');
+  data.members = data.members.filter(x => x.id !== m.id);
+  for (const t of data.tasks) {
+    if (t.assignee === m.id) t.assignee = null;
+    for (const s of t.subtasks || []) {
+      if (s.assignee === m.id) s.assignee = null;
+    }
+  }
+  for (const p of data.projects) {
+    p.members = (p.members || []).filter(id => id !== m.id);
+    if (p.lead === m.id) {
+      p.lead = data.me;
+      if (data.me && !p.members.includes(data.me)) p.members.push(data.me);
+    }
+  }
+  return m;
+}
+
 export function resolveSubtask(task, ref) {
   if (!task || !ref) return null;
   if (typeof ref === 'object' && ref.id) return ref;
@@ -161,6 +186,17 @@ function resolveDepIds(data, projectId, selfId, deps) {
     if (selfId && dep.id === selfId) throw new DomainError('A task cannot depend on itself');
     if (projectId && dep.project !== projectId) throw new DomainError(`Dependency ${dep.key} belongs to a different project`);
     if (!out.includes(dep.id)) out.push(dep.id);
+  }
+  return out;
+}
+function activeProjectDeps(data, projectId, deps = [], selfId = null) {
+  const out = [];
+  for (const id of deps) {
+    if (selfId && id === selfId) continue;
+    const dep = findTask(data, id);
+    if (dep && !dep.archived && dep.project === projectId && !out.includes(dep.id)) {
+      out.push(dep.id);
+    }
   }
   return out;
 }
@@ -354,12 +390,12 @@ export function duplicateProject(data, projectOrRef, opts = {}) {
       color: p.color,
       status: p.status,
       team: p.team,
-      lead: p.lead,
+      lead: validMemberId(data, p.lead) || by,
       due: p.due,
       start: p.start,
       desc: p.desc,
       private: p.private,
-      members: [...(p.members || [])],
+      members: (p.members || []).filter(id => validMemberId(data, id)),
       milestones: structuredClone(p.milestones || []),
     },
     { by, now },
@@ -465,6 +501,7 @@ export function duplicateTask(data, taskOrRef, opts = {}) {
   const now = opts.now ?? Date.now();
   const by = opts.by ?? data.me;
   const src = requireTask(data, taskOrRef);
+  const targetProject = requireProject(data, opts.project ?? src.project);
   const status = opts.status ?? src.status;
   const copy = createTask(
     data,
@@ -472,11 +509,16 @@ export function duplicateTask(data, taskOrRef, opts = {}) {
       ...structuredClone(src),
       id: undefined,
       key: undefined,
-      project: opts.project ?? src.project,
+      project: targetProject.id,
       title: opts.title ?? `${src.title} (copy)`,
       status,
-      subtasks: (src.subtasks || []).map(s => ({ ...structuredClone(s), id: uid('s') })),
-      deps: opts.deps ?? [...(src.deps || [])],
+      assignee: opts.assignee !== undefined ? opts.assignee : validMemberId(data, src.assignee),
+      subtasks: (src.subtasks || []).map(s => ({
+        ...structuredClone(s),
+        id: uid('s'),
+        assignee: validMemberId(data, s.assignee),
+      })),
+      deps: opts.deps !== undefined ? opts.deps : activeProjectDeps(data, targetProject.id, src.deps, src.id),
       created: now,
       updated: now,
       fav: false,
@@ -529,13 +571,12 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
   }
   const targetProject = patch.project ?? t.project;
   if (rawPatch.deps !== undefined || rawPatch.addDeps !== undefined || rawPatch.removeDeps !== undefined) {
-    let next =
-      rawPatch.deps !== undefined ? resolveDepIds(data, targetProject, t.id, rawPatch.deps) : t.deps.filter(d => findTask(data, d)?.project === targetProject);
+    let next = rawPatch.deps !== undefined ? resolveDepIds(data, targetProject, t.id, rawPatch.deps) : activeProjectDeps(data, targetProject, t.deps, t.id);
     if (rawPatch.addDeps !== undefined) {
       for (const d of resolveDepIds(data, targetProject, t.id, rawPatch.addDeps)) if (!next.includes(d)) next.push(d);
     }
     if (rawPatch.removeDeps !== undefined) {
-      const rm = new Set(rawPatch.removeDeps.map(r => requireTask(data, r).id));
+      const rm = new Set(rawPatch.removeDeps.map(r => resolveTask(data, r)?.id || String(r).trim()));
       next = next.filter(d => !rm.has(d));
     }
     patch.deps = next;
@@ -590,9 +631,16 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
             id: undefined,
             key: undefined,
             status: 'todo',
+            assignee: validMemberId(data, t.assignee),
             due: nd,
             start: nd,
-            subtasks: t.subtasks.map(s => ({ ...s, done: false })),
+            deps: activeProjectDeps(data, t.project, t.deps, t.id),
+            subtasks: t.subtasks.map(s => ({
+              ...structuredClone(s),
+              id: uid('s'),
+              done: false,
+              assignee: validMemberId(data, s.assignee),
+            })),
             completedAt: null,
             attachments: [],
           },
@@ -608,7 +656,12 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
     else if (k === 'project') {
       const p = requireProject(data, nv);
       t.key = nextTaskKey(data, p);
-      t.deps = t.deps.filter(d => findTask(data, d)?.project === p.id);
+      t.deps = activeProjectDeps(data, p.id, t.deps, t.id);
+      for (const other of data.tasks) {
+        if (other.id !== t.id && other.project !== p.id && other.deps?.includes(t.id)) {
+          other.deps = other.deps.filter(d => d !== t.id);
+        }
+      }
       logActivity(data, 'moved', t, `to ${p.name}`, { by, now });
     } else if (k === 'labels') logActivity(data, 'updated labels on', t, '', { by, now });
     else if (k === 'title') logActivity(data, 'renamed', t, `to “${nv}”`, { by, now });
@@ -710,7 +763,7 @@ export function promoteSubtask(data, taskOrRef, subRef, opts = {}) {
       title: s.title,
       project: t.project,
       status: s.done ? 'done' : 'todo',
-      assignee: s.assignee || t.assignee,
+      assignee: validMemberId(data, s.assignee || t.assignee),
       priority: t.priority,
       due: s.due || null,
       labels: [...t.labels],
@@ -786,19 +839,21 @@ export function queryTasks(data, filters = {}, opts = {}) {
   const now = opts.now ?? Date.now();
   const actor = opts.actor ?? data.me;
   const today = todayDate(now);
-  const includeArchived = filters.archived === true || filters.archived === 'true' || filters.archived === '1';
+  const archivedRaw = typeof filters.archived === 'string' ? filters.archived.trim().toLowerCase() : filters.archived;
+  const includeArchived = archivedRaw === true || archivedRaw === 'true' || archivedRaw === '1' || archivedRaw === 'all';
+  const targetProject = filters.project ? requireProject(data, filters.project) : null;
   let out = data.tasks.filter(t => {
     if (!includeArchived && t.archived) return false;
     const p = findProject(data, t.project);
-    if (!includeArchived && p?.archived) return false;
+    if (targetProject) {
+      if (t.project !== targetProject.id) return false;
+    } else if (!includeArchived && p?.archived) {
+      return false;
+    }
     if (!canSeeProject(data, p, actor)) return false;
     return true;
   });
 
-  if (filters.project) {
-    const p = requireProject(data, filters.project);
-    out = out.filter(t => t.project === p.id);
-  }
   if (filters.status) {
     const vals = String(filters.status)
       .split(',')
