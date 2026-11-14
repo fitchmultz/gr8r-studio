@@ -11,6 +11,8 @@ import {
   createTask,
   deleteProject,
   deleteTasks,
+  duplicateProject,
+  duplicateTask,
   promoteSubtask,
   queryTasks,
   removeSubtask,
@@ -64,7 +66,7 @@ test('task creation enforces sequential keys, date clamping, validation, and mar
       start: '2026-11-20',
       due: '2026-11-16',
       labels: ['Backend', 'frontend'],
-      desc: '#### Summary\n\nShip **UsageDoc** in `chat.ts`.',
+      descMarkdown: '#### Summary\n\nShip **UsageDoc** in `chat.ts`.',
       subtasks: ['Step A', { title: 'Step B', note: 'Verify live' }],
     },
     { now: FIXED_NOW },
@@ -132,6 +134,41 @@ test('applyTaskPatch preserves completion, recurrence, project-move rekeying, an
     false,
   );
   assert.equal(data.comments.length, 0);
+});
+
+test('duplicating projects/tasks and moving+completing recurring tasks preserve HTML and destination project', () => {
+  const { data } = createDefaultState(FIXED_NOW);
+  const alpha = createProject(data, { name: 'Alpha Service', key: 'ALP', status: 'active' }, { now: FIXED_NOW });
+  const beta = createProject(data, { name: 'Beta Service', key: 'BET', status: 'active' }, { now: FIXED_NOW });
+
+  const t1 = createTask(data, { project: alpha.id, title: 'Base', desc: 'Research &amp; <b>development</b>' }, { now: FIXED_NOW });
+  const t2 = createTask(
+    data,
+    { project: alpha.id, title: 'Dependent', deps: [t1.key], due: '2026-11-14', recur: 'Weekly', desc: 'Hello &amp; world' },
+    { now: FIXED_NOW },
+  );
+
+  const dupT1 = duplicateTask(data, t1.id, { now: FIXED_NOW + 100 });
+  assert.equal(dupT1.desc, 'Research &amp; <b>development</b>');
+  assert.equal(dupT1.key, 'ALP-203');
+
+  const alphaCopy = duplicateProject(data, alpha.id, { now: FIXED_NOW + 200 });
+  assert.notEqual(alphaCopy.id, alpha.id);
+  assert.notEqual(alphaCopy.key, alpha.key);
+  const copiedTasks = queryTasks(data, { project: alphaCopy.id });
+  assert.equal(copiedTasks.length, 3);
+  const copiedBase = copiedTasks.find(t => t.title === 'Base');
+  const copiedDep = copiedTasks.find(t => t.title === 'Dependent');
+  assert.equal(copiedBase.desc, 'Research &amp; <b>development</b>');
+  assert.deepEqual(copiedDep.deps, [copiedBase.id]);
+
+  const moveDone = applyTaskPatch(data, t2.id, { project: beta.id, status: 'done' }, { now: FIXED_NOW + 300 });
+  assert.equal(t2.project, beta.id);
+  assert.equal(t2.key, 'BET-201');
+  assert.ok(moveDone.spawned);
+  assert.equal(moveDone.spawned.project, beta.id);
+  assert.equal(moveDone.spawned.key, 'BET-202');
+  assert.equal(moveDone.spawned.desc, 'Hello &amp; world');
 });
 
 test('subtask lifecycle, promotion, and workspace queries share identical invariants', () => {

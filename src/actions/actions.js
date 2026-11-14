@@ -15,6 +15,8 @@ import {
   deleteComment as domainDeleteComment,
   deleteProject as domainDeleteProject,
   deleteTasks as domainDeleteTasks,
+  duplicateProject as domainDuplicateProject,
+  duplicateTask as domainDuplicateTask,
   makeProjectKey,
   nextTaskKey,
   removeSubtask as domainRemoveSubtask,
@@ -408,7 +410,8 @@ A.dupTask = el => {
   S.ui.pop = null;
   let n;
   mutate(() => {
-    n = createTask({ ...JSON.parse(JSON.stringify(t)), id: uid('t'), key: undefined, title: t.title + ' (copy)', created: Date.now(), fav: false });
+    n = domainDuplicateTask(D(), t, { by: D().me });
+    fxSet({ added: n.id });
   });
   toast('Task duplicated', { action: 'Open', onAction: () => A.openTask({ dataset: { id: n.id } }) });
 };
@@ -1209,8 +1212,7 @@ A.dupProject = el => {
   S.ui.pop = null;
   let n;
   mutate(() => {
-    n = createProject({ ...p, name: p.name + ' copy' }, 'blank');
-    tasksOf(p.id).forEach(t => createTask({ ...JSON.parse(JSON.stringify(t)), id: uid('t'), key: undefined, project: n.id, status: 'todo' }));
+    n = domainDuplicateProject(D(), p, { by: D().me });
   });
   toast(`Duplicated ${p.name}`, { action: 'Open', onAction: () => go('project', { id: n.id }) });
 };

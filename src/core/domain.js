@@ -167,11 +167,8 @@ function resolveDepIds(data, projectId, selfId, deps) {
 function resolveDescInput(fields) {
   if (fields.descHtml !== undefined) return String(fields.descHtml ?? '');
   if (fields.descMarkdown !== undefined) return markdownToHtml(fields.descMarkdown);
-  if (fields.desc === undefined) return undefined;
-  const raw = String(fields.desc ?? '');
-  if (!raw.trim()) return '';
-  if (/^\s*<(?:p|h[1-6]|ul|ol|pre|div)\b/i.test(raw)) return raw;
-  return markdownToHtml(raw);
+  if (fields.desc !== undefined) return String(fields.desc ?? '');
+  return undefined;
 }
 
 /* ---------- activity ---------- */
@@ -345,6 +342,48 @@ export function deleteProject(data, projectOrRef) {
   return p;
 }
 
+export function duplicateProject(data, projectOrRef, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const by = opts.by ?? data.me;
+  const p = requireProject(data, projectOrRef);
+  const copy = createProject(
+    data,
+    {
+      name: opts.name ?? `${p.name} copy`,
+      icon: p.icon,
+      color: p.color,
+      status: p.status,
+      team: p.team,
+      lead: p.lead,
+      due: p.due,
+      start: p.start,
+      desc: p.desc,
+      private: p.private,
+      members: [...(p.members || [])],
+      milestones: structuredClone(p.milestones || []),
+    },
+    { by, now },
+  );
+  const srcTasks = tasksOfProject(data, p.id);
+  const idMap = new Map();
+  for (const src of srcTasks) {
+    const dup = duplicateTask(data, src, {
+      project: copy.id,
+      title: src.title,
+      status: 'todo',
+      deps: [],
+      by,
+      now,
+    });
+    idMap.set(src.id, dup);
+  }
+  for (const src of srcTasks) {
+    const dup = idMap.get(src.id);
+    dup.deps = (src.deps || []).map(d => idMap.get(d)?.id).filter(Boolean);
+  }
+  return copy;
+}
+
 /* ---------- tasks ---------- */
 export function nextTaskKey(data, project) {
   const prefix = project.key + '-';
@@ -422,6 +461,36 @@ export function createTask(data, fields = {}, opts = {}) {
   return t;
 }
 
+export function duplicateTask(data, taskOrRef, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const by = opts.by ?? data.me;
+  const src = requireTask(data, taskOrRef);
+  const status = opts.status ?? src.status;
+  const copy = createTask(
+    data,
+    {
+      ...structuredClone(src),
+      id: undefined,
+      key: undefined,
+      project: opts.project ?? src.project,
+      title: opts.title ?? `${src.title} (copy)`,
+      status,
+      subtasks: (src.subtasks || []).map(s => ({ ...structuredClone(s), id: uid('s') })),
+      deps: opts.deps ?? [...(src.deps || [])],
+      created: now,
+      updated: now,
+      fav: false,
+      completedAt: status === 'done' ? now : null,
+    },
+    { by, now },
+  );
+  if (status !== 'done') {
+    delete copy.completedAt;
+    delete copy.prevStatus;
+  }
+  return copy;
+}
+
 export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
   const now = opts.now ?? Date.now();
   const by = opts.by ?? data.me;
@@ -429,15 +498,14 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
   const t = requireTask(data, taskOrRef);
   const patch = {};
 
+  if (rawPatch.project !== undefined) patch.project = requireProject(data, rawPatch.project).id;
   if (rawPatch.title !== undefined) {
     const title = String(rawPatch.title).trim();
     if (!title) throw new DomainError('Task title cannot be empty');
     patch.title = title;
   }
-  if (rawPatch.status !== undefined) patch.status = validateStatus(rawPatch.status);
   if (rawPatch.priority !== undefined) patch.priority = validatePriority(rawPatch.priority);
   if (rawPatch.assignee !== undefined) patch.assignee = resolveMember(data, rawPatch.assignee);
-  if (rawPatch.project !== undefined) patch.project = requireProject(data, rawPatch.project).id;
   if (rawPatch.due !== undefined) {
     patch.due = validateOptionalDate(rawPatch.due, 'due');
     const effStart = rawPatch.start !== undefined ? validateOptionalDate(rawPatch.start, 'start') : t.start;
@@ -490,6 +558,7 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
     if (extraHtml) patch.desc = (t.desc || '') + extraHtml;
   }
   if (rawPatch.archived !== undefined) patch.archived = !!rawPatch.archived;
+  if (rawPatch.status !== undefined) patch.status = validateStatus(rawPatch.status);
 
   const messages = [];
   let completed = false;
@@ -645,7 +714,7 @@ export function promoteSubtask(data, taskOrRef, subRef, opts = {}) {
       priority: t.priority,
       due: s.due || null,
       labels: [...t.labels],
-      desc: s.note ? markdownToHtml(s.note) : '',
+      descMarkdown: s.note || '',
     },
     { by, now },
   );
