@@ -282,7 +282,7 @@ A.popToggleDep = el => {
   const p = S.ui.pop;
   const t = task(p.id);
   const v = el.dataset.v;
-  updateTask(p.id, { deps: t.deps.includes(v) ? t.deps.filter(x => x !== v) : [...t.deps, v] });
+  updateTask(p.id, t.deps.includes(v) ? { removeDeps: [v] } : { addDeps: [v] });
 };
 A.popMonth = el => {
   const p = S.ui.pop;

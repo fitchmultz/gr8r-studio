@@ -173,6 +173,12 @@ function validateOptionalDate(val, field) {
   if (!isIsoDate(val)) throw new DomainError(`Invalid ${field} "${val}". Expected YYYY-MM-DD`);
   return val;
 }
+function validateMilestone(m) {
+  const name = String(m?.name ?? '').trim();
+  const date = validateOptionalDate(m?.date, 'milestone.date');
+  if (!name || !date) throw new DomainError('Each milestone requires name and YYYY-MM-DD date');
+  return { name, date };
+}
 function validateRecur(val) {
   if (val == null || val === '' || val === 'Does not repeat' || val === 'none') return null;
   if (!RECUR_DAYS[val]) throw new DomainError(`Invalid recur "${val}". Expected one of: ${Object.keys(RECUR_DAYS).join(', ')}`);
@@ -267,14 +273,7 @@ export function createProject(data, fields = {}, opts = {}) {
   const lead = fields.lead !== undefined ? resolveMember(data, fields.lead) || by : by;
   const start = fields.start !== undefined ? validateOptionalDate(fields.start, 'start') : dOff(0, today);
   const due = fields.due !== undefined ? validateOptionalDate(fields.due, 'due') : dOff(30, today);
-  const milestones = Array.isArray(fields.milestones)
-    ? fields.milestones.map(m => {
-        const mname = String(m?.name ?? '').trim();
-        const mdate = validateOptionalDate(m?.date, 'milestone.date');
-        if (!mname || !mdate) throw new DomainError('Each milestone requires name and YYYY-MM-DD date');
-        return { name: mname, date: mdate };
-      })
-    : [];
+  const milestones = Array.isArray(fields.milestones) ? fields.milestones.map(validateMilestone) : [];
   const p = {
     id: fields.id || uid('p'),
     key: makeProjectKey(data, name, fields.key),
@@ -352,14 +351,35 @@ export function updateProject(data, projectOrRef, patch = {}, opts = {}) {
   if (patch.start !== undefined) p.start = validateOptionalDate(patch.start, 'start');
   if (patch.fav !== undefined) p.fav = !!patch.fav;
   if (patch.private !== undefined) p.private = !!patch.private;
-  if (patch.milestones !== undefined) {
-    if (!Array.isArray(patch.milestones)) throw new DomainError('milestones must be an array');
-    p.milestones = patch.milestones.map(m => {
-      const mname = String(m?.name ?? '').trim();
-      const mdate = validateOptionalDate(m?.date, 'milestone.date');
-      if (!mname || !mdate) throw new DomainError('Each milestone requires name and YYYY-MM-DD date');
-      return { name: mname, date: mdate };
-    });
+  if (patch.milestones !== undefined || patch.addMilestones !== undefined || patch.removeMilestones !== undefined) {
+    let next =
+      patch.milestones !== undefined
+        ? (() => {
+            if (!Array.isArray(patch.milestones)) throw new DomainError('milestones must be an array');
+            return patch.milestones.map(validateMilestone);
+          })()
+        : [...(p.milestones || [])];
+    if (patch.removeMilestones !== undefined) {
+      if (!Array.isArray(patch.removeMilestones)) throw new DomainError('removeMilestones must be an array');
+      const rm = new Set(
+        patch.removeMilestones.map(s =>
+          String(s ?? '')
+            .trim()
+            .toLowerCase(),
+        ),
+      );
+      next = next.filter(m => !rm.has(m.name.toLowerCase()));
+    }
+    if (patch.addMilestones !== undefined) {
+      if (!Array.isArray(patch.addMilestones)) throw new DomainError('addMilestones must be an array');
+      for (const raw of patch.addMilestones) {
+        const m = validateMilestone(raw);
+        const idx = next.findIndex(x => x.name.toLowerCase() === m.name.toLowerCase());
+        if (idx >= 0) next[idx] = m;
+        else next.push(m);
+      }
+    }
+    p.milestones = next;
   }
   if (patch.archived !== undefined && !!patch.archived !== !!p.archived) {
     p.archived = !!patch.archived;
@@ -670,6 +690,13 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
     else if (k === 'deps') logActivity(data, 'updated dependencies of', t, '', { by, now });
     else if (k === 'archived') {
       t.archivedAt = nv ? now : null;
+      if (nv) {
+        for (const other of data.tasks) {
+          if (other.id !== t.id && other.deps?.includes(t.id)) {
+            other.deps = other.deps.filter(d => d !== t.id);
+          }
+        }
+      }
       logActivity(data, nv ? 'archived' : 'restored', t, '', { by, now });
     }
     t.updated = now;

@@ -196,8 +196,15 @@ test('stale dependencies, removed members, and archived project queries preserve
   );
 
   applyTaskPatch(data, depArchived.id, { archived: true }, { now: FIXED_NOW + 100 });
+  assert.equal(rec.deps.includes(depArchived.id), false);
   applyTaskPatch(data, depMoved.id, { project: beta.id }, { now: FIXED_NOW + 200 });
   assert.equal(rec.deps.includes(depMoved.id), false);
+
+  // Atomic project milestone mutations preserve concurrent milestones.
+  updateProject(data, alpha.id, { addMilestones: [{ name: 'M1', date: '2026-11-20' }] }, { now: FIXED_NOW + 210 });
+  updateProject(data, alpha.id, { addMilestones: [{ name: 'M2', date: '2026-11-25' }] }, { now: FIXED_NOW + 220 });
+  updateProject(data, alpha.id, { removeMilestones: ['m1'] }, { now: FIXED_NOW + 230 });
+  assert.deepEqual(alpha.milestones, [{ name: 'M2', date: '2026-11-25' }]);
 
   removeMember(data, 'm2');
   assert.equal(alpha.lead, data.me);
