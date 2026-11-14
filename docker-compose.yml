@@ -11,7 +11,7 @@ services:
       GR8R_TOKEN: ${GR8R_TOKEN:?export GR8R_TOKEN first}
       PORT: 4180
     ports:
-      - '4180:4180'
+      - '127.0.0.1:4180:4180'
     volumes:
       - gr8r-data:/app/server/data
     restart: unless-stopped
