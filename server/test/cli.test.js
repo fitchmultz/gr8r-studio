@@ -8,13 +8,20 @@ import test from 'node:test';
 import { runCli } from '../../cli/gr8r.js';
 import { startServer } from '../server.js';
 
-async function startConnectProxy() {
-  let connects = 0;
-  const proxy = http.createServer((_req, res) => {
-    res.writeHead(405).end();
+async function startHttpProxy() {
+  let hits = 0;
+  const proxy = http.createServer((req, res) => {
+    hits += 1;
+    const u = new URL(req.url);
+    const up = http.request(u, { method: req.method, headers: req.headers }, upRes => {
+      res.writeHead(upRes.statusCode, upRes.headers);
+      upRes.pipe(res);
+    });
+    up.on('error', () => res.writeHead(502).end());
+    req.pipe(up);
   });
   proxy.on('connect', (req, clientSocket, head) => {
-    connects += 1;
+    hits += 1;
     const [host, portStr] = req.url.split(':');
     const upstream = net.connect(Number(portStr), host, () => {
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
@@ -28,10 +35,13 @@ async function startConnectProxy() {
   await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
   return {
     url: `http://127.0.0.1:${proxy.address().port}`,
-    get connects() {
-      return connects;
+    get hits() {
+      return hits;
     },
-    close: () => new Promise(resolve => proxy.close(resolve)),
+    close: () => {
+      proxy.closeAllConnections();
+      return new Promise(resolve => proxy.close(resolve));
+    },
   };
 }
 
@@ -55,7 +65,7 @@ test('gr8r CLI manages config, projects, tasks, Markdown stdin, subtasks, commen
 
   const srv = await startServer({ dataFile: path.join(dir, 'state.json'), distDir, token: 'cli-secret' });
   const baseUrl = `http://127.0.0.1:${srv.port}`;
-  const proxy = await startConnectProxy();
+  const proxy = await startHttpProxy();
 
   t.after(async () => {
     await proxy.close();
@@ -76,11 +86,14 @@ test('gr8r CLI manages config, projects, tasks, Markdown stdin, subtasks, commen
   const cfgInfo = JSON.parse(r.stdout);
   assert.equal(cfgInfo.reachable, true);
   assert.equal(cfgInfo.proxy, proxy.url);
-  assert.ok(proxy.connects >= 2);
+  assert.ok(proxy.hits >= 2);
 
   r = await invoke(['project', 'create', 'Pi Durable', '--key', 'PID', '--status', 'active', '--json'], { env });
   const createdProj = JSON.parse(r.stdout);
   assert.equal(createdProj.project.key, 'PID');
+
+  r = await invoke(['project', 'update', 'PID', '--add-milestone', 'GA@2026-11-30', '--json'], { env });
+  assert.deepEqual(JSON.parse(r.stdout).project.milestones, [{ name: 'GA', date: '2026-11-30' }]);
 
   const md = '#### Goal\n\nWire **UsageDoc** in `chat-projection.ts`.\n\n- Root turns\n- Child runs';
   r = await invoke(
@@ -131,6 +144,9 @@ test('gr8r CLI manages config, projects, tasks, Markdown stdin, subtasks, commen
 
   r = await invoke(['search', 'UsageDoc', '--json'], { env });
   assert.equal(JSON.parse(r.stdout).tasks[0].key, 'PID-201');
+
+  r = await invoke(['search', 'Mitch'], { env });
+  assert.match(r.stdout, /People \(1\):/);
 
   r = await invoke(['activity', '-p', 'PID', '--limit', '5', '--json'], { env });
   assert.ok(JSON.parse(r.stdout).activity.length >= 4);

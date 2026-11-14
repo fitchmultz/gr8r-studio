@@ -21,7 +21,7 @@ node <SKILL_DIR>/../../cli/gr8r.js status
 
 1. **Server URL:** `--url <url>`, `GR8R_URL`, `~/.config/gr8r/config.json` (`"url"`), or `http://127.0.0.1:4180`.
 2. **Token:** `--token`, `GR8R_TOKEN`, `~/.config/gr8r/config.json`, or fetched automatically from `GET <url>/api/config` (refreshing once on `401`).
-3. **Proxy:** `--proxy`, `GR8R_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, or `~/.config/gr8r/config.json` (`"proxy"`). When a `*.ts.net` hostname cannot resolve directly (for example on split-Tailscale machines), `gr8r` automatically probes `http://127.0.0.1:1055` and tunnels over HTTP `CONNECT`.
+3. **Proxy:** `--proxy`, `GR8R_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, or `~/.config/gr8r/config.json` (`"proxy"`), routed through Node's built-in `http.Agent` / `https.Agent` `proxyEnv` support. When a `*.ts.net` hostname cannot resolve directly (for example `https://alienarchy.tail854973.ts.net:8443` on split-Tailscale machines), `gr8r` automatically falls back to `http://127.0.0.1:1055`.
 
 Check connectivity and configured defaults at any time:
 

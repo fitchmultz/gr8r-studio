@@ -6,7 +6,6 @@ import https from 'node:https';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -57,46 +56,17 @@ function probeTcpPort(host, port, timeoutMs = 250) {
   });
 }
 
-function connectViaHttpProxy(proxyUrl, targetHost, targetPort, timeoutMs = 15000) {
-  return new Promise((resolve, reject) => {
-    const p = new URL(proxyUrl);
-    const pHost = p.hostname.replace(/^\[|\]$/g, '');
-    const tHost = targetHost.replace(/^\[|\]$/g, '');
-    const authority = tHost.includes(':') ? `[${tHost}]:${targetPort}` : `${tHost}:${targetPort}`;
-    const authHeader =
-      p.username || p.password
-        ? { 'proxy-authorization': 'Basic ' + Buffer.from(`${decodeURIComponent(p.username)}:${decodeURIComponent(p.password)}`).toString('base64') }
-        : {};
-    const req = http.request({
-      host: pHost,
-      port: +(p.port || 80),
-      method: 'CONNECT',
-      path: authority,
-      headers: { host: authority, ...authHeader },
-      timeout: timeoutMs,
-    });
-    req.once('connect', (res, socket, head) => {
-      if (res.statusCode !== 200) {
-        socket.destroy();
-        reject(new Error(`Proxy CONNECT failed with HTTP ${res.statusCode}`));
-        return;
-      }
-      if (head && head.length) socket.unshift(head);
-      resolve(socket);
-    });
-    req.once('timeout', () => {
-      req.destroy(new Error('Proxy CONNECT timed out'));
-    });
-    req.once('error', reject);
-    req.end();
-  });
+function normalizeProxyUrl(raw) {
+  const s = String(raw || '').trim();
+  if (!s || s.toLowerCase() === 'direct') return '';
+  if (/^https?:\/\//i.test(s)) return s;
+  const m = /^(?:[a-z0-9]+:\/\/)?([^/]+)$/i.exec(s);
+  return m ? `http://${m[1]}` : s;
 }
 
-async function rawHttpRequest(targetUrl, { method = 'GET', headers = {}, body, proxyUrl, timeoutMs = 20000 } = {}) {
+function rawHttpRequest(targetUrl, { method = 'GET', headers = {}, body, proxyUrl, noProxy = '', timeoutMs = 20000 } = {}) {
   const u = new URL(targetUrl);
   const isHttps = u.protocol === 'https:';
-  const bareHost = u.hostname.replace(/^\[|\]$/g, '');
-  const port = +(u.port || (isHttps ? 443 : 80));
   const payload = body == null ? null : Buffer.isBuffer(body) ? body : Buffer.from(body);
   const reqHeaders = {
     accept: 'application/json',
@@ -104,43 +74,27 @@ async function rawHttpRequest(targetUrl, { method = 'GET', headers = {}, body, p
     ...(payload ? { 'content-length': payload.length } : {}),
     ...headers,
   };
-
-  let tunnelSocket = null;
-  if (proxyUrl) {
-    const rawSock = await connectViaHttpProxy(proxyUrl, bareHost, port, timeoutMs);
-    tunnelSocket = isHttps
-      ? await new Promise((resolve, reject) => {
-          const tlsSock = tls.connect({
-            socket: rawSock,
-            ...(net.isIP(bareHost) ? {} : { servername: bareHost }),
-          });
-          tlsSock.once('secureConnect', () => resolve(tlsSock));
-          tlsSock.once('error', err => {
-            rawSock.destroy();
-            reject(err);
-          });
-        })
-      : rawSock;
-  }
+  const mod = isHttps ? https : http;
+  const agent = proxyUrl
+    ? new mod.Agent({
+        keepAlive: false,
+        proxyEnv: { HTTP_PROXY: proxyUrl, HTTPS_PROXY: proxyUrl, NO_PROXY: noProxy },
+      })
+    : false;
 
   return new Promise((resolve, reject) => {
-    const mod = isHttps ? https : http;
     const req = mod.request(
+      u,
       {
-        protocol: u.protocol,
-        hostname: bareHost,
-        port,
-        path: u.pathname + u.search,
         method,
         headers: reqHeaders,
         timeout: timeoutMs,
-        ...(tunnelSocket ? { createConnection: () => tunnelSocket, agent: false } : {}),
+        agent,
       },
       res => {
         const chunks = [];
         res.on('data', c => chunks.push(c));
         res.on('end', () => {
-          tunnelSocket?.destroy();
           const text = Buffer.concat(chunks).toString('utf8');
           let json = null;
           try {
@@ -153,27 +107,10 @@ async function rawHttpRequest(targetUrl, { method = 'GET', headers = {}, body, p
       },
     );
     req.once('timeout', () => req.destroy(new Error(`Request timed out: ${method} ${u.href}`)));
-    req.once('error', err => {
-      tunnelSocket?.destroy();
-      reject(err);
-    });
+    req.once('error', reject);
     if (payload) req.write(payload);
     req.end();
   });
-}
-
-function shouldBypassAmbientProxy(hostname, env) {
-  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
-  const noProxy = env.NO_PROXY || env.no_proxy || '';
-  for (const raw of noProxy.split(',')) {
-    const rule = raw.trim().toLowerCase();
-    if (!rule) continue;
-    if (rule === '*') return true;
-    const clean = rule.replace(/^\./, '');
-    if (host === clean || host.endsWith('.' + clean)) return true;
-  }
-  return false;
 }
 
 export class Gr8rClient {
@@ -181,23 +118,18 @@ export class Gr8rClient {
     const cfg = readUserConfig(env);
     this.apiBase = normalizeApiBase(url || env.GR8R_URL || cfg.url || DEFAULT_URL);
     this.token = token || env.GR8R_TOKEN || cfg.token || '';
-    const targetHost = new URL(this.apiBase).hostname;
     const explicitProxy = proxy ?? env.GR8R_PROXY ?? cfg.proxy;
-    const ambientProxy = shouldBypassAmbientProxy(targetHost, env) ? '' : (env.HTTPS_PROXY ?? env.HTTP_PROXY ?? env.ALL_PROXY ?? '');
+    const ambientProxy = env.HTTPS_PROXY ?? env.HTTP_PROXY ?? env.ALL_PROXY ?? '';
     const rawProxy = explicitProxy !== undefined ? explicitProxy : ambientProxy;
-    this.proxy = rawProxy && rawProxy.trim().toLowerCase() !== 'direct' ? rawProxy.trim() : '';
-    if (this.proxy && !/^https?:\/\//i.test(this.proxy)) {
-      // Support socks5h://127.0.0.1:1055 or host:port when backed by Tailscale's dual-mode listener.
-      const m = /^(?:[a-z0-9]+:\/\/)?([^/]+)$/i.exec(this.proxy.trim());
-      if (m) this.proxy = `http://${m[1]}`;
-    }
+    this.proxy = normalizeProxyUrl(rawProxy);
+    this.noProxy = explicitProxy !== undefined ? (env.NO_PROXY ?? env.no_proxy ?? '') : (env.NO_PROXY ?? env.no_proxy ?? 'localhost,127.0.0.1,::1');
     this.autoProxyChecked = false;
   }
 
   async sendRaw(apiPath, opts = {}) {
     const fullUrl = this.apiBase + apiPath;
     try {
-      return await rawHttpRequest(fullUrl, { ...opts, proxyUrl: this.proxy || undefined });
+      return await rawHttpRequest(fullUrl, { ...opts, proxyUrl: this.proxy || undefined, noProxy: this.noProxy });
     } catch (err) {
       const host = new URL(fullUrl).hostname;
       if (!this.proxy && !this.autoProxyChecked && (err?.code === 'ENOTFOUND' || err?.code === 'EAI_AGAIN') && host.endsWith('.ts.net')) {
@@ -205,7 +137,8 @@ export class Gr8rClient {
         const p = new URL(TAILSCALE_PROXY);
         if (await probeTcpPort(p.hostname, +p.port)) {
           this.proxy = TAILSCALE_PROXY;
-          return rawHttpRequest(fullUrl, { ...opts, proxyUrl: this.proxy });
+          this.noProxy = '';
+          return rawHttpRequest(fullUrl, { ...opts, proxyUrl: this.proxy, noProxy: this.noProxy });
         }
       }
       throw err;
@@ -603,25 +536,18 @@ export async function runCli(argv, io = {}) {
       if (opts['no-fav']) body.fav = false;
       if (opts.archive) body.archived = true;
       if (opts.restore) body.archived = false;
-      if (opts['add-milestone'] || opts['remove-milestone']) {
-        const cur = await client.request('GET', `/projects/${encodeURIComponent(ref)}`);
-        let ms = [...(cur.project.milestones || [])];
-        if (opts['remove-milestone']) {
-          const rm = new Set(opts['remove-milestone'].map(s => s.trim().toLowerCase()));
-          ms = ms.filter(m => !rm.has(m.name.toLowerCase()));
-        }
-        if (opts['add-milestone']) {
-          for (const raw of opts['add-milestone']) {
-            const at = raw.lastIndexOf('@');
-            if (at <= 0) throw new Error(`Invalid milestone "${raw}". Expected "Name@YYYY-MM-DD"`);
-            const name = raw.slice(0, at).trim();
-            const date = raw.slice(at + 1).trim();
-            const idx = ms.findIndex(m => m.name.toLowerCase() === name.toLowerCase());
-            if (idx >= 0) ms[idx] = { name, date };
-            else ms.push({ name, date });
-          }
-        }
-        body.milestones = ms;
+      if (opts['remove-milestone']) body.removeMilestones = opts['remove-milestone'].map(s => s.trim()).filter(Boolean);
+      if (opts['add-milestone']) {
+        body.addMilestones = opts['add-milestone'].map(raw => {
+          const at = raw.lastIndexOf('@');
+          if (at <= 0) throw new Error(`Invalid milestone "${raw}". Expected "Name@YYYY-MM-DD"`);
+          return { name: raw.slice(0, at).trim(), date: raw.slice(at + 1).trim() };
+        });
+      }
+      if (opts['if-rev'] !== undefined) {
+        const rev = Number(opts['if-rev']);
+        if (!Number.isInteger(rev) || rev < 0) throw new Error(`Invalid --if-rev "${opts['if-rev']}": expected non-negative integer`);
+        body.ifRev = rev;
       }
       const res = await client.request('PATCH', `/projects/${encodeURIComponent(ref)}`, body);
       if (opts.json) return outJson(res);
@@ -857,6 +783,14 @@ export async function runCli(argv, io = {}) {
     for (const p of res.projects) stdout(`  ${p.key}  ${p.name} (${p.status})`);
     stdout(`Tasks (${res.tasks.length}):`);
     for (const t of res.tasks) stdout(`  ${t.key}  [${t.status}] ${t.title}`);
+    if (res.people?.length) {
+      stdout(`People (${res.people.length}):`);
+      for (const m of res.people) stdout(`  ${m.id}  ${m.name}${m.role ? ` (${m.role})` : ''}`);
+    }
+    if (res.files?.length) {
+      stdout(`Files (${res.files.length}):`);
+      for (const f of res.files) stdout(`  ${f.name}${f.project ? ` (${f.project})` : ''}`);
+    }
     if (res.comments.length) {
       stdout(`Comments (${res.comments.length}):`);
       for (const c of res.comments) stdout(`  [${c.taskKey}] ${c.byName || c.by}: ${c.text}`);
