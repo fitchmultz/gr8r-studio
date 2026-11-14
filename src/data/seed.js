@@ -1,7 +1,8 @@
 /* ---------- seed data ---------- */
-import { dOff, minsAgo } from '../core/utils.js';
+import { dOff, minsAgo, todayDate } from '../core/dates.js';
 
-export function seed() {
+export function seed(now = Date.now()) {
+  const today = todayDate(now);
   const members = [
     {
       id: 'm1',
@@ -26,12 +27,12 @@ export function seed() {
       status: 'active',
       team: '',
       lead: 'm1',
-      due: dOff(7),
-      start: dOff(0),
+      due: dOff(7, today),
+      start: dOff(0, today),
       fav: false,
       members: ['m1'],
       desc: 'A short tour so the workspace feels like yours. Delete this project once your real ones are in.',
-      milestones: [{ name: 'Workspace set up', date: dOff(7) }],
+      milestones: [{ name: 'Workspace set up', date: dOff(7, today) }],
       last: 0,
     },
   ];
@@ -48,16 +49,16 @@ export function seed() {
           status,
           assignee: 'm1',
           priority: prio,
-          due: due == null ? null : dOff(due),
-          start: due == null ? null : dOff(due - (x.len || 3)),
+          due: due == null ? null : dOff(due, today),
+          start: due == null ? null : dOff(due - (x.len || 3), today),
           labels: [],
           subtasks: [],
           attachments: [],
           deps: [],
           desc: '',
           estimate: x.est || null,
-          created: minsAgo(60 * 24),
-          updated: minsAgo(60),
+          created: minsAgo(60 * 24, now),
+          updated: minsAgo(60, now),
           order: n,
           fav: false,
           recur: null,
@@ -84,7 +85,7 @@ export function seed() {
   });
   t('Star the projects you check daily', 'backlog', 'low', null);
   t('Open the command palette with ⌘K', 'done', 'low', -1, { est: '2m', len: 1 });
-  T.find(x => x.status === 'done').completedAt = minsAgo(45);
+  T.find(x => x.status === 'done').completedAt = minsAgo(45, now);
   return {
     ws: { name: 'Personal', url: 'personal', c: '#1D1C1A', brand: true },
     workspaces: [{ id: 'w1', name: 'Personal', c: '#1D1C1A', plan: 'Free', brand: true }],

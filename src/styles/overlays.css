@@ -257,6 +257,25 @@
   font-size: var(--fs-md);
   margin: 10px 0 4px;
 }
+.rte-body code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+.rte-body pre {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+.rte-body pre code {
+  padding: 0;
+  background: none;
+}
 .subt {
   display: flex;
   align-items: center;

@@ -1,24 +1,11 @@
 /* ---------- store ---------- */
-import { TODAY, diffD, iso, parse, uid } from './utils.js';
-import { PCOLORS, TEAMS_SEED } from './constants.js';
+import { TODAY, diffD, iso, parse } from './utils.js';
+import { PCOLORS } from './constants.js';
 import { seed } from '../data/seed.js';
+import { DEFAULT_PREFS, ensureTeams, logActivity } from './domain.js';
 
 export const STORE_KEY = 'gr8r.v3';
-export const DEFAULT_PREFS = {
-  theme: 'system',
-  accent: 'indigo',
-  side: 'comfortable',
-  density: 'comfortable',
-  weekStart: 1,
-  dateFmt: 'MMM d',
-  lang: 'English (US)',
-  tz: '(GMT-07:00) Pacific Time',
-  motion: 'system',
-  home: 'home',
-  openTasks: 'drawer',
-  name: 'Mitch Fultz',
-  title: '',
-};
+export { DEFAULT_PREFS };
 export function load() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
@@ -154,16 +141,13 @@ export function taskProg(t) {
 
 /* ---------- activity + notification helpers ---------- */
 export function logAct(verb, t, extra = '') {
-  D().activity.unshift({ id: uid('a'), by: D().me, verb, task: t?.id || null, project: t?.project || null, at: Date.now(), extra });
-  if (t) t.updated = Date.now();
+  logActivity(D(), verb, t, extra, { by: D().me });
 }
 
 /* ---------- teams (workspace data, seeded on first use) ---------- */
 export const NO_TEAM = { id: '', name: 'No team', icon: 'users', c: '#8A867E', desc: '' };
 export function teamsList() {
-  const d = D();
-  if (!d.teams) d.teams = TEAMS_SEED.map(t => ({ ...t }));
-  return d.teams;
+  return ensureTeams(D());
 }
 export function team(id) {
   return teamsList().find(t => t.id === id) || null;
