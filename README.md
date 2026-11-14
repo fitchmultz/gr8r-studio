@@ -57,7 +57,8 @@ server/
 
 Dependencies point downward:
 
-1. `core/` and `data/` depend on nothing else in the app.
+1. `core/` and `data/` provide shared utilities and state. `core/sync.js` also
+   uses the render loop and toasts when it loads server state or reports a conflict.
 2. `ui/`, `shell/`, `components/`, `pages/`, `views/`, `overlays/` and `features/` render HTML from state.
 3. `actions/` change state and re-render. Each action module registers its handlers on the
    shared action table (`A`) when it loads, so `main.js` imports them after `actions/actions.js`.
@@ -103,10 +104,12 @@ cd server && GR8R_TOKEN=<secret> npm start    # app + sync API on :4180
   or invalid existing state file stops startup instead of starting an empty workspace.
   `POST /api/sync` accepts a push whose `baseRev` matches the current revision
   and answers `409` with the newer state otherwise; the client then adopts it.
-- Clients save locally first, push (debounced) on every change, and pull at boot,
-  every 30 seconds, and when another tab on the same device changes state.
-- Two devices that edit offline at the same time: the last push wins, and the
-  earlier device's offline edits are replaced when it reconnects.
+- Clients save locally on each change and debounce uploads. Pending uploads
+  survive reloads and retry at boot, every 30 seconds, and on reconnection.
+  A response for an older upload cannot overwrite a newer local save.
+- When two devices edit the same revision, the server accepts the first push.
+  The other device loads that accepted version and discards its conflicting
+  local edits. Sync copies the whole workspace; it does not merge task edits.
 
 ### Docker
 

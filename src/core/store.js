@@ -36,6 +36,8 @@ export const saved = load();
 /* rev is the sync server's revision for this workspace; 0 when never synced. */
 let rev = saved?.rev || 0;
 export const getRev = () => rev;
+let pendingSave = null;
+export const getPendingSave = () => pendingSave;
 
 export const S = {
   data: null,
@@ -84,9 +86,13 @@ export const S = {
   },
 };
 hydrate(saved);
+/* Older caches have no pending flag. Upload them once so previously unsent
+   edits are not stranded when this version first opens. */
+pendingSave = saved && saved.pending !== false ? saved : null;
 
 /* hydrate: point S's persisted sections at a saved blob (or the seed when absent). */
 export function hydrate(b) {
+  pendingSave = null;
   S.data = b?.data || seed();
   S.prefs = Object.assign({}, DEFAULT_PREFS, b?.prefs || {});
   S.views = b?.views || {};
@@ -95,30 +101,27 @@ export function hydrate(b) {
 
 /* The persisted blob: everything a device needs to boot, plus the last-synced rev. */
 export const blobNow = r => ({ rev: r, data: S.data, prefs: S.prefs, views: S.views, collapsed: S.ui.collapsed });
-function persist(blob) {
+function persist() {
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(blob));
+    localStorage.setItem(STORE_KEY, JSON.stringify({ ...(pendingSave || blobNow(rev)), rev, pending: !!pendingSave }));
   } catch {
     /* storage full or blocked: keep working in memory */
   }
 }
-/* stampRev: record the server's revision; persist the pushed blob when given
-   (exactly what the server holds), otherwise the current state. */
+/* Only acknowledge the exact snapshot that was pushed. A newer save remains
+   pending, and its contents must not be overwritten by an older response. */
 export function stampRev(r, blob) {
   rev = r;
-  persist(blob ? { ...blob, rev: r } : blobNow(r));
+  if (blob === pendingSave) pendingSave = null;
+  persist();
 }
 
 let onSave = null;
 export const setOnSave = fn => (onSave = fn);
-export let _saveT;
 export function save() {
-  clearTimeout(_saveT);
-  _saveT = setTimeout(() => {
-    const blob = blobNow(rev);
-    persist(blob);
-    onSave?.(blob);
-  }, 150);
+  pendingSave = structuredClone(blobNow(rev));
+  persist();
+  onSave?.();
 }
 
 /* ---------- lookups ---------- */
