@@ -29,11 +29,12 @@ const MIME = {
 function readStore(file) {
   try {
     const j = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (j && typeof j.rev === 'number') return { rev: j.rev, state: j.state ?? null };
-  } catch {
-    /* first boot or unreadable file: start empty */
+    if (!j || typeof j.rev !== 'number') throw new Error(`Invalid workspace file: ${file}`);
+    return { rev: j.rev, state: j.state ?? null };
+  } catch (error) {
+    if (error.code === 'ENOENT') return { rev: 0, state: null };
+    throw error;
   }
-  return { rev: 0, state: null };
 }
 function writeStore(file, store) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -94,8 +95,9 @@ export function startServer({ port = 0, host = '127.0.0.1', token, dataFile, dis
       const { baseRev, state } = body || {};
       if (typeof baseRev !== 'number' || !state || !state.data || !Array.isArray(state.data.tasks)) return send(res, 400, { error: 'invalid state' });
       if (baseRev !== store.rev) return send(res, 409, store);
-      store = { rev: store.rev + 1, state };
-      writeStore(DATA, store);
+      const next = { rev: store.rev + 1, state };
+      writeStore(DATA, next);
+      store = next;
       return send(res, 200, { rev: store.rev });
     }
     return send(res, 404, { error: 'not found' });
