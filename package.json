@@ -4,6 +4,14 @@
   "private": true,
   "description": "Gr8r Studio: a calm, structured project management workspace.",
   "type": "module",
+  "bin": {
+    "gr8r": "./cli/gr8r.js"
+  },
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
