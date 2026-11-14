@@ -9,6 +9,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { handleDomainApi } from './api.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 /* The workspace blob is ~100 KB; 10 MB bounds request memory while leaving room to grow. */
@@ -49,6 +50,25 @@ export function startServer({ port = 0, host = '127.0.0.1', token, dataFile, dis
   const DATA = dataFile || path.join(HERE, 'data', 'state.json');
   const DIST = distDir || path.join(HERE, '..', 'dist');
   let store = readStore(DATA);
+  const subscribers = new Set();
+
+  const broadcastRev = rev => {
+    const msg = `event: rev\ndata: ${JSON.stringify({ rev })}\n\n`;
+    for (const sub of subscribers) {
+      try {
+        sub.write(msg);
+      } catch {
+        subscribers.delete(sub);
+      }
+    }
+  };
+  const commitState = state => {
+    const next = { rev: store.rev + 1, state };
+    writeStore(DATA, next);
+    store = next;
+    broadcastRev(store.rev);
+    return store;
+  };
 
   const authorized = req => {
     const m = /^Bearer (.+)$/.exec(req.headers.authorization || '');
@@ -84,6 +104,31 @@ export function startServer({ port = 0, host = '127.0.0.1', token, dataFile, dis
        restarts the server. */
     if (url.pathname === '/api/config' && req.method === 'GET') return send(res, 200, { token }, 'application/json', { 'cache-control': 'no-store' });
     if (!authorized(req)) return send(res, 401, { error: 'unauthorized' });
+    if (url.pathname === '/api/events' && req.method === 'GET') {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache, no-transform',
+        connection: 'keep-alive',
+        'x-accel-buffering': 'no',
+      });
+      res.flushHeaders?.();
+      res.write(`event: rev\ndata: ${JSON.stringify({ rev: store.rev })}\n\n`);
+      subscribers.add(res);
+      const ping = setInterval(() => {
+        try {
+          res.write(': ping\n\n');
+        } catch {
+          clearInterval(ping);
+          subscribers.delete(res);
+        }
+      }, 25000);
+      ping.unref();
+      req.on('close', () => {
+        clearInterval(ping);
+        subscribers.delete(res);
+      });
+      return;
+    }
     if (url.pathname === '/api/state' && req.method === 'GET') return send(res, 200, store);
     if (url.pathname === '/api/sync' && req.method === 'POST') {
       let body;
@@ -95,12 +140,10 @@ export function startServer({ port = 0, host = '127.0.0.1', token, dataFile, dis
       const { baseRev, state } = body || {};
       if (typeof baseRev !== 'number' || !state || !state.data || !Array.isArray(state.data.tasks)) return send(res, 400, { error: 'invalid state' });
       if (baseRev !== store.rev) return send(res, 409, store);
-      const next = { rev: store.rev + 1, state };
-      writeStore(DATA, next);
-      store = next;
+      commitState(state);
       return send(res, 200, { rev: store.rev });
     }
-    return send(res, 404, { error: 'not found' });
+    return handleDomainApi({ req, res, url, getStore: () => store, commitState, readBody, send });
   }
 
   function serveStatic(res, url) {
@@ -139,7 +182,18 @@ export function startServer({ port = 0, host = '127.0.0.1', token, dataFile, dis
 
   return new Promise(resolve => {
     server.listen(port, host, () =>
-      resolve({ server, port: server.address().port, dataFile: DATA, distDir: DIST, close: () => new Promise(done => server.close(done)) }),
+      resolve({
+        server,
+        port: server.address().port,
+        dataFile: DATA,
+        distDir: DIST,
+        close: () =>
+          new Promise(done => {
+            for (const sub of subscribers) sub.end();
+            subscribers.clear();
+            server.close(done);
+          }),
+      }),
     );
   });
 }

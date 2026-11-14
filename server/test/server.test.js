@@ -214,3 +214,151 @@ test('the CLI requires a token and honors GR8R_DATA, DIST and PORT', async t => 
   assert.equal(push.status, 200);
   assert.ok(fs.existsSync(dataFile), 'state written at GR8R_DATA');
 });
+
+test('domain API applies atomic project, task, subtask, comment, search, and activity operations', async t => {
+  const { base } = await withServer(t);
+  const call = async (method, p, body) => {
+    const r = await fetch(base + p, {
+      method,
+      headers: { ...auth, ...(body ? { 'content-type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: r.status, json: await r.json() };
+  };
+
+  const ws0 = await call('GET', '/api/workspace');
+  assert.equal(ws0.status, 200);
+  assert.equal(ws0.json.rev, 0);
+  assert.equal(ws0.json.initialized, false);
+  // Reading /api/workspace does not mutate an uninitialized server.
+  assert.deepEqual(await (await fetch(base + '/api/state', { headers: auth })).json(), { rev: 0, state: null });
+
+  const createdProj = await call('POST', '/api/projects', { name: 'Pi Durable', key: 'PID', status: 'active' });
+  assert.equal(createdProj.status, 201);
+  assert.equal(createdProj.json.rev, 1);
+  assert.equal(createdProj.json.project.key, 'PID');
+
+  const batch = await call('POST', '/api/tasks', {
+    project: 'PID',
+    tasks: [
+      { title: 'Slice 1', priority: 'high', assignee: 'me', labels: ['backend'], desc: '#### Goal\n\nShip **UsageDoc**.' },
+      { title: 'Slice 2', priority: 'medium', deps: ['PID-201'] },
+    ],
+  });
+  assert.equal(batch.status, 201);
+  assert.equal(batch.json.rev, 2);
+  assert.deepEqual(
+    batch.json.tasks.map(x => x.key),
+    ['PID-201', 'PID-202'],
+  );
+  assert.deepEqual(batch.json.tasks[1].depKeys, ['PID-201']);
+
+  // Optional ifRev guard rejects stale mutations without touching state.
+  const stale = await call('PATCH', '/api/tasks/PID-201', { ifRev: 1, status: 'done' });
+  assert.equal(stale.status, 409);
+
+  // Subtasks, comments, and task patches advance revision atomically.
+  const sub = await call('POST', '/api/tasks/PID-201/subtasks', { title: 'Add projection', note: 'Include child runs' });
+  assert.equal(sub.status, 201);
+  const sid = sub.json.subtask.id;
+
+  const doneSub = await call('PATCH', `/api/tasks/PID-201/subtasks/${sid}`, { done: true });
+  assert.equal(doneSub.status, 200);
+  assert.equal(doneSub.json.task.subtaskDoneCount, 1);
+
+  const cmt = await call('POST', '/api/tasks/PID-201/comments', { text: 'PR #42 merged and verified live' });
+  assert.equal(cmt.status, 201);
+
+  const detail = await call('GET', '/api/tasks/pid-201');
+  assert.equal(detail.status, 200);
+  assert.equal(detail.json.task.descMarkdown, '#### Goal\n\nShip **UsageDoc**.');
+  assert.equal(detail.json.comments.length, 1);
+  assert.ok(detail.json.activity.length >= 3);
+
+  const promoted = await call('POST', `/api/tasks/PID-201/subtasks/${sid}/promote`, {});
+  assert.equal(promoted.status, 201);
+  assert.equal(promoted.json.task.key, 'PID-203');
+  assert.equal(promoted.json.parentTask.subtaskCount, 0);
+
+  const search = await call('GET', '/api/search?q=UsageDoc');
+  assert.equal(search.status, 200);
+  assert.deepEqual(
+    search.json.tasks.map(x => x.key),
+    ['PID-201'],
+  );
+
+  const act = await call('GET', '/api/activity?project=PID&limit=5');
+  assert.equal(act.status, 200);
+  assert.equal(act.json.activity.length, 5);
+
+  assert.equal((await call('DELETE', `/api/tasks/PID-201/comments/${cmt.json.comment.id}`)).status, 200);
+  assert.equal((await call('DELETE', '/api/tasks/PID-201')).status, 200);
+  // Deleting PID-201 cascades out of PID-202 deps.
+  const t202 = await call('GET', '/api/tasks/PID-202');
+  assert.deepEqual(t202.json.task.deps, []);
+});
+
+test('a failed disk write on a domain API mutation leaves in-memory state unchanged', async t => {
+  const { base, tmp } = await withServer(t);
+  const post = (p, body) =>
+    fetch(base + p, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  assert.equal((await post('/api/projects', { name: 'Pi Durable', key: 'PID' })).status, 201);
+  fs.chmodSync(tmp, 0o500);
+  try {
+    assert.equal((await post('/api/tasks', { project: 'PID', title: 'Should roll back' })).status, 500);
+    const list = await (await fetch(base + '/api/tasks?project=PID', { headers: auth })).json();
+    assert.equal(list.rev, 1);
+    assert.equal(list.tasks.length, 0);
+  } finally {
+    fs.chmodSync(tmp, 0o700);
+  }
+});
+
+test('streams revision events over GET /api/events for both domain mutations and /api/sync', async t => {
+  const { base } = await withServer(t);
+  assert.equal((await fetch(base + '/api/events')).status, 401);
+
+  const ctrl = new AbortController();
+  t.after(() => ctrl.abort());
+  const streamRes = await fetch(base + '/api/events', { headers: auth, signal: ctrl.signal });
+  assert.equal(streamRes.status, 200);
+  assert.match(streamRes.headers.get('content-type'), /^text\/event-stream/);
+
+  const reader = streamRes.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  const nextRev = async () => {
+    for (;;) {
+      const idx = buf.indexOf('\n\n');
+      if (idx !== -1) {
+        const frame = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const dataLine = frame.split('\n').find(l => l.startsWith('data:'));
+        if (dataLine) return JSON.parse(dataLine.slice(5).trim()).rev;
+      }
+      const { value, done } = await reader.read();
+      if (done) throw new Error('SSE stream ended unexpectedly');
+      buf += dec.decode(value, { stream: true }).replace(/\r/g, '');
+    }
+  };
+
+  assert.equal(await nextRev(), 0);
+
+  await fetch(base + '/api/projects', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Live SSE', key: 'SSE' }),
+  });
+  assert.equal(await nextRev(), 1);
+
+  await fetch(base + '/api/tasks', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ project: 'SSE', title: 'Instant tab update' }),
+  });
+  assert.equal(await nextRev(), 2);
+});

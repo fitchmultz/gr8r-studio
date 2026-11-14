@@ -22,11 +22,14 @@ const warnAuth = () => {
 
 let pushing = false;
 let pushT = 0;
+let eventAbort = null;
+let eventRetryT = 0;
+let retryDelay = 1000;
 
 function queuePush() {
   if (!syncOn) return;
   clearTimeout(pushT);
-  pushT = setTimeout(push, 1000);
+  pushT = setTimeout(push, 300);
 }
 
 async function loadConfig() {
@@ -121,11 +124,70 @@ function adopt(rev, state) {
   render();
 }
 
+async function connectEvents() {
+  if (!syncOn || eventAbort) return;
+  clearTimeout(eventRetryT);
+  const ctrl = new AbortController();
+  eventAbort = ctrl;
+  try {
+    const r = await authedFetch('/events', {
+      headers: { accept: 'text/event-stream' },
+      signal: ctrl.signal,
+    });
+    if (!r || !r.ok || !r.body) {
+      if (r?.status === 401) warnAuth();
+      return;
+    }
+    authWarned = false;
+    retryDelay = 1000;
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true }).replace(/\r/g, '');
+      let sep;
+      while ((sep = buf.indexOf('\n\n')) !== -1) {
+        const block = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        const dataLine = block.split('\n').find(l => l.startsWith('data:'));
+        if (!dataLine) continue;
+        try {
+          const j = JSON.parse(dataLine.slice(5).trim());
+          if (typeof j.rev === 'number' && j.rev > getRev()) pull();
+        } catch {
+          /* ignore malformed event payload */
+        }
+      }
+    }
+  } catch {
+    /* stream closed or offline: reconnect with bounded backoff */
+  } finally {
+    if (eventAbort === ctrl) {
+      eventAbort = null;
+      const wait = retryDelay;
+      retryDelay = Math.min(5000, retryDelay * 2);
+      eventRetryT = setTimeout(connectEvents, wait);
+    }
+  }
+}
+
 export function initSync() {
   if (!syncOn) return;
   setOnSave(queuePush);
   pull();
+  connectEvents();
   setInterval(pull, 30000);
-  addEventListener('online', pull);
+  addEventListener('online', () => {
+    pull();
+    connectEvents();
+  });
   addEventListener('storage', pull);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      pull();
+      connectEvents();
+    }
+  });
 }
