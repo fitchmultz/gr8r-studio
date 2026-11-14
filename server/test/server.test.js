@@ -362,3 +362,39 @@ test('streams revision events over GET /api/events for both domain mutations and
   });
   assert.equal(await nextRev(), 2);
 });
+
+test('archived project detail and project-scoped task queries keep summary counts and task list aligned', async t => {
+  const { base } = await withServer(t);
+  await fetch(base + '/api/projects', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Legacy Migration', key: 'LEG' }),
+  });
+  await fetch(base + '/api/tasks', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ project: 'LEG', tasks: [{ title: 'Step 1' }, { title: 'Step 2' }] }),
+  });
+  await fetch(base + '/api/projects/LEG', {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ archived: true }),
+  });
+
+  const detail = await (await fetch(base + '/api/projects/LEG', { headers: auth })).json();
+  assert.equal(detail.project.archived, true);
+  assert.equal(detail.project.taskCount, 2);
+  assert.equal(detail.tasks.length, 2);
+
+  const scoped = await (await fetch(base + '/api/tasks?project=LEG', { headers: auth })).json();
+  assert.equal(scoped.tasks.length, 2);
+
+  const globalDefault = await (await fetch(base + '/api/tasks', { headers: auth })).json();
+  assert.equal(
+    globalDefault.tasks.some(t => t.projectKey === 'LEG'),
+    false,
+  );
+
+  const globalAll = await (await fetch(base + '/api/tasks?archived=ALL', { headers: auth })).json();
+  assert.equal(globalAll.tasks.filter(t => t.projectKey === 'LEG').length, 2);
+});
