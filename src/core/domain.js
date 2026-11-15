@@ -1867,7 +1867,8 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
 
       const preMerged = preExistingMergedByTask.get(t.id) || new Set();
       const gainedMergedAt = nextLink.state === 'merged' && prev?.state === 'merged' && !prev.mergedAt && !!nextLink.mergedAt;
-      const gainedExactMergedAt = nextLink.state === 'merged' && prev?.state === 'merged' && !prev.mergedAtExact && Boolean(incoming.mergedAt);
+      const gainedExactMergedAtOnCanceled =
+        t.status === 'canceled' && nextLink.state === 'merged' && prev?.state === 'merged' && !prev.mergedAtExact && Boolean(incoming.mergedAt);
       const prevUnsatisfied = gainedMergedAt ? unsatisfiedMergedPartials(t.prs, preMerged) : [];
 
       const idx = t.prs.findIndex(samePr);
@@ -1903,7 +1904,7 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
         } else if (t.status === 'backlog' || t.status === 'todo') {
           applyTaskPatch(data, t, { status: 'progress' }, { by, now });
         }
-      } else if ((becameMerged || gainedExactMergedAt) && nextLink.closing) {
+      } else if ((becameMerged || gainedExactMergedAtOnCanceled) && nextLink.closing) {
         const hasOpenPr = t.prs.some(x => x.state === 'open');
         if (!hasOpenPr) {
           const nowUnsatisfied = unsatisfiedMergedPartials(t.prs, preMerged);

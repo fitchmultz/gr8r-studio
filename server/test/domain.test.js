@@ -1098,8 +1098,23 @@ test('canceled status excludes tasks from open/overdue counts and progress denom
   assert.equal(tTodo.status, 'canceled');
   assert.equal(tTodo.canceledAt, FIXED_NOW + 2000);
 
-  // Resyncing that same PR (#12) later with an authoritative mergedAt older than canceledAt still keeps canceled,
-  // whereas an authoritative mergedAt after canceledAt completes the task even after the earlier timestamp-less merge.
+  // Resyncing PR #12 with an authoritative mergedAt older than canceledAt keeps the task canceled.
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/app',
+      number: 12,
+      title: `feat: attempt (${tTodo.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: new Date(FIXED_NOW + 1500).toISOString(),
+    },
+    { now: FIXED_NOW + 3500 },
+  );
+  assert.equal(tTodo.status, 'canceled');
+  assert.equal(tTodo.canceledAt, FIXED_NOW + 2000);
+
+  // Resyncing PR #15 with an authoritative mergedAt after canceledAt completes the task even after an earlier timestamp-less merge.
   const tResync = createTask(state.data, { project: p.id, title: 'Resync slice', status: 'progress' }, { now: FIXED_NOW });
   syncGitHubPullRequests(state.data, { repo: 'acme/app', number: 15, title: `feat: resync (${tResync.key})`, state: 'open' }, { now: FIXED_NOW + 1000 });
   applyTaskPatch(state.data, tResync, { status: 'canceled' }, { now: FIXED_NOW + 2000 });
@@ -1123,6 +1138,46 @@ test('canceled status excludes tasks from open/overdue counts and progress denom
   );
   assert.equal(tResync.status, 'done');
   assert.equal(tResync.prs.find(x => x.number === 15)?.mergedAt, FIXED_NOW + 2500);
+
+  // Deliberately reopened tasks with a pre-existing merged link lacking mergedAtExact stay reopened on timestamped resync.
+  const tReopened = createTask(
+    state.data,
+    { project: p.id, title: 'Reopened recurring slice', status: 'done', recur: 'Weekly', due: '2026-11-20' },
+    { now: FIXED_NOW },
+  );
+  tReopened.prs = [
+    {
+      repo: 'acme/app',
+      number: 16,
+      title: `feat: legacy (${tReopened.key})`,
+      url: 'https://github.com/acme/app/pull/16',
+      headRef: 'feat/legacy',
+      state: 'merged',
+      draft: false,
+      closing: true,
+      updatedAt: FIXED_NOW + 500,
+      linkedSeq: 1,
+      mergedSeq: 1,
+      mergedAt: FIXED_NOW + 500,
+    },
+  ];
+  applyTaskPatch(state.data, tReopened, { status: 'todo' }, { now: FIXED_NOW + 1000 });
+  const countBeforeResync = state.data.tasks.length;
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/app',
+      number: 16,
+      title: `feat: legacy (${tReopened.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: new Date(FIXED_NOW + 500).toISOString(),
+      updatedAt: new Date(FIXED_NOW + 6000).toISOString(),
+    },
+    { now: FIXED_NOW + 6000 },
+  );
+  assert.equal(tReopened.status, 'todo');
+  assert.equal(state.data.tasks.length, countBeforeResync);
 
   syncGitHubPullRequests(
     state.data,
