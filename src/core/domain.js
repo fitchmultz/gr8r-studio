@@ -85,8 +85,8 @@ function resolveLabelColor(raw, index = 0) {
   const palette = Object.values(PCOLORS);
   if (raw == null || String(raw).trim() === '') return palette[index % palette.length];
   const s = String(raw).trim();
-  const byName = PCOLORS[s.toLowerCase()];
-  if (byName) return byName;
+  const key = s.toLowerCase();
+  if (Object.hasOwn(PCOLORS, key) && typeof PCOLORS[key] === 'string') return PCOLORS[key];
   if (/^#[0-9a-f]{6}$/i.test(s)) return s.toUpperCase();
   throw new DomainError(`Invalid label color "${raw}". Expected a #RRGGBB hex code or one of: ${Object.keys(PCOLORS).join(', ')}`);
 }
@@ -137,18 +137,57 @@ export function updateLabel(data, ref, patch = {}) {
   return lbl;
 }
 
-export function deleteLabel(data, ref) {
+export function scrubLabelFiltersInList(filters, validLabelIds) {
+  if (!Array.isArray(filters)) return { filters, changed: false };
+  let changed = false;
+  const out = [];
+  for (const f of filters) {
+    if (f?.f === 'labels' && Array.isArray(f.v) && f.v.length > 0) {
+      const clean = f.v.filter(id => validLabelIds.has(id));
+      if (clean.length !== f.v.length) {
+        changed = true;
+        if (!clean.length) continue;
+        out.push({ ...f, v: clean });
+        continue;
+      }
+    }
+    out.push(f);
+  }
+  return { filters: changed ? out : filters, changed };
+}
+
+export function scrubViewsLabelFilters(viewsMap, validLabelIds) {
+  if (!viewsMap || typeof viewsMap !== 'object' || Array.isArray(viewsMap)) return false;
+  let changed = false;
+  for (const v of Object.values(viewsMap)) {
+    if (v && typeof v === 'object' && Array.isArray(v.filters)) {
+      const res = scrubLabelFiltersInList(v.filters, validLabelIds);
+      if (res.changed) {
+        v.filters = res.filters;
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+export function deleteLabel(data, ref, opts = {}) {
   const lbl = requireLabel(data, ref);
   data.labels = ensureLabels(data).filter(l => l.id !== lbl.id);
+  const validLabelIds = new Set(data.labels.map(l => l.id));
   for (const t of data.tasks || []) {
     if (Array.isArray(t.labels) && t.labels.includes(lbl.id)) {
       t.labels = t.labels.filter(id => id !== lbl.id);
     }
   }
   for (const v of data.savedViews || []) {
-    for (const f of v.filters || []) {
-      if (f.f === 'labels' && Array.isArray(f.v)) f.v = f.v.filter(id => id !== lbl.id);
+    if (Array.isArray(v?.filters)) {
+      const res = scrubLabelFiltersInList(v.filters, validLabelIds);
+      if (res.changed) v.filters = res.filters;
     }
+  }
+  if (opts.views) {
+    scrubViewsLabelFilters(opts.views, validLabelIds);
   }
   return lbl;
 }
@@ -399,9 +438,9 @@ export function createProject(data, fields = {}, opts = {}) {
   const name = String(fields.name ?? '').trim();
   if (!name) throw new DomainError('Project name is required');
   const status = fields.status ?? 'planning';
-  if (!PSTAT[status]) throw new DomainError(`Invalid project status "${status}". Expected one of: ${Object.keys(PSTAT).join(', ')}`);
+  if (!Object.hasOwn(PSTAT, status)) throw new DomainError(`Invalid project status "${status}". Expected one of: ${Object.keys(PSTAT).join(', ')}`);
   const color = fields.color ?? 'indigo';
-  if (!PCOLORS[color]) throw new DomainError(`Invalid project color "${color}". Expected one of: ${Object.keys(PCOLORS).join(', ')}`);
+  if (!Object.hasOwn(PCOLORS, color)) throw new DomainError(`Invalid project color "${color}". Expected one of: ${Object.keys(PCOLORS).join(', ')}`);
   const icon = fields.icon ?? 'folder';
   if (!PICONS.includes(icon)) throw new DomainError(`Invalid project icon "${icon}"`);
   const lead = fields.lead !== undefined ? resolveMember(data, fields.lead) || by : by;
@@ -465,11 +504,12 @@ export function updateProject(data, projectOrRef, patch = {}, opts = {}) {
     p.icon = patch.icon;
   }
   if (patch.color !== undefined) {
-    if (!PCOLORS[patch.color]) throw new DomainError(`Invalid project color "${patch.color}"`);
+    if (!Object.hasOwn(PCOLORS, patch.color)) throw new DomainError(`Invalid project color "${patch.color}"`);
     p.color = patch.color;
   }
   if (patch.status !== undefined && patch.status !== p.status) {
-    if (!PSTAT[patch.status]) throw new DomainError(`Invalid project status "${patch.status}". Expected one of: ${Object.keys(PSTAT).join(', ')}`);
+    if (!Object.hasOwn(PSTAT, patch.status))
+      throw new DomainError(`Invalid project status "${patch.status}". Expected one of: ${Object.keys(PSTAT).join(', ')}`);
     p.status = patch.status;
     logActivity(data, 'changed status of project', null, 'to ' + PSTAT[patch.status].name, { by, projectId: p.id, now });
   }
@@ -1795,6 +1835,15 @@ export function applyWorkspacePatch(targetState, patch) {
         }
       }
     }
+    for (const sv of d.savedViews || []) {
+      if (Array.isArray(sv?.filters)) {
+        const res = scrubLabelFiltersInList(sv.filters, validLabelIds);
+        if (res.changed) {
+          sv.filters = res.filters;
+          rekeyed = true;
+        }
+      }
+    }
   }
 
   // 6. Activity
@@ -1843,6 +1892,9 @@ export function applyWorkspacePatch(targetState, patch) {
   }
   if (patch.prefs) targetState.prefs = applyObjectMap(targetState.prefs, patch.prefs);
   if (patch.views) targetState.views = applyObjectMap(targetState.views, patch.views);
+  if (Array.isArray(d.labels) && scrubViewsLabelFilters(targetState.views, new Set(d.labels.map(l => l.id)))) {
+    rekeyed = true;
+  }
   if (patch.collapsed !== undefined) targetState.collapsed = Boolean(patch.collapsed);
 
   return { state: targetState, rekeyed };

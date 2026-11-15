@@ -230,7 +230,7 @@ export function settingsBody(sec, title) {
                     <div class="swatches" role="group" aria-label="Color for ${esc(l.name)}">${Object.entries(PCOLORS)
                       .map(
                         ([k, v]) =>
-                          `<button type="button" class="sw ${l.c.toUpperCase() === v.toUpperCase() ? 'on' : ''}" style="--c:${v};width:16px;height:16px" data-a="recolorLabelSetting" data-id="${esc(l.id)}" data-v="${v}" aria-label="${k}"></button>`,
+                          `<button type="button" class="sw ${String(l.c || '').toUpperCase() === v.toUpperCase() ? 'on' : ''}" style="--c:${v};width:16px;height:16px" data-a="recolorLabelSetting" data-id="${esc(l.id)}" data-v="${v}" aria-label="${k}"></button>`,
                       )
                       .join('')}</div>
                     <span class="faint num" style="font-size:12px">${used} task${used === 1 ? '' : 's'}</span>

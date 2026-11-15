@@ -1268,6 +1268,7 @@ test('custom workspace labels and parent/child sub-issues enforce cycle, cascade
   const infra = createLabel(state.data, { name: 'Infra', color: 'indigo' });
   assert.equal(infra.id, 'infra');
   assert.throws(() => createLabel(state.data, { name: 'infra' }), DomainError);
+  assert.throws(() => createLabel(state.data, { name: 'Poison', color: 'constructor' }), DomainError);
   updateLabel(state.data, 'Infra', { name: 'Infrastructure', color: '#2288dd' });
   assert.equal(infra.c, '#2288DD');
 
@@ -1313,8 +1314,24 @@ test('custom workspace labels and parent/child sub-issues enforce cycle, cascade
   assert.equal(dupChildA.parent, dupEpic.id);
 
   // Moving a parent task to another project detaches children left behind; deleting a label strips it from tasks.
-  deleteLabel(state.data, 'infra');
+  const preDeleteSnap = structuredClone(state);
+  state.views = { [`p:${p.id}`]: { filters: [{ f: 'labels', op: 'is', v: ['infra'] }] } };
+  state.data.savedViews.push({ id: 'sv-infra', name: 'Infra only', project: p.id, filters: [{ f: 'labels', op: 'is', v: ['infra'] }] });
+  deleteLabel(state.data, 'infra', { views: state.views });
   assert.deepEqual(epic.labels, []);
+  assert.deepEqual(state.views[`p:${p.id}`].filters, []);
+  assert.deepEqual(state.data.savedViews.find(v => v.id === 'sv-infra').filters, []);
+  const offlineClient = structuredClone(preDeleteSnap);
+  offlineClient.data.savedViews.push({
+    id: 'sv-offline',
+    name: 'Offline infra',
+    project: p.id,
+    filters: [{ f: 'labels', op: 'is', v: ['infra', 'bug'] }],
+  });
+  offlineClient.views = { [`p:${p.id}`]: { filters: [{ f: 'labels', op: 'is', v: ['infra'] }] } };
+  applyWorkspacePatch(state, diffWorkspacePatch(preDeleteSnap, offlineClient));
+  assert.deepEqual(state.data.savedViews.find(v => v.id === 'sv-offline').filters, [{ f: 'labels', op: 'is', v: ['bug'] }]);
+  assert.deepEqual(state.views[`p:${p.id}`].filters, []);
   applyTaskPatch(state.data, childB, { project: pOther.id }, { now: FIXED_NOW });
   assert.equal(childB.parent, null);
   assert.equal(promoted.parent, null);

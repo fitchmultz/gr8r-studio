@@ -172,8 +172,8 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
           return;
         }
         if (method === 'DELETE') {
-          const result = await mutate(data => {
-            const label = deleteLabel(data, ref);
+          const result = await mutate((data, _body, draft) => {
+            const label = deleteLabel(data, ref, { views: draft.views });
             return { deleted: label.id, labels: ensureLabels(data) };
           });
           if (result) send(res, 200, result);

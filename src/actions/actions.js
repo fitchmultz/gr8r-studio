@@ -331,11 +331,12 @@ A.createLabelSetting = () => {
   try {
     if (
       mutate(() => {
-        created = domainCreateLabel(D(), { name, color: S.ui.newLabelColor });
+        const chosenColor = S.ui.newLabelColor;
+        created = domainCreateLabel(D(), { name, color: chosenColor });
+        S.ui.newLabelColor = null;
+        if (input) input.value = '';
       })
     ) {
-      S.ui.newLabelColor = null;
-      if (input) input.value = '';
       toast(`Created label “${created.name}”`);
     }
   } catch (err) {
@@ -382,7 +383,7 @@ A.deleteLabelSetting = el => {
     danger: true,
     run: () => {
       const snap = snapshot();
-      if (mutate(() => domainDeleteLabel(D(), cur.id))) {
+      if (mutate(() => domainDeleteLabel(D(), cur.id, { views: S.views }))) {
         toast(`Deleted label “${cur.name}”`, { action: 'Undo', onAction: () => restore(snap) });
       }
     },
