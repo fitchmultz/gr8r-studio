@@ -153,21 +153,16 @@ test('gr8r CLI manages config, projects, tasks, Markdown stdin, subtasks, commen
   r = await invoke(['activity', '-p', 'PID', '--limit', '5', '--json'], { env });
   assert.ok(JSON.parse(r.stdout).activity.length >= 4);
 
-  // Closed consumer pipes (e.g. `gr8r tasks --json | head -c 5`) exit 0 without unhandled EPIPE.
+  // Closed consumer pipe before output write triggers EPIPE and exits 0 cleanly.
   const cliPath = fileURLToPath(new URL('../../cli/gr8r.js', import.meta.url));
   const child = spawn(process.execPath, [cliPath, 'tasks', '--json'], {
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  child.stdout.destroy();
   let stderrText = '';
   child.stderr.on('data', d => {
     stderrText += String(d);
-  });
-  await new Promise(resolve => {
-    child.stdout.once('data', () => {
-      child.stdout.destroy();
-      resolve();
-    });
   });
   const exitCode = await new Promise(resolve => child.once('exit', resolve));
   assert.equal(exitCode, 0, stderrText);
