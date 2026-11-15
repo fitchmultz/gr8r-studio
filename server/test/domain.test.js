@@ -874,4 +874,53 @@ test('syncGitHubPullRequests handles draft/ready/merge, stacked (1/n) PRs, Refs 
     { now: Date.parse('2026-11-15T03:00:00Z') },
   );
   assert.equal(tOutOrder.status, 'done');
+
+  // Current-cycle cross-repo (2/2) first synced without timestamps and later re-synced with real mergedAt >= (1/2) createdAt completes the stack.
+  const tCross = createTask(state.data, { project: pid.id, title: 'Cross-repo mergedAt backfill', status: 'todo' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/front',
+      number: 10,
+      title: `Feature UI (1/2) (${tCross.key})`,
+      state: 'open',
+      draft: false,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T01:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T01:00:00Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/back', number: 20, title: `Feature API (2/2) (${tCross.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-15T02:00:00Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/front',
+      number: 10,
+      title: `Feature UI (1/2) (${tCross.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T03:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T03:00:00Z') },
+  );
+  assert.equal(tCross.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/back',
+      number: 20,
+      title: `Feature API (2/2) (${tCross.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: '2026-11-15T02:30:00Z',
+      updatedAt: '2026-11-15T04:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T04:00:00Z') },
+  );
+  assert.equal(tCross.status, 'done');
 });
