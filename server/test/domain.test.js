@@ -7,20 +7,27 @@ import {
   addSubtask,
   applyTaskPatch,
   applyWorkspacePatch,
+  attachFileRecord,
   childrenOfTask,
   claimNextReadyTask,
   claimTask,
   createDefaultState,
+  createDoc,
   createLabel,
   createProject,
   createTask,
+  deleteDoc,
   deleteLabel,
   deleteProject,
   deleteTasks,
+  deleteWorkspaceFile,
   diffWorkspacePatch,
+  docsOfProject,
   duplicateProject,
   duplicateTask,
   ensureLabels,
+  fileTypeFromName,
+  formatDocForApi,
   formatProjectForApi,
   formatTaskForApi,
   isTaskBlocked,
@@ -39,6 +46,7 @@ import {
   searchWorkspace,
   setNotifRead,
   syncGitHubPullRequests,
+  updateDoc,
   updateLabel,
   updateProject,
   updateSubtask,
@@ -1518,4 +1526,120 @@ test('live inbox fires on --needs-owner, @mentions, agent comments, and PR/agent
     state.data.tasks.map(x => x.id),
   );
   assert.equal(queryInbox(state.data).length, 0);
+});
+
+test('persisted attachment records and Markdown Project Docs round-trip, search, sync, and cascade cleanly', () => {
+  const state = createDefaultState(FIXED_NOW);
+  const p = createProject(state.data, { name: 'Docs & Blobs', key: 'DCB' }, { now: FIXED_NOW });
+  const t = createTask(state.data, { project: p.id, title: 'QA UI flow' }, { now: FIXED_NOW });
+
+  const sha = 'a'.repeat(64);
+  const fileRec = attachFileRecord(
+    state.data,
+    { task: t.key, name: 'qa-shot.png', blobId: sha, sizeBytes: 4096, mime: 'image/png', url: 'blob:http://localhost/dead' },
+    { agent: 'pi:qa-agent', now: FIXED_NOW + 10 },
+  );
+  assert.equal(fileRec.url, `/api/blobs/${sha}?name=qa-shot.png&mime=image%2Fpng`);
+  assert.equal(t.attachments.length, 1);
+  assert.equal(t.attachments[0].blobId, sha);
+  assert.equal(fileTypeFromName('bundle.tgz'), 'zip');
+  assert.equal(fileTypeFromName('App.tsx'), 'code');
+  const localOnly = attachFileRecord(state.data, { project: p.id, name: 'local.png', url: 'blob:http://localhost/ephemeral' }, { now: FIXED_NOW + 15 });
+  assert.equal(localOnly.url, undefined);
+
+  deleteWorkspaceFile(state.data, fileRec.id, { now: FIXED_NOW + 20 });
+  assert.equal(t.attachments.length, 0);
+
+  const notesDoc = createDoc(state.data, { project: p.id, title: 'Notes', bodyMarkdown: 'Existing base doc' }, { now: FIXED_NOW + 25 });
+  const snapBeforeDoc = structuredClone(state);
+  const doc = createDoc(
+    state.data,
+    {
+      project: p.id,
+      title: 'Runbook & Architecture',
+      pinned: true,
+      bodyMarkdown: '#### Deploy\n\nRun `docker compose up -d --build`.',
+    },
+    { agent: 'pi:arch-agent', now: FIXED_NOW + 30 },
+  );
+  assert.equal(doc.slug, 'runbook-architecture');
+  assert.match(formatDocForApi(state.data, doc).bodyMarkdown, /docker compose up -d --build/);
+  assert.equal(searchWorkspace(state.data, 'docker compose').docs.length, 1);
+
+  updateDoc(state.data, 'runbook-architecture', { appendBody: '#### Rollback\n\nCheckout previous tag.' }, { project: p.id, now: FIXED_NOW + 40 });
+  assert.match(formatDocForApi(state.data, doc).bodyMarkdown, /Rollback/);
+
+  const peer = structuredClone(snapBeforeDoc);
+  const peerExistingDoc = createDoc(
+    peer.data,
+    { project: p.id, title: 'Runbook & Architecture', bodyMarkdown: 'Peer established doc' },
+    { now: FIXED_NOW + 35 },
+  );
+  applyWorkspacePatch(peer, diffWorkspacePatch(snapBeforeDoc, state));
+  const peerDocsAfter = docsOfProject(peer.data, p.id);
+  assert.equal(peerDocsAfter.find(d => d.id === peerExistingDoc.id)?.slug, 'runbook-architecture');
+  assert.equal(peerDocsAfter.find(d => d.id === doc.id)?.slug, 'runbook-architecture-2');
+
+  deleteDoc(state.data, doc.id, { now: FIXED_NOW + 50 });
+  deleteDoc(state.data, notesDoc.id, { now: FIXED_NOW + 51 });
+  assert.equal(docsOfProject(state.data, p.id).length, 0);
+
+  // Renaming a doc title and creating a new doc with the old title keeps the original slug resolvable.
+  const d1 = createDoc(state.data, { project: p.id, title: 'Alpha' }, { now: FIXED_NOW + 60 });
+  updateDoc(state.data, d1.id, { title: 'Beta' }, { now: FIXED_NOW + 61 });
+  const d2 = createDoc(state.data, { project: p.id, title: 'Alpha' }, { now: FIXED_NOW + 62 });
+  assert.equal(updateDoc(state.data, 'alpha', {}, { project: p.id }).id, d1.id);
+  // Updating d2's slug via diffWorkspacePatch to collide with d1's untouched 'alpha' slug keeps d1='alpha' and assigns d2='alpha-3' (or 'alpha-2').
+  const slugUpdBase = structuredClone(state);
+  const slugUpdLocal = structuredClone(state);
+  slugUpdLocal.data.docs.find(x => x.id === d2.id).slug = 'alpha';
+  applyWorkspacePatch(slugUpdBase, diffWorkspacePatch(state, slugUpdLocal));
+  assert.equal(slugUpdBase.data.docs.find(x => x.id === d1.id)?.slug, 'alpha');
+  assert.equal(slugUpdBase.data.docs.find(x => x.id === d2.id)?.slug, 'alpha-2');
+
+  // Moving a doc out of a concurrently deleted project into p does not steal p's untouched doc slug.
+  const pRescueSrc = createProject(state.data, { name: 'Rescue Src', key: 'RSC' }, { now: FIXED_NOW + 63 });
+  const dRescueMoved = createDoc(state.data, { project: pRescueSrc.id, title: 'Alpha' }, { now: FIXED_NOW + 64 });
+  const rescueBase = structuredClone(state);
+  const rescuePeer = structuredClone(state);
+  rescuePeer.data.docs.find(x => x.id === dRescueMoved.id).project = p.id;
+  deleteProject(rescuePeer.data, pRescueSrc.id, { now: FIXED_NOW + 64 });
+  applyWorkspacePatch(rescueBase, diffWorkspacePatch(state, rescuePeer));
+  assert.equal(rescueBase.data.docs.find(x => x.id === d1.id)?.slug, 'alpha');
+  assert.equal(rescueBase.data.docs.find(x => x.id === dRescueMoved.id)?.slug, 'alpha-3');
+  deleteDoc(state.data, dRescueMoved.id, { now: FIXED_NOW + 64 });
+  deleteProject(state.data, pRescueSrc.id, { now: FIXED_NOW + 64 });
+
+  // attachFileRecord supports { project, target: <project-ref> } without misclassifying project ref as task.
+  const projFile = attachFileRecord(state.data, { project: 'DCB', target: 'DCB', name: 'spec.pdf', blobId: sha }, { now: FIXED_NOW + 65 });
+  assert.equal(projFile.project, p.id);
+  assert.equal(projFile.task, null);
+
+  // Duplicating a task or project mints distinct attachment IDs and data.files rows so deleting from the copy keeps the original intact.
+  const origAttach = attachFileRecord(state.data, { task: t.id, name: 'qa-shot.png', blobId: sha, sizeBytes: 42 }, { now: FIXED_NOW + 70 });
+  const tCopy = duplicateTask(state.data, t.id, { now: FIXED_NOW + 71 });
+  assert.equal(tCopy.attachments.length, 1);
+  assert.notEqual(tCopy.attachments[0].id, origAttach.id);
+  assert.equal(
+    state.data.files.some(f => f.id === tCopy.attachments[0].id && f.task === tCopy.id),
+    true,
+  );
+  deleteWorkspaceFile(state.data, tCopy.attachments[0].id, { now: FIXED_NOW + 72 });
+  assert.equal(tCopy.attachments.length, 0);
+  assert.equal(t.attachments.length, 1);
+  assert.equal(
+    state.data.files.some(f => f.id === origAttach.id && f.task === t.id),
+    true,
+  );
+
+  const pCopy = duplicateProject(state.data, p.id, { now: FIXED_NOW + 73 });
+  const pCopyFiles = state.data.files.filter(f => f.project === pCopy.id);
+  assert.equal(
+    pCopyFiles.some(f => !f.task && f.name === 'spec.pdf' && f.id !== projFile.id),
+    true,
+  );
+  assert.equal(
+    pCopyFiles.some(f => f.task && f.name === 'qa-shot.png' && f.id !== origAttach.id),
+    true,
+  );
 });

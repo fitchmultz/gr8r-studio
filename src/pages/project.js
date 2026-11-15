@@ -15,6 +15,7 @@ import { tableHtml } from '../views/table.js';
 import { calendarHtml } from '../views/calendar.js';
 import { timelineHtml, tlControls } from '../views/timeline.js';
 import { filesHtml } from '../views/files.js';
+import { docsHtml } from '../views/docs.js';
 
 export const PTABS = [
   ['overview', 'Overview', 'layout-dashboard'],
@@ -23,6 +24,7 @@ export const PTABS = [
   ['table', 'Table', 'table-2'],
   ['calendar', 'Calendar', 'calendar'],
   ['timeline', 'Timeline', 'chart-gantt'],
+  ['docs', 'Docs', 'file-text'],
   ['files', 'Files', 'paperclip'],
   ['activity', 'Activity', 'activity'],
 ];
@@ -48,6 +50,7 @@ export function pageProject() {
       body = taskViewBody(sv.type, applyView(ts, viewOf(k)), k, p);
     }
   } else if (tab === 'overview') body = projOverview(p);
+  else if (tab === 'docs') body = docsHtml(p.id);
   else if (tab === 'files') body = filesHtml(p.id);
   else if (tab === 'activity') body = projActivity(p);
   else body = taskViewBody(tab, applyView(ts, viewOf(key)), key, p);

@@ -2,7 +2,8 @@
 import { TODAY, diffD, esc, parse, relDate } from '../core/utils.js';
 import { ic } from '../core/icons.js';
 import { LB, PR, PSTAT, ST, isClosedStatus } from '../core/constants.js';
-import { D, labelOf, mem, pColor } from '../core/store.js';
+import { buildAttachmentBlobUrl, fileTypeFromName, formatByteSize } from '../core/domain.js';
+import { D, S, labelOf, mem, pColor } from '../core/store.js';
 
 export function av(id, cls = '', tip = true) {
   const m = mem(id);
@@ -90,26 +91,23 @@ export const FT = {
   code: { c: '#C48A1E', i: 'file-code', n: 'Code' },
   other: { c: '#6B7280', i: 'file', n: 'File' },
 };
-export function fileType(name) {
-  const e = (name.split('.').pop() || '').toLowerCase();
-  if (e === 'fig') return 'fig';
-  if (e === 'pdf') return 'pdf';
-  if (['zip', 'rar', '7z'].includes(e)) return 'zip';
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'heic'].includes(e)) return 'img';
-  if (['xlsx', 'xls', 'csv', 'numbers'].includes(e)) return 'sheet';
-  if (['doc', 'docx', 'txt', 'md', 'pages', 'rtf'].includes(e)) return 'doc';
-  if (['js', 'ts', 'json', 'html', 'css', 'py'].includes(e)) return 'code';
-  return 'other';
-}
-export function fsize(b) {
-  if (b < 1024) return b + ' B';
-  if (b < 1048576) return Math.round(b / 1024) + ' KB';
-  return (b / 1048576).toFixed(1) + ' MB';
+export const fileType = fileTypeFromName;
+export const fsize = formatByteSize;
+export function resolveAttachmentPreviewUrl(f) {
+  if (!f) return '';
+  if (f.blobId) return buildAttachmentBlobUrl(f);
+  const sessionPreview = S.ui?.localPreviews?.[f.id];
+  if (sessionPreview) return sessionPreview;
+  if (typeof f.url === 'string' && f.url.startsWith('/api/blobs/')) return f.url;
+  return '';
 }
 export function filePrev(f) {
   const t = FT[f.type] || FT.other;
+  const blobUrl = resolveAttachmentPreviewUrl(f);
   let art;
-  if (f.type === 'img')
+  if (f.type === 'img' && blobUrl)
+    art = `<div class="art" style="padding:0;overflow:hidden;background:var(--surface-2)"><img src="${esc(blobUrl)}" alt="${esc(f.name)}" loading="lazy" style="width:100%;height:100%;object-fit:cover;display:block"></div>`;
+  else if (f.type === 'img')
     art = `<div class="art" style="padding:0;overflow:hidden;background:linear-gradient(135deg,color-mix(in srgb,${t.c} 35%,var(--surface)),color-mix(in srgb,${t.c} 10%,var(--surface)))"><svg viewBox="0 0 100 60" preserveAspectRatio="none" style="width:100%;height:100%"><path d="M0 60 L30 28 L52 46 L70 32 L100 58 L100 60Z" fill="color-mix(in srgb,${t.c} 45%,var(--surface))"/><circle cx="76" cy="16" r="7" fill="color-mix(in srgb,${t.c} 30%,var(--surface))"/></svg></div>`;
   else if (f.type === 'sheet') art = `<div class="art" style="display:grid;grid-template-columns:repeat(4,1fr);gap:3px">${'<i></i>'.repeat(20)}</div>`;
   else if (f.type === 'fig')

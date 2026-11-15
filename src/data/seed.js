@@ -100,6 +100,7 @@ export function seed(now = Date.now()) {
     activity: [],
     notifs: [],
     files: [],
+    docs: [],
     events: [],
     projOrder: projects.map(p => p.id),
     savedViews: [],

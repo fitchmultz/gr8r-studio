@@ -269,6 +269,13 @@ export function removeMember(data, memberOrRef) {
   for (const n of data.notifs || []) {
     if (n.by === m.id) n.by = null;
   }
+  for (const f of data.files || []) {
+    if (f.by === m.id) f.by = data.me;
+  }
+  for (const doc of data.docs || []) {
+    if (doc.by === m.id) doc.by = data.me;
+    if (doc.updatedBy === m.id) doc.updatedBy = data.me;
+  }
   return m;
 }
 
@@ -725,6 +732,326 @@ export function updateProject(data, projectOrRef, patch = {}, opts = {}) {
   return p;
 }
 
+/* ---------- persisted attachments / files & project docs ---------- */
+export function fileTypeFromName(name) {
+  const e = String(name || '')
+    .split('.')
+    .pop()
+    .toLowerCase();
+  if (e === 'fig') return 'fig';
+  if (e === 'pdf') return 'pdf';
+  if (['zip', 'rar', '7z', 'tar', 'gz', 'tgz'].includes(e)) return 'zip';
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'heic', 'avif'].includes(e)) return 'img';
+  if (['xlsx', 'xls', 'csv', 'tsv', 'numbers'].includes(e)) return 'sheet';
+  if (['doc', 'docx', 'txt', 'md', 'pages', 'rtf'].includes(e)) return 'doc';
+  if (['js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'json', 'html', 'css', 'py', 'go', 'rs', 'sh'].includes(e)) return 'code';
+  return 'other';
+}
+
+export function formatByteSize(bytes) {
+  const b = Math.max(0, Number(bytes) || 0);
+  if (b < 1024) return `${b} B`;
+  if (b < 1048576) return `${Math.round(b / 1024)} KB`;
+  return `${(b / 1048576).toFixed(1)} MB`;
+}
+
+export function buildAttachmentBlobUrl(file) {
+  if (!file?.blobId) return '';
+  const qp = new URLSearchParams();
+  if (file.name) qp.set('name', file.name);
+  if (file.mime) qp.set('mime', file.mime);
+  const qs = qp.toString();
+  return `/api/blobs/${file.blobId}${qs ? '?' + qs : ''}`;
+}
+
+export function attachFileRecord(data, fields = {}, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const by = opts.by !== undefined ? resolveMember(data, opts.by) || data.me : data.me;
+  const agent = normalizeAgentName(opts.agent);
+  const name = String(fields.name ?? '')
+    .trim()
+    .replace(/[/\\]/g, '_');
+  if (!name) throw new DomainError('Attachment file name is required');
+  let taskObj = fields.task ? requireTask(data, fields.task) : null;
+  let projObj = fields.project ? requireProject(data, fields.project) : null;
+  if (!taskObj && fields.target) {
+    const targetStr = String(fields.target).trim();
+    if (/^[A-Z][A-Z0-9]*-\d+$/i.test(targetStr) || findTask(data, targetStr)) {
+      taskObj = requireTask(data, targetStr);
+    } else if (projObj) {
+      const targetProj = resolveProject(data, targetStr);
+      if (targetProj) {
+        if (targetProj.id !== projObj.id) {
+          throw new DomainError(`Project target "${targetStr}" conflicts with -p ${projObj.key}`, 400);
+        }
+      } else {
+        taskObj = requireTask(data, targetStr);
+      }
+    } else {
+      projObj = resolveProject(data, targetStr);
+      if (!projObj) taskObj = resolveTask(data, targetStr);
+      if (!projObj && !taskObj) throw new DomainError(`Task or project not found: ${targetStr}`, 404);
+    }
+  }
+  if (!projObj && taskObj) projObj = requireProject(data, taskObj.project);
+  if (!projObj) throw new DomainError('Attachment requires a project or task');
+  if (taskObj && taskObj.project !== projObj.id) {
+    throw new DomainError(`Task ${taskObj.key} belongs to a different project than ${projObj.key}`);
+  }
+  let blobId = null;
+  if (fields.blobId !== undefined && fields.blobId !== null && fields.blobId !== '') {
+    const bid = String(fields.blobId).trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(bid)) throw new DomainError('Invalid blobId: expected 64-char sha256 hex');
+    blobId = bid;
+  }
+  const sizeBytes = fields.sizeBytes !== undefined ? Math.max(0, Number(fields.sizeBytes) || 0) : undefined;
+  const size = fields.size ? String(fields.size) : formatByteSize(sizeBytes ?? 0);
+  const mime = fields.mime ? String(fields.mime).trim() : undefined;
+  const rawUrl = !blobId && fields.url && !String(fields.url).startsWith('blob:') ? String(fields.url) : undefined;
+  const url = blobId ? buildAttachmentBlobUrl({ blobId, name, mime }) : rawUrl;
+  const id = fields.id || uid('f');
+  const base = {
+    id,
+    name,
+    type: fields.type || fileTypeFromName(name),
+    size,
+    ...(sizeBytes !== undefined ? { sizeBytes } : {}),
+    ...(mime ? { mime } : {}),
+    ...(blobId ? { blobId } : {}),
+    ...(url ? { url } : {}),
+    by,
+    ...(agent ? { agent } : {}),
+    at: now,
+  };
+  data.files = Array.isArray(data.files) ? data.files : [];
+  const fileRec = { ...base, project: projObj.id, task: taskObj?.id || null };
+  data.files.unshift(fileRec);
+  if (taskObj) {
+    taskObj.attachments = Array.isArray(taskObj.attachments) ? taskObj.attachments : [];
+    taskObj.attachments.push({ ...base });
+    logActivity(data, 'added a file to', taskObj, name, { by, agent, now });
+  } else {
+    logActivity(data, 'uploaded file', null, name, { by, agent, projectId: projObj.id, now });
+  }
+  return fileRec;
+}
+
+export function formatFileForApi(data, f) {
+  const p = f.project ? findProject(data, f.project) : null;
+  const t = f.task ? findTask(data, f.task) : null;
+  return {
+    ...f,
+    url: f.blobId ? buildAttachmentBlobUrl(f) : f.url && !String(f.url).startsWith('blob:') ? f.url : null,
+    byName: f.by ? findMember(data, f.by)?.name || null : null,
+    projectKey: p?.key || null,
+    projectName: p?.name || null,
+    taskKey: t?.key || null,
+    taskTitle: t?.title || null,
+  };
+}
+
+export function queryFiles(data, filters = {}) {
+  let list = Array.isArray(data.files) ? data.files.slice() : [];
+  if (filters.project) {
+    const p = requireProject(data, filters.project);
+    list = list.filter(f => f.project === p.id);
+  }
+  if (filters.task) {
+    const t = requireTask(data, filters.task);
+    list = list.filter(f => f.task === t.id);
+  }
+  if (filters.type && filters.type !== 'all') {
+    list = list.filter(f => f.type === filters.type);
+  }
+  list.sort((a, b) => (b.at || 0) - (a.at || 0));
+  return list;
+}
+
+export function deleteWorkspaceFile(data, fileId, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const by = opts.by ?? data.me;
+  const agent = normalizeAgentName(opts.agent);
+  const list = data.files || [];
+  const idx = list.findIndex(x => x.id === fileId);
+  if (idx < 0) throw new DomainError(`File not found: ${fileId}`, 404);
+  const [removed] = list.splice(idx, 1);
+  if (removed.task) {
+    const t = findTask(data, removed.task);
+    if (t && Array.isArray(t.attachments)) {
+      t.attachments = t.attachments.filter(a => a.id !== removed.id && (a.id || a.name !== removed.name));
+      logActivity(data, 'removed a file from', t, removed.name, { by, agent, now });
+    }
+  }
+  return removed;
+}
+
+export function slugifyDocSlug(raw) {
+  return (
+    String(raw ?? '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'doc'
+  );
+}
+
+function uniqueDocSlug(data, projectId, desired, excludeId = null) {
+  const base = slugifyDocSlug(desired);
+  const safeBase = UNSAFE_OBJECT_IDS.has(base) ? `doc-${base}` : base;
+  const docs = (data.docs || []).filter(d => d.project === projectId && d.id !== excludeId);
+  if (!docs.some(d => d.slug === safeBase)) return safeBase;
+  let i = 2;
+  while (docs.some(d => d.slug === `${safeBase}-${i}`)) i++;
+  return `${safeBase}-${i}`;
+}
+
+export function docsOfProject(data, pid) {
+  return (data.docs || [])
+    .filter(d => d.project === pid)
+    .slice()
+    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.updated || 0) - (a.updated || 0));
+}
+
+function resolveDocBodyInput(fields) {
+  if (fields.bodyMarkdown !== undefined) return String(fields.bodyMarkdown ?? '');
+  if (fields.body !== undefined) return String(fields.body ?? '');
+  if (fields.bodyHtml !== undefined) return htmlToMarkdown(fields.bodyHtml);
+  return undefined;
+}
+
+export function resolveDoc(data, ref, projectRef = null) {
+  if (!ref) return null;
+  const docs = data.docs || [];
+  if (typeof ref === 'object' && ref.id) return docs.find(d => d.id === ref.id) || null;
+  const s = String(ref).trim();
+  const projFilter = projectRef ? requireProject(data, projectRef).id : null;
+  const scoped = projFilter ? docs.filter(d => d.project === projFilter) : docs;
+  const byId = scoped.find(d => d.id === s);
+  if (byId) return byId;
+  const lower = s.toLowerCase();
+  const slugMatches = scoped.filter(d => d.slug === lower);
+  if (slugMatches.length === 1) return slugMatches[0];
+  if (slugMatches.length > 1) {
+    throw new DomainError(`Ambiguous doc reference "${ref}" across multiple projects; pass -p <project>`, 409);
+  }
+  const titleMatches = scoped.filter(d => d.title.toLowerCase() === lower);
+  if (titleMatches.length === 1) return titleMatches[0];
+  if (titleMatches.length > 1) {
+    const hint = projFilter ? 'use doc id or unique slug' : 'pass -p <project> or use doc id';
+    throw new DomainError(`Ambiguous doc title "${ref}"; ${hint}`, 409);
+  }
+  return null;
+}
+
+export function requireDoc(data, ref, projectRef = null) {
+  const doc = resolveDoc(data, ref, projectRef);
+  if (!doc) throw new DomainError(`Doc not found: ${ref}`, 404);
+  return doc;
+}
+
+export function createDoc(data, fields = {}, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const by = opts.by !== undefined ? resolveMember(data, opts.by) || data.me : data.me;
+  const agent = normalizeAgentName(opts.agent);
+  const p = fields.project ? requireProject(data, fields.project) : visibleProjectsOf(data, by)[0] || data.projects[0];
+  if (!p) throw new DomainError('No project available for doc creation');
+  const title = String(fields.title ?? '').trim();
+  if (!title) throw new DomainError('Doc title is required');
+  data.docs = Array.isArray(data.docs) ? data.docs : [];
+  const rawId = fields.id ? String(fields.id).trim() : uid('doc');
+  if (UNSAFE_OBJECT_IDS.has(rawId)) throw new DomainError(`Invalid doc id "${rawId}"`);
+  const slug = uniqueDocSlug(data, p.id, fields.slug ?? title);
+  const body = resolveDocBodyInput(fields) ?? '';
+  const doc = {
+    id: rawId,
+    project: p.id,
+    slug,
+    title,
+    body,
+    pinned: !!fields.pinned,
+    by,
+    updatedBy: by,
+    ...(agent ? { agent } : {}),
+    created: now,
+    updated: now,
+  };
+  data.docs.unshift(doc);
+  logActivity(data, 'created doc', null, `“${title}”`, { by, agent, projectId: p.id, now });
+  return doc;
+}
+
+export function updateDoc(data, ref, patch = {}, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const by = opts.by !== undefined ? resolveMember(data, opts.by) || data.me : data.me;
+  const agent = normalizeAgentName(opts.agent);
+  const doc = requireDoc(data, ref, opts.project ?? patch.project);
+  let changed = false;
+  if (patch.title !== undefined) {
+    const title = String(patch.title).trim();
+    if (!title) throw new DomainError('Doc title cannot be empty');
+    if (title !== doc.title) {
+      doc.title = title;
+      changed = true;
+    }
+  }
+  if (patch.slug !== undefined) {
+    const nextSlug = uniqueDocSlug(data, doc.project, patch.slug, doc.id);
+    if (nextSlug !== doc.slug) {
+      doc.slug = nextSlug;
+      changed = true;
+    }
+  }
+  const resolvedBody = resolveDocBodyInput(patch);
+  if (resolvedBody !== undefined) {
+    if (resolvedBody !== doc.body) {
+      doc.body = resolvedBody;
+      changed = true;
+    }
+  } else if (patch.appendBody !== undefined) {
+    const extra = String(patch.appendBody ?? '').trim();
+    if (extra) {
+      doc.body = doc.body ? `${doc.body.replace(/\s+$/, '')}\n\n${extra}` : extra;
+      changed = true;
+    }
+  }
+  if (patch.pinned !== undefined && !!patch.pinned !== !!doc.pinned) {
+    doc.pinned = !!patch.pinned;
+    changed = true;
+  }
+  if (changed) {
+    doc.updated = now;
+    doc.updatedBy = by;
+    if (agent) doc.agent = agent;
+    logActivity(data, 'updated doc', null, `“${doc.title}”`, { by, agent, projectId: doc.project, now });
+  }
+  return doc;
+}
+
+export function deleteDoc(data, ref, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const by = opts.by ?? data.me;
+  const agent = normalizeAgentName(opts.agent);
+  const doc = requireDoc(data, ref, opts.project);
+  data.docs = (data.docs || []).filter(d => d.id !== doc.id);
+  logActivity(data, 'deleted doc', null, `“${doc.title}”`, { by, agent, projectId: doc.project, now });
+  return doc;
+}
+
+export function formatDocForApi(data, doc) {
+  const p = findProject(data, doc.project);
+  const md = String(doc.body ?? '');
+  return {
+    ...doc,
+    body: md,
+    bodyMarkdown: md,
+    bodyHtml: markdownToHtml(md),
+    projectKey: p?.key || null,
+    projectName: p?.name || null,
+    byName: doc.by ? findMember(data, doc.by)?.name || null : null,
+    updatedByName: doc.updatedBy ? findMember(data, doc.updatedBy)?.name || null : null,
+  };
+}
+
 export function deleteProject(data, projectOrRef) {
   const p = requireProject(data, projectOrRef);
   const taskIds = data.tasks.filter(t => t.project === p.id).map(t => t.id);
@@ -732,6 +1059,7 @@ export function deleteProject(data, projectOrRef) {
   data.projects = data.projects.filter(x => x.id !== p.id);
   data.projOrder = (data.projOrder || []).filter(id => id !== p.id);
   data.files = (data.files || []).filter(f => f.project !== p.id);
+  data.docs = (data.docs || []).filter(doc => doc.project !== p.id);
   data.notifs = (data.notifs || []).filter(n => n.project !== p.id);
   if (Array.isArray(data.savedViews)) {
     data.savedViews = data.savedViews.filter(v => v.project !== p.id);
@@ -779,6 +1107,33 @@ export function duplicateProject(data, projectOrRef, opts = {}) {
     const dup = idMap.get(src.id);
     dup.deps = (src.deps || []).map(d => idMap.get(d)?.id).filter(Boolean);
     dup.parent = src.parent ? idMap.get(src.parent)?.id || null : null;
+  }
+  for (const srcDoc of docsOfProject(data, p.id)) {
+    createDoc(
+      data,
+      {
+        project: copy.id,
+        title: srcDoc.title,
+        slug: srcDoc.slug,
+        bodyMarkdown: srcDoc.body,
+        pinned: srcDoc.pinned,
+      },
+      { by, now },
+    );
+  }
+  const projOnlyFiles = (data.files || []).filter(f => f && f.project === p.id && !f.task);
+  if (projOnlyFiles.length) {
+    data.files = Array.isArray(data.files) ? data.files : [];
+    for (let i = projOnlyFiles.length - 1; i >= 0; i--) {
+      data.files.unshift({
+        ...structuredClone(projOnlyFiles[i]),
+        id: uid('f'),
+        project: copy.id,
+        task: null,
+        by,
+        at: now,
+      });
+    }
   }
   return copy;
 }
@@ -932,6 +1287,13 @@ export function duplicateTask(data, taskOrRef, opts = {}) {
   const src = requireTask(data, taskOrRef);
   const targetProject = requireProject(data, opts.project ?? src.project);
   const status = opts.status ?? src.status;
+  const clonedAttachments = (src.attachments || []).map(a => ({
+    ...structuredClone(a),
+    id: uid('f'),
+    by,
+    ...(agent ? { agent } : {}),
+    at: now,
+  }));
   const copy = createTask(
     data,
     {
@@ -947,6 +1309,7 @@ export function duplicateTask(data, taskOrRef, opts = {}) {
         id: uid('s'),
         assignee: validMemberId(data, s.assignee),
       })),
+      attachments: clonedAttachments,
       prs: [],
       deps: opts.deps !== undefined ? opts.deps : activeProjectDeps(data, targetProject.id, src.deps, src.id),
       parent: opts.parent !== undefined ? opts.parent : targetProject.id === src.project ? activeProjectParent(data, targetProject.id, src.parent, null) : null,
@@ -969,6 +1332,16 @@ export function duplicateTask(data, taskOrRef, opts = {}) {
   if (!isClosedStatus(status)) delete copy.prevStatus;
   delete copy.claimedBy;
   delete copy.claimedAt;
+  if (clonedAttachments.length) {
+    data.files = Array.isArray(data.files) ? data.files : [];
+    for (let i = clonedAttachments.length - 1; i >= 0; i--) {
+      data.files.unshift({
+        ...structuredClone(clonedAttachments[i]),
+        project: targetProject.id,
+        task: copy.id,
+      });
+    }
+  }
   return copy;
 }
 
@@ -1174,6 +1547,9 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
       t.parent = activeProjectParent(data, p.id, t.parent, t.id);
       for (const n of data.notifs || []) {
         if (n.task === t.id) n.project = p.id;
+      }
+      for (const f of data.files || []) {
+        if (f.task === t.id) f.project = p.id;
       }
       for (const other of data.tasks) {
         if (other.id !== t.id && other.project !== p.id) {
@@ -1481,6 +1857,7 @@ export function formatProjectForApi(data, p, now = Date.now()) {
     openCount: ts.filter(t => !isClosedStatus(t.status)).length,
     doneCount,
     canceledCount,
+    docCount: (data.docs || []).filter(d => d.project === p.id).length,
     overdueCount: ts.filter(t => isTaskOverdue(t, now)).length,
     progress: projectProgress(data, p.id),
   };
@@ -1637,7 +2014,7 @@ export function searchWorkspace(data, query, opts = {}) {
   const q = String(query || '')
     .trim()
     .toLowerCase();
-  if (!q) return { tasks: [], projects: [], people: [], files: [], comments: [] };
+  if (!q) return { tasks: [], projects: [], people: [], files: [], docs: [], comments: [] };
   const has = s => (s || '').toLowerCase().includes(q);
   return {
     tasks: allTasksOf(data, actor)
@@ -1649,6 +2026,7 @@ export function searchWorkspace(data, query, opts = {}) {
     projects: visibleProjectsOf(data, actor).filter(p => has(p.name) || has(p.key) || has(p.desc)),
     people: (data.members || []).filter(m => has(m.name) || has(m.email) || has(m.title)),
     files: (data.files || []).filter(f => has(f.name) && canSeeProject(data, findProject(data, f.project), actor)),
+    docs: (data.docs || []).filter(doc => (has(doc.title) || has(doc.slug) || has(doc.body)) && canSeeProject(data, findProject(data, doc.project), actor)),
     comments: (data.comments || []).filter(c => {
       if (!has(c.text)) return false;
       const t = findTask(data, c.task);
@@ -1659,7 +2037,7 @@ export function searchWorkspace(data, query, opts = {}) {
 
 /* ---------- atomic field-level workspace diff & merge ---------- */
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const KEYED_DATA_LISTS = ['teams', 'labels', 'workspaces', 'files', 'notifs', 'events', 'savedViews'];
+const KEYED_DATA_LISTS = ['teams', 'labels', 'workspaces', 'files', 'docs', 'notifs', 'events', 'savedViews'];
 const KNOWN_DATA_KEYS = new Set([
   'ws',
   'notifPrefs',
@@ -1948,6 +2326,7 @@ export function applyWorkspacePatch(targetState, patch) {
   }
   const d = targetState.data;
   let rekeyed = false;
+  const prevDocLoc = new Map((Array.isArray(d.docs) ? d.docs : []).filter(doc => doc?.id).map(doc => [doc.id, `${doc.project}:${doc.slug}`]));
 
   const deletedProjIds = new Set(Array.isArray(patch.projects?.deleted) ? patch.projects.deleted : []);
   const deletedTaskIds = new Set(Array.isArray(patch.tasks?.deleted) ? patch.tasks.deleted : []);
@@ -1966,7 +2345,7 @@ export function applyWorkspacePatch(targetState, patch) {
         }
       }
     }
-    for (const key of ['files', 'savedViews']) {
+    for (const key of ['files', 'savedViews', 'docs']) {
       const upd = patch[key]?.updated;
       if (!isPlainObject(upd) || !Array.isArray(d[key])) continue;
       for (const item of d[key]) {
@@ -2246,6 +2625,79 @@ export function applyWorkspacePatch(targetState, patch) {
       t.claimedAt = null;
       rekeyed = true;
     }
+  }
+  if (Array.isArray(d.files)) {
+    const keptFiles = [];
+    for (const f of d.files) {
+      if (!f || (f.project && !findProject(d, f.project)) || (f.task && !findTask(d, f.task))) {
+        rekeyed = true;
+        continue;
+      }
+      if (typeof f.url === 'string' && f.url.startsWith('blob:')) {
+        delete f.url;
+        rekeyed = true;
+      }
+      if (f.task) {
+        const pt = findTask(d, f.task);
+        if (pt && f.project !== pt.project) {
+          f.project = pt.project;
+          rekeyed = true;
+        }
+      }
+      if (f.by && !findMember(d, f.by)) {
+        f.by = d.me;
+        rekeyed = true;
+      }
+      keptFiles.push(f);
+    }
+    if (keptFiles.length !== d.files.length) d.files = keptFiles;
+  }
+  if (Array.isArray(d.docs)) {
+    const keptDocs = [];
+    for (const doc of d.docs) {
+      if (!doc || !findProject(d, doc.project)) {
+        rekeyed = true;
+        continue;
+      }
+      if (doc.by && !findMember(d, doc.by)) {
+        doc.by = d.me;
+        rekeyed = true;
+      }
+      if (doc.updatedBy && !findMember(d, doc.updatedBy)) {
+        doc.updatedBy = d.me;
+        rekeyed = true;
+      }
+      keptDocs.push(doc);
+    }
+    /* Assign unique slugs to pre-existing untouched docs first so a racing
+       concurrent create (even when unshifted to index 0 via docs.order) never
+       steals an existing document's stable slug. */
+    const seenSlugsByProject = new Map();
+    const slugPriorityOrder = [
+      ...keptDocs.filter(doc => prevDocLoc.has(doc.id) && prevDocLoc.get(doc.id) === `${doc.project}:${doc.slug}`),
+      ...keptDocs.filter(doc => prevDocLoc.has(doc.id) && prevDocLoc.get(doc.id) !== `${doc.project}:${doc.slug}`),
+      ...keptDocs.filter(doc => !prevDocLoc.has(doc.id)),
+    ];
+    for (const doc of slugPriorityOrder) {
+      let projSlugs = seenSlugsByProject.get(doc.project);
+      if (!projSlugs) {
+        projSlugs = new Set();
+        seenSlugsByProject.set(doc.project, projSlugs);
+      }
+      const cleanBase = slugifyDocSlug(doc.slug || doc.title);
+      const safeBase = UNSAFE_OBJECT_IDS.has(cleanBase) ? `doc-${cleanBase}` : cleanBase;
+      let nextSlug = safeBase;
+      let suffix = 2;
+      while (projSlugs.has(nextSlug)) {
+        nextSlug = `${safeBase}-${suffix++}`;
+      }
+      if (nextSlug !== doc.slug) {
+        doc.slug = nextSlug;
+        rekeyed = true;
+      }
+      projSlugs.add(doc.slug);
+    }
+    if (keptDocs.length !== d.docs.length) d.docs = keptDocs;
   }
   if (Array.isArray(d.notifs)) {
     const kept = [];

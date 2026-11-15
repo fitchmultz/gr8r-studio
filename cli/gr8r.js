@@ -97,14 +97,15 @@ function rawHttpRequest(targetUrl, { method = 'GET', headers = {}, body, proxyUr
         const chunks = [];
         res.on('data', c => chunks.push(c));
         res.on('end', () => {
-          const text = Buffer.concat(chunks).toString('utf8');
+          const buffer = Buffer.concat(chunks);
+          const text = buffer.toString('utf8');
           let json = null;
           try {
             json = text ? JSON.parse(text) : null;
           } catch {
             /* non-JSON response */
           }
-          resolve({ status: res.statusCode || 0, headers: res.headers, text, json });
+          resolve({ status: res.statusCode || 0, headers: res.headers, buffer, text, json });
         });
       },
     );
@@ -209,6 +210,50 @@ export class Gr8rClient {
     }
     return res.json;
   }
+
+  async uploadBlob(buf, fileName) {
+    await this.ensureToken(false);
+    const makeOpts = () => ({
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${this.token}`,
+        'content-type': 'application/octet-stream',
+        'x-file-name': encodeURIComponent(fileName),
+        ...(this.agent ? { 'x-gr8r-agent': encodeURIComponent(this.agent) } : {}),
+      },
+      body: buf,
+      timeoutMs: 60000,
+    });
+    let res = await this.sendRaw('/blobs', makeOpts());
+    if (res.status === 401) {
+      await this.ensureToken(true);
+      res = await this.sendRaw('/blobs', makeOpts());
+    }
+    if (res.status < 200 || res.status >= 300) {
+      const detail = res.json?.error || res.text?.trim() || `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    return res.json;
+  }
+
+  async downloadBlob(blobId) {
+    await this.ensureToken(false);
+    const makeOpts = () => ({
+      method: 'GET',
+      headers: { authorization: `Bearer ${this.token}` },
+      timeoutMs: 60000,
+    });
+    let res = await this.sendRaw(`/blobs/${encodeURIComponent(blobId)}?download=1`, makeOpts());
+    if (res.status === 401) {
+      await this.ensureToken(true);
+      res = await this.sendRaw(`/blobs/${encodeURIComponent(blobId)}?download=1`, makeOpts());
+    }
+    if (res.status < 200 || res.status >= 300) {
+      const detail = res.json?.error || res.text?.trim() || `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    return res.buffer;
+  }
 }
 
 /* ---------- input & formatting helpers ---------- */
@@ -286,6 +331,9 @@ function formatTaskDetail(payload) {
       lines.push(`  [${stateTag}] ${pr.repo}#${pr.number}  ${pr.title || ''}  ${pr.url}`.replace(/\s{2,}/g, '  '));
     }
   }
+  if (t.attachments?.length) {
+    lines.push(`Attachments (${t.attachments.length}): ${t.attachments.map(a => `${a.name} (${a.size}${a.blobId ? ', persisted' : ''})`).join(', ')}`);
+  }
   if (t.descMarkdown) lines.push('', '--- Description ---', t.descMarkdown);
   if (subIssues.length) {
     lines.push('', `--- Sub-issues (${t.childDoneCount ?? 0}/${t.childCount ?? subIssues.length}) ---`);
@@ -359,6 +407,17 @@ Commands:
   inbox read <id | --all> [-p PROJECT]      Mark one or all Inbox notifications read
   inbox unread <id>                         Mark an Inbox notification unread
 
+  attach <task-or-project> <path> [--name]  Upload & attach a screenshot/file to a task or project
+  files [-p PROJECT] [-t TASK]              List project/task attachments
+  file download <file-id> [-o PATH]         Download an attachment's persisted blob
+  file delete <file-id> --yes               Delete an attachment from project & task
+
+  docs [-p PROJECT]                         List Markdown Project Docs
+  doc view <id-or-slug> [-p PROJECT]        Read a Project Doc as Markdown
+  doc create <title> -p PROJECT [--body -]  Create a Markdown Project Doc
+  doc update <id-or-slug> [-p PROJECT] ...  Update or --append Markdown to a Project Doc
+  doc delete <id-or-slug> [-p PROJECT] -y   Delete a Project Doc
+
   pr-sync [--file -] | [--repo R --pr N ..] Link GitHub PRs to KEY-123 tasks & sync status
   search <query>                            Search tasks, projects, people, files, and comments
   activity [-p PROJECT] [-t TASK] [--limit] Show recent workspace activity
@@ -402,6 +461,11 @@ export async function runCli(argv, io = {}) {
       desc: { type: 'string', short: 'd' },
       'desc-file': { type: 'string' },
       'append-desc': { type: 'string' },
+      append: { type: 'string' },
+      slug: { type: 'string' },
+      pinned: { type: 'boolean' },
+      unpinned: { type: 'boolean' },
+      output: { type: 'string', short: 'o' },
       subtask: { type: 'string', multiple: true },
       note: { type: 'string' },
       body: { type: 'string' },
@@ -1031,6 +1095,213 @@ export async function runCli(argv, io = {}) {
     return 0;
   }
 
+  if (cmd === 'attach') {
+    let targetRef = null;
+    let filePath;
+    if (pos.length >= 3) {
+      targetRef = pos[1];
+      filePath = pos[2];
+    } else if (pos.length === 2 && (opts.task || opts.project)) {
+      filePath = pos[1];
+    } else {
+      throw new Error('Usage: gr8r attach <task-or-project-ref> <file-path> [--name NAME]  (or gr8r attach <file-path> -t TASK|-p PROJECT)');
+    }
+    const buf = fs.readFileSync(filePath);
+    const fileName = opts.name || path.basename(filePath);
+    let attachBody;
+    if (opts.task) {
+      const tRes = await client.request('GET', `/tasks/${encodeURIComponent(opts.task)}`);
+      if (opts.project) {
+        const pRes = await client.request('GET', `/projects/${encodeURIComponent(opts.project)}`);
+        if (tRes.task.project !== pRes.project.id) {
+          throw new Error(`Task ${tRes.task.key} belongs to a different project than ${pRes.project.key}`);
+        }
+      }
+      attachBody = { task: opts.task, ...(opts.project ? { project: opts.project } : {}) };
+    } else if (opts.project && targetRef) {
+      const pRes = await client.request('GET', `/projects/${encodeURIComponent(opts.project)}`);
+      if (/^[A-Z][A-Z0-9]*-\d+$/i.test(targetRef)) {
+        const tRes = await client.request('GET', `/tasks/${encodeURIComponent(targetRef)}`);
+        if (tRes.task.project !== pRes.project.id) {
+          throw new Error(`Task ${tRes.task.key} belongs to a different project than ${pRes.project.key}`);
+        }
+      } else {
+        let tpRes = null;
+        try {
+          tpRes = await client.request('GET', `/projects/${encodeURIComponent(targetRef)}`);
+        } catch {
+          /* fall back to task lookup */
+        }
+        if (tpRes) {
+          if (tpRes.project.id !== pRes.project.id) {
+            throw new Error(`Project target "${targetRef}" conflicts with -p ${pRes.project.key}`);
+          }
+        } else {
+          const tRes = await client.request('GET', `/tasks/${encodeURIComponent(targetRef)}`);
+          if (tRes.task.project !== pRes.project.id) {
+            throw new Error(`Task ${tRes.task.key} belongs to a different project than ${pRes.project.key}`);
+          }
+        }
+      }
+      attachBody = { project: opts.project, target: targetRef };
+    } else if (opts.project) {
+      await client.request('GET', `/projects/${encodeURIComponent(opts.project)}`);
+      attachBody = { project: opts.project };
+    } else {
+      if (/^[A-Z][A-Z0-9]*-\d+$/i.test(targetRef)) {
+        await client.request('GET', `/tasks/${encodeURIComponent(targetRef)}`);
+      } else {
+        try {
+          await client.request('GET', `/projects/${encodeURIComponent(targetRef)}`);
+        } catch {
+          try {
+            await client.request('GET', `/tasks/${encodeURIComponent(targetRef)}`);
+          } catch (err) {
+            throw new Error(`Task or project not found: ${targetRef}`, { cause: err });
+          }
+        }
+      }
+      attachBody = { target: targetRef };
+    }
+    const uploaded = await client.uploadBlob(buf, fileName);
+    const res = await client.request('POST', '/files', {
+      ...attachBody,
+      name: fileName,
+      blobId: uploaded.blobId,
+      sizeBytes: uploaded.sizeBytes,
+      mime: uploaded.mime,
+    });
+    if (opts.json) return outJson({ ...res, blob: uploaded });
+    const where = res.file.taskKey ? `${res.file.taskKey} (${res.file.projectKey})` : res.file.projectKey;
+    stdout(`Attached ${res.file.name} (${res.file.size}, blob ${uploaded.blobId.slice(0, 12)}) to ${where} [rev ${res.rev}]`);
+    return 0;
+  }
+
+  if (cmd === 'files') {
+    const params = new URLSearchParams();
+    if (opts.project) params.set('project', opts.project);
+    if (opts.task) params.set('task', opts.task);
+    if (opts.type) params.set('type', opts.type);
+    const qs = params.toString();
+    const res = await client.request('GET', `/files${qs ? '?' + qs : ''}`);
+    if (opts.json) return outJson(res);
+    stdout(
+      formatTable(res.files, [
+        ['ID', f => f.id],
+        ['PROJECT', f => f.projectKey || f.project],
+        ['TASK', f => f.taskKey || '-'],
+        ['SIZE', f => f.size],
+        ['BLOB', f => (f.blobId ? f.blobId.slice(0, 12) : '-')],
+        ['NAME', f => f.name],
+      ]),
+    );
+    return 0;
+  }
+
+  if (cmd === 'file') {
+    const fid = pos[2];
+    if (!fid) throw new Error('Usage: gr8r file <download|delete> <file-id>');
+    if (sub === 'download') {
+      const list = await client.request('GET', '/files');
+      const rec = list.files.find(f => f.id === fid);
+      if (!rec) throw new Error(`File not found: ${fid}`);
+      if (!rec.blobId) throw new Error(`File ${fid} (${rec.name}) has no persisted server blob`);
+      const buf = await client.downloadBlob(rec.blobId);
+      const outPath = opts.output || rec.name;
+      if (outPath === '-') {
+        process.stdout.write(buf);
+        return 0;
+      }
+      fs.writeFileSync(outPath, buf);
+      if (opts.json) return outJson({ saved: outPath, sizeBytes: buf.length, file: rec });
+      stdout(`Downloaded ${rec.name} (${buf.length} B) -> ${outPath}`);
+      return 0;
+    }
+    if (sub === 'delete' || sub === 'remove') {
+      if (!opts.yes) throw new Error('Pass --yes to delete a file.');
+      const res = await client.request('DELETE', `/files/${encodeURIComponent(fid)}`);
+      if (opts.json) return outJson(res);
+      stdout(`Deleted file ${res.deleted} [rev ${res.rev}]`);
+      return 0;
+    }
+    throw new Error(`Unknown file subcommand: ${sub}`);
+  }
+
+  if (cmd === 'docs') {
+    const qs = opts.project ? `?project=${encodeURIComponent(opts.project)}` : '';
+    const res = await client.request('GET', `/docs${qs}`);
+    if (opts.json) return outJson(res);
+    stdout(
+      formatTable(res.docs, [
+        ['ID', d => d.id],
+        ['PROJECT', d => d.projectKey || d.project],
+        ['SLUG', d => d.slug],
+        ['PIN', d => (d.pinned ? 'yes' : '-')],
+        ['UPDATED', d => new Date(d.updated).toISOString().slice(0, 10)],
+        ['TITLE', d => d.title],
+      ]),
+    );
+    return 0;
+  }
+
+  if (cmd === 'doc') {
+    if (sub === 'view' || sub === 'get' || sub === 'show') {
+      const ref = pos[2];
+      if (!ref) throw new Error('Usage: gr8r doc view <id-or-slug> [-p PROJECT]');
+      const qs = opts.project ? `?project=${encodeURIComponent(opts.project)}` : '';
+      const res = await client.request('GET', `/docs/${encodeURIComponent(ref)}${qs}`);
+      if (opts.json) return outJson(res);
+      const d = res.doc;
+      stdout(`# ${d.title}`);
+      stdout(`Slug: ${d.slug} | Project: ${d.projectKey || d.project} | Updated: ${new Date(d.updated).toISOString()} [rev ${res.rev}]`);
+      if (d.bodyMarkdown) stdout(`\n${d.bodyMarkdown}`);
+      return 0;
+    }
+    if (sub === 'create') {
+      const title = opts.title ?? pos[2];
+      if (!title) throw new Error('Usage: gr8r doc create <title> -p <project> [--body -]');
+      const body = { title };
+      if (opts.project) body.project = opts.project;
+      if (opts.slug) body.slug = opts.slug;
+      if (opts.pinned) body.pinned = true;
+      const md = resolveTextArg(opts.body ?? opts.desc, opts['body-file'] ?? opts['desc-file'], readStdin);
+      if (md !== undefined) body.bodyMarkdown = md;
+      const res = await client.request('POST', '/docs', body);
+      if (opts.json) return outJson(res);
+      stdout(`Created doc ${res.doc.slug} (${res.doc.id}) in ${res.doc.projectKey}: ${res.doc.title} [rev ${res.rev}]`);
+      return 0;
+    }
+    if (sub === 'update') {
+      const ref = pos[2];
+      if (!ref) throw new Error('Usage: gr8r doc update <id-or-slug> [-p PROJECT] [flags]');
+      const body = {};
+      if (opts.project) body.project = opts.project;
+      if (opts.title !== undefined) body.title = opts.title;
+      if (opts.slug !== undefined) body.slug = opts.slug;
+      if (opts.pinned) body.pinned = true;
+      if (opts.unpinned) body.pinned = false;
+      const md = resolveTextArg(opts.body ?? opts.desc, opts['body-file'] ?? opts['desc-file'], readStdin);
+      if (md !== undefined) body.bodyMarkdown = md;
+      const appendMd = opts.append ?? opts['append-desc'];
+      if (appendMd !== undefined) body.appendBody = appendMd === '-' ? readStdin() : appendMd;
+      const res = await client.request('PATCH', `/docs/${encodeURIComponent(ref)}`, body);
+      if (opts.json) return outJson(res);
+      stdout(`Updated doc ${res.doc.slug} (${res.doc.id}): ${res.doc.title} [rev ${res.rev}]`);
+      return 0;
+    }
+    if (sub === 'delete' || sub === 'remove') {
+      const ref = pos[2];
+      if (!ref) throw new Error('Usage: gr8r doc delete <id-or-slug> [-p PROJECT] --yes');
+      if (!opts.yes) throw new Error('Pass --yes to delete a project doc.');
+      const qs = opts.project ? `?project=${encodeURIComponent(opts.project)}` : '';
+      const res = await client.request('DELETE', `/docs/${encodeURIComponent(ref)}${qs}`);
+      if (opts.json) return outJson(res);
+      stdout(`Deleted doc ${res.slug} (${res.deleted}) [rev ${res.rev}]`);
+      return 0;
+    }
+    throw new Error(`Unknown doc subcommand: ${sub}`);
+  }
+
   if (cmd === 'pr-sync') {
     let pullRequests;
     if (opts.repo || opts.pr) {
@@ -1083,6 +1354,10 @@ export async function runCli(argv, io = {}) {
     if (res.files?.length) {
       stdout(`Files (${res.files.length}):`);
       for (const f of res.files) stdout(`  ${f.name}${f.project ? ` (${f.project})` : ''}`);
+    }
+    if (res.docs?.length) {
+      stdout(`Docs (${res.docs.length}):`);
+      for (const d of res.docs) stdout(`  [${d.slug}] ${d.title}${d.project ? ` (${d.project})` : ''}`);
     }
     if (res.comments.length) {
       stdout(`Comments (${res.comments.length}):`);

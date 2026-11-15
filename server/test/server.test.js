@@ -646,3 +646,351 @@ test('POST /api/github/pull-requests and HMAC POST /api/webhooks/github link PRs
   assert.equal(repeatRes.changed, false);
   assert.equal(repeatRes.rev, revAfterOpen);
 });
+
+test('/api/blobs enforces auth, cookie-backed <img> reads, CSP sandbox, and attachment disposition for unsafe types', async t => {
+  const { base } = await withServer(t, { trustBootstrap: 'none' });
+
+  // Unauthenticated upload and read are rejected when trustBootstrap=none.
+  assert.equal((await fetch(base + '/api/blobs', { method: 'POST', body: Buffer.from('abc') })).status, 401);
+  assert.equal((await fetch(base + '/api/blobs/' + 'a'.repeat(64))).status, 401);
+
+  // Upload PNG and SVG with Bearer token.
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const upPng = await fetch(base + '/api/blobs', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'image/png', 'x-file-name': 'shot.png' },
+    body: pngBytes,
+  });
+  assert.equal(upPng.status, 201);
+  const pngMeta = await upPng.json();
+
+  const upSvg = await fetch(base + '/api/blobs', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'image/svg+xml', 'x-file-name': 'evil.svg' },
+    body: Buffer.from('<svg onload="alert(1)"/>'),
+  });
+  assert.equal(upSvg.status, 201);
+  const svgMeta = await upSvg.json();
+
+  // Sign in via POST /api/auth to receive HttpOnly gr8r_blob cookie for browser <img> tags.
+  const authRes = await fetch(base + '/api/auth', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token: 'secret' }),
+  });
+  const setCookie = authRes.headers.get('set-cookie') || '';
+  const cookiePair = setCookie.split(';')[0];
+  assert.match(cookiePair, /^gr8r_blob=[0-9a-f]{64}$/);
+
+  // PNG serves inline with sandbox CSP via cookie alone (no Authorization header).
+  const getPng = await fetch(base + pngMeta.url, { headers: { cookie: cookiePair } });
+  assert.equal(getPng.status, 200);
+  assert.match(getPng.headers.get('content-disposition') || '', /^inline; filename="shot\.png"$/);
+  assert.match(getPng.headers.get('content-security-policy') || '', /sandbox/);
+  assert.deepEqual(Buffer.from(await getPng.arrayBuffer()), pngBytes);
+
+  // SVG is forced to Content-Disposition: attachment to prevent active content execution.
+  const getSvg = await fetch(base + svgMeta.url, { headers: { cookie: cookiePair } });
+  assert.equal(getSvg.status, 200);
+  assert.match(getSvg.headers.get('content-disposition') || '', /^attachment; filename="evil\.svg"$/);
+
+  // Non-ASCII filenames serve 200 with RFC 5987 filename* without throwing ERR_INVALID_CHAR.
+  const upUni = await fetch(base + '/api/blobs', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'image/png', 'x-file-name': encodeURIComponent('Übersicht 🙂.png') },
+    body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01]),
+  });
+  assert.equal(upUni.status, 201);
+  const uniMeta = await upUni.json();
+  const getUni = await fetch(base + `/api/blobs/${uniMeta.blobId}`, { headers: { cookie: cookiePair } });
+  assert.equal(getUni.status, 200);
+  assert.match(getUni.headers.get('content-disposition') || '', /filename\*=UTF-8''%C3%9Cbersicht%20%F0%9F%99%82\.png/);
+
+  // Identical bytes uploaded under two different names/MIMEs preserve both sidecar fallback and per-attachment URLs.
+  const sharedBytes = Buffer.from('%PDF-1.4 shared payload');
+  const upFirst = await (
+    await fetch(base + '/api/blobs', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/pdf', 'x-file-name': 'spec.pdf' },
+      body: sharedBytes,
+    })
+  ).json();
+  const upSecond = await (
+    await fetch(base + '/api/blobs', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'text/plain', 'x-file-name': 'notes.txt' },
+      body: sharedBytes,
+    })
+  ).json();
+  assert.equal(upFirst.blobId, upSecond.blobId);
+  const bareFirst = await fetch(base + `/api/blobs/${upFirst.blobId}`, { headers: auth });
+  assert.equal(bareFirst.headers.get('content-type'), 'application/pdf');
+  assert.match(bareFirst.headers.get('content-disposition') || '', /filename="spec\.pdf"/);
+  const secondByUrl = await fetch(base + upSecond.url, { headers: auth });
+  assert.equal(secondByUrl.headers.get('content-type'), 'text/plain');
+  assert.match(secondByUrl.headers.get('content-disposition') || '', /filename="notes\.txt"/);
+
+  // Malformed percent-encoding returns 400 cleanly without throwing URIError.
+  assert.equal((await fetch(base + '/api/blobs/%E0%A4%A', { headers: auth })).status, 400);
+
+  // Oversized >50 MB uploads return a clean 413 JSON error instead of ECONNRESET.
+  const tooBig = await fetch(base + '/api/blobs', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/octet-stream', 'x-file-name': 'oversized.bin' },
+    body: Buffer.alloc(50 * 1024 * 1024 + 4096, 0x61),
+  });
+  assert.equal(tooBig.status, 413);
+  assert.deepEqual(await tooBig.json(), { error: 'Blob exceeds 50 MB limit' });
+
+  // Concurrent content-addressed re-upload + delete preserves the in-flight upload lease until attached, and rejects missing blobIds.
+  await fetch(base + '/api/projects', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Race Test', key: 'RCE' }),
+  });
+  const raceBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xaa, 0xbb, 0xcc]);
+  const upA = await (
+    await fetch(base + '/api/blobs', { method: 'POST', headers: { ...auth, 'content-type': 'image/png', 'x-file-name': 'a.png' }, body: raceBytes })
+  ).json();
+  const fileA = await (
+    await fetch(base + '/api/files', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ project: 'RCE', name: 'a.png', blobId: upA.blobId, sizeBytes: upA.sizeBytes, mime: upA.mime }),
+    })
+  ).json();
+  // Caller B re-uploads same bytes while A's attachment exists, then A deletes before B calls POST /api/files.
+  const upB = await (
+    await fetch(base + '/api/blobs', { method: 'POST', headers: { ...auth, 'content-type': 'image/png', 'x-file-name': 'b.png' }, body: raceBytes })
+  ).json();
+  await fetch(base + `/api/files/${fileA.file.id}`, { method: 'DELETE', headers: auth });
+  const attachB = await fetch(base + '/api/files', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ project: 'RCE', name: 'b.png', blobId: upB.blobId, sizeBytes: upB.sizeBytes, mime: upB.mime }),
+  });
+  assert.equal(attachB.status, 201);
+  const fileB = await attachB.json();
+  assert.equal((await fetch(base + `/api/blobs/${upB.blobId}`, { headers: auth })).status, 200);
+  // Once B also deletes (no remaining upload lease), the blob is GC'd and re-attaching without upload returns 409.
+  await fetch(base + `/api/files/${fileB.file.id}`, { method: 'DELETE', headers: auth });
+  assert.equal((await fetch(base + `/api/blobs/${upB.blobId}`, { headers: auth })).status, 404);
+  const missingBlobAttach = await fetch(base + '/api/files', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ project: 'RCE', name: 'ghost.png', blobId: upB.blobId }),
+  });
+  assert.equal(missingBlobAttach.status, 409);
+
+  // Malformed non-array files/attachments in /api/sync do not poison subsequent writes.
+  const cur = await (await fetch(base + '/api/state', { headers: auth })).json();
+  const malformedState = structuredClone(cur.state);
+  malformedState.data.files = {};
+  malformedState.data.tasks = [{ id: 't_bad', title: 'Bad container', attachments: {} }];
+  const syncBad = await fetch(base + '/api/sync', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ baseRev: cur.rev, state: malformedState }),
+  });
+  assert.equal(syncBad.status, 200);
+  const afterBadProj = await fetch(base + '/api/projects', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Still Writable', key: 'SWR' }),
+  });
+  assert.equal(afterBadProj.status, 201);
+
+  // Orphaned POST /api/blobs uploads are automatically reclaimed once blobLeaseMs expires.
+  const shortLease = await withServer(t, { trustBootstrap: 'none', blobLeaseMs: 30 });
+  const orphanUp = await (
+    await fetch(shortLease.base + '/api/blobs', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'image/png', 'x-file-name': 'orphan.png' },
+      body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xdd]),
+    })
+  ).json();
+  assert.equal((await fetch(shortLease.base + `/api/blobs/${orphanUp.blobId}`, { headers: auth })).status, 200);
+  await new Promise(r => setTimeout(r, 90));
+  assert.equal((await fetch(shortLease.base + `/api/blobs/${orphanUp.blobId}`, { headers: auth })).status, 404);
+
+  // Restarting the server before an in-flight upload is attached preserves its lease across restart, while missing-blob workspace patches return 409.
+  const restartDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gr8r-restart-'));
+  t.after(() => fs.rmSync(restartDir, { recursive: true, force: true }));
+  const dataFile = path.join(restartDir, 'state.json');
+  const distDir = path.join(restartDir, 'dist');
+  fs.mkdirSync(distDir);
+  const srv1 = await startServer({ port: 0, token: 'secret', dataFile, distDir, trustBootstrap: 'none', blobLeaseMs: 60 });
+  const base1 = `http://127.0.0.1:${srv1.port}`;
+  const pRes = await (
+    await fetch(base1 + '/api/projects', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Restart Safe', key: 'RST' }),
+    })
+  ).json();
+  const tRes = await (
+    await fetch(base1 + '/api/tasks', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ project: 'RST', title: 'Initial title' }),
+    })
+  ).json();
+  const preRestartUp = await (
+    await fetch(base1 + '/api/blobs', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'image/png', 'x-file-name': 'survive.png' },
+      body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xee, 0xff]),
+    })
+  ).json();
+  await srv1.close();
+
+  const srv2 = await startServer({ port: 0, token: 'secret', dataFile, distDir, trustBootstrap: 'none', blobLeaseMs: 120 });
+  const base2 = `http://127.0.0.1:${srv2.port}`;
+  // Uppercase/padded blobId in PATCH /api/workspace is normalized and protected from lease GC.
+  const patchOk = await fetch(base2 + '/api/workspace', {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      baseRev: tRes.rev,
+      patch: {
+        files: {
+          created: [
+            {
+              id: 'f_survive',
+              name: 'survive.png',
+              project: pRes.project.id,
+              blobId: `  ${preRestartUp.blobId.toUpperCase()}  `,
+              mime: 'image/png',
+              sizeBytes: 6,
+            },
+          ],
+        },
+      },
+    }),
+  });
+  assert.equal(patchOk.status, 200);
+  await new Promise(r => setTimeout(r, 170));
+  assert.equal((await fetch(base2 + `/api/blobs/${preRestartUp.blobId}`, { headers: auth })).status, 200);
+
+  // PATCH /api/workspace with a missing blob + an unrelated task edit preserves the task edit and strips only the dead attachment.
+  const patchMissingBlob = await fetch(base2 + '/api/workspace', {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      baseRev: tRes.rev + 1,
+      patch: {
+        tasks: {
+          updated: {
+            [tRes.task.id]: { fields: { set: { title: 'LOCAL UNSYNCED EDIT' } } },
+          },
+        },
+        files: {
+          created: [{ id: 'f_missing', name: 'missing.png', project: pRes.project.id, blobId: 'A'.repeat(64), mime: 'image/png', sizeBytes: 6 }],
+        },
+      },
+    }),
+  });
+  assert.equal(patchMissingBlob.status, 200);
+  const patchMissingJson = await patchMissingBlob.json();
+  assert.equal(patchMissingJson.merged, true);
+  assert.deepEqual(patchMissingJson.droppedFiles, ['missing.png']);
+  assert.equal(patchMissingJson.state.data.tasks.find(x => x.id === tRes.task.id).title, 'LOCAL UNSYNCED EDIT');
+  assert.equal(
+    patchMissingJson.state.data.files.some(f => f.id === 'f_missing'),
+    false,
+  );
+
+  // state.json loss + restart preserves surviving blobs for browser POST /api/sync re-seed, while stripping missing rev-0 blob refs.
+  const savedClientState = structuredClone(patchMissingJson.state);
+  savedClientState.data.files.push({ id: 'f_dead_sync', name: 'dead-sync.png', project: pRes.project.id, blobId: 'b'.repeat(64) });
+  await srv2.close();
+  fs.rmSync(dataFile, { force: true });
+  await new Promise(r => setTimeout(r, 90));
+
+  const srv3 = await startServer({ port: 0, token: 'secret', dataFile, distDir, trustBootstrap: 'none', blobLeaseMs: 40 });
+  const base3 = `http://127.0.0.1:${srv3.port}`;
+  await new Promise(r => setTimeout(r, 90));
+  // Even an intervening domain mutation + another server restart after state.json loss does not wipe settled blobs before /api/sync re-seeds.
+  const interveningProj = await (
+    await fetch(base3 + '/api/projects', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Intervening CLI Write', key: 'INT' }),
+    })
+  ).json();
+  assert.equal((await fetch(base3 + `/api/blobs/${preRestartUp.blobId}`, { headers: auth })).status, 200);
+  await srv3.close();
+  await new Promise(r => setTimeout(r, 90));
+
+  const srv4 = await startServer({ port: 0, token: 'secret', dataFile, distDir, trustBootstrap: 'none', blobLeaseMs: 40 });
+  t.after(() => srv4.close());
+  const base4 = `http://127.0.0.1:${srv4.port}`;
+  assert.equal((await fetch(base4 + `/api/blobs/${preRestartUp.blobId}`, { headers: auth })).status, 200);
+  const reseed = await fetch(base4 + '/api/sync', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ baseRev: interveningProj.rev, state: savedClientState }),
+  });
+  assert.equal(reseed.status, 200);
+  const reseedJson = await reseed.json();
+  assert.deepEqual(reseedJson.droppedFiles, ['dead-sync.png']);
+  assert.equal(
+    reseedJson.state.data.files.some(f => f.id === 'f_survive'),
+    true,
+  );
+  assert.equal(
+    reseedJson.state.data.files.some(f => f.id === 'f_dead_sync'),
+    false,
+  );
+  assert.equal((await fetch(base4 + `/api/blobs/${preRestartUp.blobId}`, { headers: auth })).status, 200);
+
+  // Deleting a file/task hides GET /api/blobs/:sha immediately (404), restores cleanly on Undo within blobDeleteGraceMs, and unlinks from disk after grace expiry.
+  const undoSrv = await withServer(t, { trustBootstrap: 'none', blobLeaseMs: 200, blobDeleteGraceMs: 120 });
+  const undoProj = await (
+    await fetch(undoSrv.base + '/api/projects', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Undo Project', key: 'UND' }),
+    })
+  ).json();
+  const undoUp = await (
+    await fetch(undoSrv.base + '/api/blobs', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'image/png', 'x-file-name': 'undo.png' },
+      body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x77, 0x88]),
+    })
+  ).json();
+  const undoFile = await (
+    await fetch(undoSrv.base + '/api/files', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ project: 'UND', name: 'undo.png', blobId: undoUp.blobId, sizeBytes: 6, mime: 'image/png' }),
+    })
+  ).json();
+  const beforeDelSnap = await (await fetch(undoSrv.base + '/api/state', { headers: auth })).json();
+  const delPatch = await fetch(undoSrv.base + '/api/workspace', {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ baseRev: beforeDelSnap.rev, patch: { files: { deleted: [undoFile.file.id] } } }),
+  });
+  assert.equal(delPatch.status, 200);
+  assert.equal((await fetch(undoSrv.base + `/api/blobs/${undoUp.blobId}`, { headers: auth })).status, 404);
+
+  const restorePatch = await fetch(undoSrv.base + '/api/workspace', {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      baseRev: beforeDelSnap.rev + 1,
+      patch: { files: { created: [beforeDelSnap.state.data.files[0]] } },
+    }),
+  });
+  assert.equal(restorePatch.status, 200);
+  const restoreJson = await restorePatch.json();
+  assert.equal(restoreJson.droppedFiles, undefined);
+  assert.equal((await fetch(undoSrv.base + `/api/blobs/${undoUp.blobId}`, { headers: auth })).status, 200);
+
+  await fetch(undoSrv.base + `/api/files/${undoFile.file.id}`, { method: 'DELETE', headers: auth });
+  await new Promise(r => setTimeout(r, 175));
+  assert.equal(fs.existsSync(path.join(path.dirname(undoSrv.dataFile), 'blobs', undoUp.blobId)), false);
+  assert.ok(undoProj.project.id);
+});

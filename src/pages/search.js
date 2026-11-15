@@ -17,6 +17,7 @@ export function pageSearch() {
     ['tasks', 'Tasks'],
     ['projects', 'Projects'],
     ['people', 'People'],
+    ['docs', 'Docs'],
     ['files', 'Files'],
     ['comments', 'Comments'],
   ];
@@ -61,6 +62,16 @@ export function pageSearch() {
                 .map(
                   m =>
                     `<div class="mini" data-a="go" data-r="member" data-id="${m.id}">${av(m.id, 'md', false)}<span class="tt">${hl(m.name, q)} <span class="faint" style="font-size:12px">${esc(m.title)}</span></span><span class="faint" style="font-size:12px">${esc(m.email)}</span></div>`,
+                )
+                .join(''),
+            ) +
+            sec(
+              'docs',
+              'Docs',
+              (r.docs || [])
+                .map(
+                  doc =>
+                    `<div class="mini" data-a="openDocSearch" data-project="${doc.project}" data-id="${doc.id}">${ic('file-text', 14)}<span class="tt">${hl(doc.title, q)}</span><span class="faint" style="font-size:12px">${esc(proj(doc.project)?.name || '')}</span></div>`,
                 )
                 .join(''),
             ) +
