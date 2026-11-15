@@ -494,6 +494,9 @@ export function normalizeTaskPrLink(raw) {
   if (typeof raw.createdAt === 'number' && Number.isFinite(raw.createdAt) && raw.createdAt > 0) {
     out.createdAt = raw.createdAt;
   }
+  if (typeof raw.observedOpenAt === 'number' && Number.isFinite(raw.observedOpenAt) && raw.observedOpenAt > 0) {
+    out.observedOpenAt = raw.observedOpenAt;
+  }
   if (typeof raw.linkedSeq === 'number' && Number.isFinite(raw.linkedSeq) && raw.linkedSeq > 0) {
     out.linkedSeq = raw.linkedSeq;
   }
@@ -1743,6 +1746,7 @@ function isIncompleteStackMerge(taskPrs, mergedLink, preExistingMergedKeys = new
       return Boolean(other.mergedAt && mergedLink.createdAt && other.mergedAt >= mergedLink.createdAt);
     }
     if (mergedLink.createdAt) return Boolean(other.mergedAt && other.mergedAt >= mergedLink.createdAt);
+    if (mergedLink.observedOpenAt && other.mergedAt) return other.mergedAt >= mergedLink.observedOpenAt;
     if (other.mergedSeq && mergedLink.linkedSeq) return other.mergedSeq > mergedLink.linkedSeq;
     const otherKey = `${other.repo.toLowerCase()}#${other.number}`;
     return !preExistingMergedKeys.has(otherKey);
@@ -1752,6 +1756,7 @@ function isIncompleteStackMerge(taskPrs, mergedLink, preExistingMergedKeys = new
 function isNewerPartialThan(partial, link) {
   if (partial.repo.toLowerCase() === link.repo.toLowerCase()) return partial.number > link.number;
   if (partial.createdAt) return !link.mergedAt || link.mergedAt < partial.createdAt;
+  if (partial.observedOpenAt && link.mergedAt) return link.mergedAt < partial.observedOpenAt;
   if (partial.linkedSeq && link.mergedSeq) return partial.linkedSeq > link.mergedSeq;
   return true;
 }
@@ -1817,6 +1822,7 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
         closing: refInfo.closing,
         updatedAt: incoming.updatedAt,
         createdAt: incoming.createdAt || prev?.createdAt,
+        observedOpenAt: prev?.observedOpenAt || (incoming.state === 'open' ? incoming.createdAt || now : undefined),
         linkedSeq,
         mergedSeq,
         mergedAt:

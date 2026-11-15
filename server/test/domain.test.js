@@ -1003,4 +1003,38 @@ test('syncGitHubPullRequests handles draft/ready/merge, stacked (1/n) PRs, Refs 
     { now: Date.parse('2026-11-15T03:00:00Z') },
   );
   assert.equal(tCrossBackfill.status, 'review');
+
+  // Timestamp-less cross-repo (1/2) opened and merged on 11-15 stays review when a prior-cycle (2/2) with 11-14 mergedAt is linked afterward.
+  const tCrossPrior = createTask(
+    state.data,
+    { project: pid.id, title: 'Cross-repo prior mergedAt guard', status: 'todo', recur: 'Weekly', due: '2026-11-18' },
+    { now: FIXED_NOW },
+  );
+  const tasksBefore = state.data.tasks.length;
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/front', number: 80, title: `Feature UI (1/2) (${tCrossPrior.key})`, state: 'open', draft: false },
+    { now: Date.parse('2026-11-15T03:00:00Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/front', number: 80, title: `Feature UI (1/2) (${tCrossPrior.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-15T03:05:00Z') },
+  );
+  assert.equal(tCrossPrior.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/back',
+      number: 8,
+      title: `Prior cycle (2/2) (${tCrossPrior.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: '2026-11-14T10:00:00Z',
+      updatedAt: '2026-11-15T03:10:00Z',
+    },
+    { now: Date.parse('2026-11-15T03:15:00Z') },
+  );
+  assert.equal(tCrossPrior.status, 'review');
+  assert.equal(state.data.tasks.length, tasksBefore);
 });
