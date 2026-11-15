@@ -1374,6 +1374,9 @@ export function applyWorkspacePatch(targetState, patch) {
       }
     }
     if (Array.isArray(patch.tasks.order)) d.tasks = reorderByIds(d.tasks, patch.tasks.order);
+    for (const t of d.tasks) {
+      t.deps = activeProjectDeps(d, t.project, Array.isArray(t.deps) ? t.deps : [], t.id);
+    }
   }
 
   // 4. Comments & emoji reactions

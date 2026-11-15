@@ -366,4 +366,21 @@ test('diffWorkspacePatch and applyWorkspacePatch merge concurrent field, subtask
   );
   assert.equal(delServer.data.comments.length, 0);
   assert.ok(delServer.data.activity.length > 1200);
+
+  // Concurrent addDeps on server while browser moves or archives the dependency target cleans dependents' deps.
+  const depBase = createDefaultState(FIXED_NOW);
+  const pAlp = createProject(depBase.data, { name: 'Alpha', key: 'ALP' }, { now: FIXED_NOW });
+  const pBet = createProject(depBase.data, { name: 'Beta', key: 'BET' }, { now: FIXED_NOW });
+  const tMove = createTask(depBase.data, { project: pBet.id, title: 'Moved target' }, { now: FIXED_NOW });
+  const tArch = createTask(depBase.data, { project: pBet.id, title: 'Archived target' }, { now: FIXED_NOW });
+  const tDependent = createTask(depBase.data, { project: pBet.id, title: 'Dependent task' }, { now: FIXED_NOW });
+
+  const depServer = structuredClone(depBase);
+  const depBrowser = structuredClone(depBase);
+  applyTaskPatch(depServer.data, tDependent.id, { addDeps: [tMove.id, tArch.id] }, { now: FIXED_NOW + 100 });
+  applyTaskPatch(depBrowser.data, tMove.id, { project: pAlp.id }, { now: FIXED_NOW + 200 });
+  applyTaskPatch(depBrowser.data, tArch.id, { archived: true }, { now: FIXED_NOW + 200 });
+
+  applyWorkspacePatch(depServer, diffWorkspacePatch(depBase, depBrowser));
+  assert.deepEqual(depServer.data.tasks.find(t => t.id === tDependent.id).deps, []);
 });
