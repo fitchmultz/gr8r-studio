@@ -270,3 +270,187 @@ test('subtask lifecycle, promotion, and workspace queries share identical invari
     ['PID-202'],
   );
 });
+
+test('diffWorkspacePatch and applyWorkspacePatch merge concurrent field, subtask, reaction, and colliding key edits', async () => {
+  const { addComment, applyWorkspacePatch, diffWorkspacePatch } = await import('../../src/core/domain.js');
+  const base = createDefaultState(FIXED_NOW);
+  createProject(base.data, { name: 'Pi Durable', key: 'PID', status: 'active' }, { now: FIXED_NOW });
+  const shared = createTask(base.data, { project: 'PID', title: 'Shared task', priority: 'medium' }, { now: FIXED_NOW });
+  const s1 = addSubtask(base.data, shared.id, 'Subtask 1', { now: FIXED_NOW });
+  const s2 = addSubtask(base.data, shared.id, 'Subtask 2', { now: FIXED_NOW });
+  const c1 = addComment(base.data, shared.id, 'Looks good', { now: FIXED_NOW });
+  c1.re = { '👍': ['m1'] };
+
+  const serverState = structuredClone(base);
+  const browserState = structuredClone(base);
+
+  // Agent on server updates priority + completes s2 + creates PID-202 + creates project WEB.
+  applyTaskPatch(serverState.data, shared.id, { priority: 'urgent' }, { now: FIXED_NOW + 100 });
+  updateSubtask(serverState.data, shared.id, s2.id, { done: true }, { now: FIXED_NOW + 100 });
+  createTask(serverState.data, { project: 'PID', title: 'Agent slice' }, { now: FIXED_NOW + 100 });
+  createProject(serverState.data, { name: 'WebsiteServer', key: 'WEB' }, { now: FIXED_NOW + 100 });
+
+  // Browser concurrently updates status + completes s1 + adds s3 + creates colliding PID-202 + colliding WEB/WEB-201 + toggles reaction & prefs.
+  applyTaskPatch(browserState.data, shared.id, { status: 'progress' }, { now: FIXED_NOW + 200 });
+  updateSubtask(browserState.data, shared.id, s1.id, { done: true }, { now: FIXED_NOW + 200 });
+  addSubtask(browserState.data, shared.id, 'Subtask 3', { now: FIXED_NOW + 200 });
+  const browserTask = createTask(browserState.data, { project: 'PID', title: 'Browser slice' }, { now: FIXED_NOW + 200 });
+  assert.equal(browserTask.key, 'PID-202');
+  const browserProj = createProject(browserState.data, { name: 'WebsiteLocal', key: 'WEB' }, { now: FIXED_NOW + 200 });
+  const browserWebTask = createTask(browserState.data, { project: browserProj.id, title: 'Offline web task' }, { now: FIXED_NOW + 200 });
+  assert.equal(browserWebTask.key, 'WEB-201');
+  browserState.data.comments.find(c => c.id === c1.id).re['🎉'] = ['m1'];
+  browserState.prefs.theme = 'dark';
+  browserState.views = { p1: { layout: 'board' } };
+
+  const patch = diffWorkspacePatch(base, browserState);
+  const { rekeyed } = applyWorkspacePatch(serverState, patch);
+  assert.equal(rekeyed, true);
+
+  const mergedShared = serverState.data.tasks.find(t => t.id === shared.id);
+  assert.equal(mergedShared.priority, 'urgent');
+  assert.equal(mergedShared.status, 'progress');
+  assert.equal(mergedShared.subtasks.find(s => s.id === s1.id).done, true);
+  assert.equal(mergedShared.subtasks.find(s => s.id === s2.id).done, true);
+  assert.equal(mergedShared.subtasks.length, 3);
+
+  const pidTasks = serverState.data.tasks.filter(t => t.project === base.data.projects.find(p => p.key === 'PID').id);
+  assert.deepEqual(
+    pidTasks.map(t => `${t.key}:${t.title}`),
+    ['PID-201:Shared task', 'PID-202:Agent slice', 'PID-203:Browser slice'],
+  );
+
+  const mergedBrowserProj = serverState.data.projects.find(p => p.id === browserProj.id);
+  assert.equal(mergedBrowserProj.key, 'WEBX');
+  assert.equal(serverState.data.tasks.find(t => t.id === browserWebTask.id).key, 'WEBX-201');
+  assert.deepEqual(serverState.data.comments.find(c => c.id === c1.id).re, { '👍': ['m1'], '🎉': ['m1'] });
+  assert.equal(serverState.prefs.theme, 'dark');
+  assert.deepEqual(serverState.views, { p1: { layout: 'board' } });
+
+  // Prototype-pollution keys in untrusted JSON patches are ignored safely.
+  applyWorkspacePatch(serverState, JSON.parse('{"prefs":{"set":{"__proto__":{"polluted":true}}}}'));
+  assert.equal({}.polluted, undefined);
+
+  // Deleting tasks or projects that own comments (or concurrent deletion) succeeds without 404,
+  // and activity histories larger than 1000 entries are preserved intact without silent truncation.
+  const delBase = createDefaultState(FIXED_NOW);
+  delBase.data.activity = Array.from({ length: 1200 }, (_, i) => ({
+    id: `a_seed_${i}`,
+    by: 'm1',
+    verb: 'updated task',
+    task: null,
+    project: null,
+    at: FIXED_NOW - i,
+    extra: '',
+  }));
+  const pDel = createProject(delBase.data, { name: 'Cleanup', key: 'CLN' }, { now: FIXED_NOW });
+  const tDel1 = createTask(delBase.data, { project: pDel.id, title: 'Has comments' }, { now: FIXED_NOW });
+  const tDel2 = createTask(delBase.data, { project: pDel.id, title: 'Project cascade' }, { now: FIXED_NOW });
+  addComment(delBase.data, tDel1.id, 'Comment A', { now: FIXED_NOW });
+  addComment(delBase.data, tDel2.id, 'Comment B', { now: FIXED_NOW });
+
+  const delServer = structuredClone(delBase);
+  const delBrowser = structuredClone(delBase);
+  const { deleteProject, deleteTasks } = await import('../../src/core/domain.js');
+  // Server already deleted tDel1 concurrently while browser deletes both tDel1 and project CLN + logs new activity.
+  deleteTasks(delServer.data, [tDel1.id]);
+  deleteTasks(delBrowser.data, [tDel1.id]);
+  deleteProject(delBrowser.data, pDel.id);
+  applyTaskPatch(delBrowser.data, delBrowser.data.tasks[0].id, { status: 'done' }, { now: FIXED_NOW + 500 });
+
+  const delPatch = diffWorkspacePatch(delBase, delBrowser);
+  applyWorkspacePatch(delServer, delPatch);
+  assert.equal(
+    delServer.data.projects.some(p => p.id === pDel.id),
+    false,
+  );
+  assert.equal(delServer.data.comments.length, 0);
+  assert.ok(delServer.data.activity.length > 1200);
+
+  // Concurrent addDeps on server while browser moves or archives the dependency target cleans dependents' deps.
+  const depBase = createDefaultState(FIXED_NOW);
+  const pAlp = createProject(depBase.data, { name: 'Alpha', key: 'ALP' }, { now: FIXED_NOW });
+  const pBet = createProject(depBase.data, { name: 'Beta', key: 'BET' }, { now: FIXED_NOW });
+  const tMove = createTask(depBase.data, { project: pBet.id, title: 'Moved target' }, { now: FIXED_NOW });
+  const tArch = createTask(depBase.data, { project: pBet.id, title: 'Archived target' }, { now: FIXED_NOW });
+  const tDependent = createTask(depBase.data, { project: pBet.id, title: 'Dependent task' }, { now: FIXED_NOW });
+
+  const depServer = structuredClone(depBase);
+  const depBrowser = structuredClone(depBase);
+  applyTaskPatch(depServer.data, tDependent.id, { addDeps: [tMove.id, tArch.id] }, { now: FIXED_NOW + 100 });
+  applyTaskPatch(depBrowser.data, tMove.id, { project: pAlp.id }, { now: FIXED_NOW + 200 });
+  applyTaskPatch(depBrowser.data, tArch.id, { archived: true }, { now: FIXED_NOW + 200 });
+
+  applyWorkspacePatch(depServer, diffWorkspacePatch(depBase, depBrowser));
+  assert.deepEqual(depServer.data.tasks.find(t => t.id === tDependent.id).deps, []);
+
+  // Single-patch order independence: when dependent C precedes target B in data.tasks and one patch
+  // moves B into C's project and links C -> B, C.deps retains [B] without premature per-entry stripping.
+  const singleBase = createDefaultState(FIXED_NOW);
+  const sAlp = createProject(singleBase.data, { name: 'Alpha', key: 'ALP' }, { now: FIXED_NOW });
+  const sBet = createProject(singleBase.data, { name: 'Beta', key: 'BET' }, { now: FIXED_NOW });
+  const taskC = createTask(singleBase.data, { project: sAlp.id, title: 'Created first (dependent)' }, { now: FIXED_NOW });
+  const taskB = createTask(singleBase.data, { project: sBet.id, title: 'Created second (target)' }, { now: FIXED_NOW + 10 });
+  const singleServer = structuredClone(singleBase);
+  const singleBrowser = structuredClone(singleBase);
+  applyTaskPatch(singleBrowser.data, taskB.id, { project: sAlp.id }, { now: FIXED_NOW + 100 });
+  applyTaskPatch(singleBrowser.data, taskC.id, { addDeps: [taskB.id] }, { now: FIXED_NOW + 200 });
+  const singleRes = applyWorkspacePatch(singleServer, diffWorkspacePatch(singleBase, singleBrowser));
+  assert.equal(singleRes.rekeyed, false);
+  assert.deepEqual(singleServer.data.tasks.find(t => t.id === taskC.id).deps, [taskB.id]);
+
+  // Same-patch move task T (with comment + file) out of project P into newly created project Q, then delete P:
+  // T, its comment, and its file survive in Q without being cascade-deleted by deleteProject(P).
+  const rescueBase = createDefaultState(FIXED_NOW);
+  const pOld = createProject(rescueBase.data, { name: 'Old Project', key: 'OLD' }, { now: FIXED_NOW });
+  const rescuedTask = createTask(rescueBase.data, { project: pOld.id, title: 'Rescue me' }, { now: FIXED_NOW });
+  const rescuedComment = addComment(rescueBase.data, rescuedTask.id, 'Keep this comment', { now: FIXED_NOW });
+  rescueBase.data.files.push({ id: 'f_rescue', name: 'spec.md', project: pOld.id, task: rescuedTask.id });
+
+  const rescueServer = structuredClone(rescueBase);
+  const rescueBrowser = structuredClone(rescueBase);
+  const pDest = createProject(rescueBrowser.data, { name: 'Fresh Home', key: 'OLD_NEXT' }, { now: FIXED_NOW + 50 });
+  applyTaskPatch(rescueBrowser.data, rescuedTask.id, { project: pDest.id }, { now: FIXED_NOW + 100 });
+  rescueBrowser.data.files.find(f => f.id === 'f_rescue').project = pDest.id;
+  deleteProject(rescueBrowser.data, pOld.id);
+
+  const rescueOut = applyWorkspacePatch(rescueServer, diffWorkspacePatch(rescueBase, rescueBrowser));
+  assert.equal(rescueOut.rekeyed, false);
+  assert.equal(
+    rescueServer.data.projects.some(p => p.id === pOld.id),
+    false,
+  );
+  assert.equal(rescueServer.data.tasks.find(t => t.id === rescuedTask.id)?.project, pDest.id);
+  assert.equal(
+    rescueServer.data.comments.some(c => c.id === rescuedComment.id),
+    true,
+  );
+  assert.equal(rescueServer.data.files.find(f => f.id === 'f_rescue')?.project, pDest.id);
+
+  // Creating a savedView on project P, deleting P in the same patch, then undoing and renaming the savedView
+  // keeps client and server in sync throughout without dropping the savedView.
+  const svBase = createDefaultState(FIXED_NOW);
+  const pView = createProject(svBase.data, { name: 'View Host', key: 'VWH' }, { now: FIXED_NOW });
+  const svServer = structuredClone(svBase);
+  const svBrowser = structuredClone(svBase);
+  svBrowser.data.savedViews.push({ id: 'sv_1', name: 'Triage', project: pView.id, layout: 'board', filters: {} });
+  const undoSnapshot = structuredClone(svBrowser);
+  deleteProject(svBrowser.data, pView.id);
+  assert.equal(svBrowser.data.savedViews.length, 0);
+
+  applyWorkspacePatch(svServer, diffWorkspacePatch(svBase, svBrowser));
+  assert.equal(
+    svServer.data.projects.some(p => p.id === pView.id),
+    false,
+  );
+  assert.equal(svServer.data.savedViews.length, 0);
+
+  // Undo restores both project VWH and savedView sv_1, then renaming sv_1 propagates cleanly to server.
+  applyWorkspacePatch(svServer, diffWorkspacePatch(svBrowser, undoSnapshot));
+  assert.equal(svServer.data.savedViews.find(v => v.id === 'sv_1')?.name, 'Triage');
+  const renamedBrowser = structuredClone(undoSnapshot);
+  renamedBrowser.data.savedViews.find(v => v.id === 'sv_1').name = 'Bug Triage';
+  const renameOut = applyWorkspacePatch(svServer, diffWorkspacePatch(undoSnapshot, renamedBrowser));
+  assert.equal(renameOut.rekeyed, false);
+  assert.equal(svServer.data.savedViews.find(v => v.id === 'sv_1')?.name, 'Bug Triage');
+});

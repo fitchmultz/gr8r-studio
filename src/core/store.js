@@ -2,10 +2,18 @@
 import { TODAY, diffD, iso, parse } from './utils.js';
 import { PCOLORS } from './constants.js';
 import { seed } from '../data/seed.js';
-import { DEFAULT_PREFS, ensureTeams, logActivity } from './domain.js';
+import { DEFAULT_PREFS, applyWorkspacePatch, diffWorkspacePatch, ensureTeams, isWorkspacePatchEmpty, logActivity } from './domain.js';
 
 export const STORE_KEY = 'gr8r.v3';
 export { DEFAULT_PREFS };
+
+const cleanBlob = b => ({
+  data: structuredClone(b.data),
+  prefs: structuredClone(b.prefs || {}),
+  views: structuredClone(b.views || {}),
+  collapsed: !!b.collapsed,
+});
+
 export function load() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
@@ -25,6 +33,8 @@ let rev = saved?.rev || 0;
 export const getRev = () => rev;
 let pendingSave = null;
 export const getPendingSave = () => pendingSave;
+let syncedBase = saved ? (saved.base?.data ? cleanBlob(saved.base) : saved.pending === false && rev > 0 ? cleanBlob(saved) : null) : null;
+export const getSyncedBase = () => syncedBase;
 
 export const S = {
   data: null,
@@ -75,14 +85,14 @@ export const S = {
 hydrate(saved);
 /* Older caches have no pending flag. Upload them once so previously unsent
    edits are not stranded when this version first opens. */
-pendingSave = saved && saved.pending !== false ? saved : null;
+pendingSave = saved && saved.pending !== false ? { rev, ...cleanBlob(saved) } : null;
 
 /* hydrate: point S's persisted sections at a saved blob (or the seed when absent). */
 export function hydrate(b) {
   pendingSave = null;
-  S.data = b?.data || seed();
-  S.prefs = Object.assign({}, DEFAULT_PREFS, b?.prefs || {});
-  S.views = b?.views || {};
+  S.data = b?.data ? structuredClone(b.data) : seed();
+  S.prefs = Object.assign({}, DEFAULT_PREFS, b?.prefs ? structuredClone(b.prefs) : {});
+  S.views = b?.views ? structuredClone(b.views) : {};
   S.ui.collapsed = !!b?.collapsed;
 }
 
@@ -90,7 +100,15 @@ export function hydrate(b) {
 export const blobNow = r => ({ rev: r, data: S.data, prefs: S.prefs, views: S.views, collapsed: S.ui.collapsed });
 function persist() {
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify({ ...(pendingSave || blobNow(rev)), rev, pending: !!pendingSave }));
+    localStorage.setItem(
+      STORE_KEY,
+      JSON.stringify({
+        ...(pendingSave || blobNow(rev)),
+        rev,
+        pending: !!pendingSave,
+        ...(pendingSave && syncedBase ? { base: syncedBase } : {}),
+      }),
+    );
   } catch {
     /* storage full or blocked: keep working in memory */
   }
@@ -99,7 +117,34 @@ function persist() {
    pending, and its contents must not be overwritten by an older response. */
 export function stampRev(r, blob) {
   rev = r;
+  if (blob?.data) syncedBase = cleanBlob(blob);
   if (blob === pendingSave) pendingSave = null;
+  persist();
+}
+
+export function adoptSyncedState(r, state) {
+  hydrate(state);
+  rev = r;
+  syncedBase = state?.data ? cleanBlob(state) : null;
+  persist();
+}
+
+export function clearSyncedBase() {
+  rev = 0;
+  syncedBase = null;
+  persist();
+}
+
+/* Rebase any newer local clicks made while `ackedBlob` was in flight onto `serverState`. */
+export function rebasePendingSave(newRev, serverState, ackedBlob) {
+  const latestLocal = pendingSave || blobNow(newRev);
+  const newerPatch = diffWorkspacePatch(ackedBlob, latestLocal);
+  const mergedLocal = cleanBlob(serverState);
+  applyWorkspacePatch(mergedLocal, newerPatch);
+  hydrate(mergedLocal);
+  rev = newRev;
+  syncedBase = cleanBlob(serverState);
+  pendingSave = isWorkspacePatchEmpty(newerPatch) ? null : { rev: newRev, ...cleanBlob(mergedLocal) };
   persist();
 }
 
