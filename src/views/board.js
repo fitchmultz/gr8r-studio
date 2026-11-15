@@ -2,7 +2,8 @@
 import { esc } from '../core/utils.js';
 import { ic } from '../core/icons.js';
 import { PR, STATUSES, isClosedStatus } from '../core/constants.js';
-import { S, childrenOf, commentsOf, pColor, proj, task } from '../core/store.js';
+import { openDepsOfTask } from '../core/domain.js';
+import { D, S, childrenOf, commentsOf, pColor, proj, task } from '../core/store.js';
 import { av, dueHtml, lbl, prIcon, progBar, stIcon } from '../ui/helpers.js';
 import { fxc } from '../shell/render.js';
 
@@ -13,6 +14,7 @@ export function kcard(t, opt = {}) {
   const kids = childrenOf(t.id);
   const activeKids = kids.filter(c => c.status !== 'canceled');
   const doneKids = activeKids.filter(c => c.status === 'done').length;
+  const openDeps = openDepsOfTask(D(), t);
   const sd = t.subtasks.filter(s => s.done).length;
   const p = proj(t.project);
   return `<div class="kcard ${isClosedStatus(t.status) ? 'done' : ''}${fxc('done', t.id)}${fxc('added', t.id)}${fxc('moved', t.id)}" draggable="true" data-drag-card="${t.id}" data-a="openTask" data-id="${t.id}" data-ctx="task" role="button" tabindex="0" aria-label="${esc(t.title)}">
@@ -24,6 +26,8 @@ export function kcard(t, opt = {}) {
       <span class="key">${t.key}</span>
       ${parentTask ? `<span class="m mono" data-tip="Sub-issue of ${esc(parentTask.key)}: ${esc(parentTask.title)}" style="font-size:11px">↳ ${parentTask.key}</span>` : ''}
       ${kids.length ? `<span class="m num" data-tip="${doneKids}/${activeKids.length} sub-issues done">${ic('git-fork', 12)}${doneKids}/${activeKids.length}</span>` : ''}
+      ${t.claimedBy ? `<span class="m mono" data-tip="Claimed by ${esc(t.claimedBy)}" style="font-size:11px">${ic('bot', 12)}${esc(t.claimedBy)}</span>` : ''}
+      ${!isClosedStatus(t.status) && openDeps.length ? `<span class="m" data-tip="Blocked by ${esc(openDeps.map(d => d.key).join(', '))}" style="color:var(--amber)">${ic('lock', 12)}</span>` : ''}
       <button class="m" data-a="pop" data-pop="priority" data-id="${t.id}" data-tip="${PR[t.priority].name}" aria-label="Priority: ${PR[t.priority].name}">${prIcon(t.priority, 13)}</button>
       ${t.due ? `<button class="m" data-a="pop" data-pop="date" data-field="due" data-id="${t.id}" aria-label="Due date">${dueHtml(t)}</button>` : ''}
       ${t.recur ? `<span class="m" data-tip="Repeats ${t.recur.toLowerCase()}">${ic('repeat', 12)}</span>` : ''}

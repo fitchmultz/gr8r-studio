@@ -126,11 +126,22 @@ function rawHttpRequest(targetUrl, { method = 'GET', headers = {}, body, proxyUr
   });
 }
 
+function resolveDefaultAgent(explicitAgent, env = process.env) {
+  if (explicitAgent !== undefined) return nullableOpt(explicitAgent);
+  if (env.GR8R_AGENT !== undefined) return nullableOpt(env.GR8R_AGENT);
+  const sessionName = String(env.PI_SESSION_NAME || '').trim();
+  if (sessionName) return `pi:${sessionName}`;
+  const sessionId = String(env.PI_SESSION_ID || '').trim();
+  if (sessionId) return `pi:${sessionId}`;
+  return null;
+}
+
 export class Gr8rClient {
-  constructor({ url, token, proxy, env = process.env } = {}) {
+  constructor({ url, token, proxy, agent, env = process.env } = {}) {
     const cfg = readUserConfig(env);
     this.apiBase = normalizeApiBase(url || env.GR8R_URL || cfg.url || DEFAULT_URL);
     this.token = token || env.GR8R_TOKEN || cfg.token || '';
+    this.agent = resolveDefaultAgent(agent, env);
     const explicitProxy = proxy ?? env.GR8R_PROXY ?? cfg.proxy;
     const ambientProxy = env.HTTPS_PROXY ?? env.HTTP_PROXY ?? env.ALL_PROXY ?? '';
     const rawProxy = explicitProxy !== undefined ? explicitProxy : ambientProxy;
@@ -179,6 +190,7 @@ export class Gr8rClient {
       method,
       headers: {
         authorization: `Bearer ${this.token}`,
+        ...(this.agent ? { 'x-gr8r-agent': encodeURIComponent(this.agent) } : {}),
         ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -260,9 +272,13 @@ function formatTaskDetail(payload) {
     `Status: ${t.status} | Priority: ${t.priority} | Project: ${t.projectKey || t.project} (${t.projectName || ''}) | Rev: ${rev}`,
     `Assignee: ${t.assigneeName || 'Unassigned'}${t.due ? ` | Due: ${t.due}` : ''}${t.start ? ` | Start: ${t.start}` : ''}${t.estimate ? ` | Est: ${t.estimate}` : ''}`,
   ];
+  if (t.claimedBy) lines.push(`Claimed by: ${t.claimedBy}${t.claimedAt ? ` (${new Date(t.claimedAt).toISOString()})` : ''}`);
   if (t.parentKey) lines.push(`Parent: ${t.parentKey}${t.parentTitle ? ` (${t.parentTitle})` : ''}`);
   if (t.labels?.length) lines.push(`Labels: ${t.labels.join(', ')}`);
-  if (t.depKeys?.length) lines.push(`Blocked by: ${t.depKeys.join(', ')}`);
+  if (t.depKeys?.length) {
+    const openSuffix = t.openDepKeys?.length ? ` (open: ${t.openDepKeys.join(', ')})` : ' (all resolved)';
+    lines.push(`Blocked by: ${t.depKeys.join(', ')}${openSuffix}`);
+  }
   if (t.prs?.length) {
     lines.push('Pull requests:');
     for (const pr of t.prs) {
@@ -287,7 +303,8 @@ function formatTaskDetail(payload) {
   if (comments.length) {
     lines.push('', `--- Comments (${comments.length}) ---`);
     for (const c of comments) {
-      lines.push(`[${c.id}] ${c.byName || c.by} (${new Date(c.at).toISOString()}): ${c.text}`);
+      const who = `${c.byName || c.by}${c.agent ? ` [${c.agent}]` : ''}`;
+      lines.push(`[${c.id}] ${who} (${new Date(c.at).toISOString()}): ${c.text}`);
     }
   }
   return lines.join('\n');
@@ -314,10 +331,13 @@ Commands:
   label update <ref> [--name N] [--color C] Rename or recolor a label
   label delete <ref> --yes                  Delete a label and detach from tasks
 
-  tasks [-p PROJECT] [-s STATUS] ...        List/filter tasks (status accepts 'open')
+  tasks [-p PROJECT] [--ready] ...          List/filter tasks (--ready: unblocked & unclaimed)
   task view <key-or-id>                     Inspect a task, Markdown description, subtasks, comments
   task create <title> -p PROJECT ...        Create a task (--desc - reads Markdown from stdin)
   task update <ref> [flags]                 Atomically update task fields
+  task claim <ref> [--force] [--agent NAME] Atomically claim a task for an agent session
+  task claim --next [-p PROJECT] [-l LABEL] Atomically claim highest-priority ready task
+  task release <ref> [--status todo]        Release an active agent claim
   task start <ref> [-a me]                  Move task to 'progress'
   task done <ref> [--comment TEXT]          Complete task (and optionally post a comment)
   task cancel <ref> [--comment TEXT]        Cancel task (and optionally post rationale)
@@ -356,6 +376,7 @@ export async function runCli(argv, io = {}) {
       url: { type: 'string' },
       token: { type: 'string' },
       proxy: { type: 'string' },
+      agent: { type: 'string' },
       'clear-token': { type: 'boolean' },
       'clear-proxy': { type: 'boolean' },
       project: { type: 'string', short: 'p' },
@@ -408,6 +429,10 @@ export async function runCli(argv, io = {}) {
       'add-milestone': { type: 'string', multiple: true },
       'remove-milestone': { type: 'string', multiple: true },
       archived: { type: 'boolean' },
+      ready: { type: 'boolean' },
+      claimed: { type: 'string' },
+      next: { type: 'boolean' },
+      force: { type: 'boolean' },
       archive: { type: 'boolean' },
       restore: { type: 'boolean' },
       fav: { type: 'boolean' },
@@ -474,7 +499,7 @@ export async function runCli(argv, io = {}) {
     throw new Error(`Unknown config subcommand: ${sub}`);
   }
 
-  const client = new Gr8rClient({ url: opts.url, token: opts.token, proxy: opts.proxy, env });
+  const client = new Gr8rClient({ url: opts.url, token: opts.token, proxy: opts.proxy, agent: opts.agent, env });
 
   if (cmd === 'status' || cmd === 'workspace') {
     const ws = await client.request('GET', '/workspace');
@@ -689,6 +714,8 @@ export async function runCli(argv, io = {}) {
     if (opts.dir) params.set('dir', opts.dir);
     if (opts.limit) params.set('limit', opts.limit);
     if (opts.archived) params.set('archived', 'true');
+    if (opts.ready) params.set('ready', 'true');
+    if (opts.claimed !== undefined) params.set('claimed', opts.claimed);
     const qs = params.toString();
     const res = await client.request('GET', `/tasks${qs ? '?' + qs : ''}`);
     if (opts.json) return outJson(res);
@@ -697,7 +724,7 @@ export async function runCli(argv, io = {}) {
         ['KEY', t => t.key],
         ['STATUS', t => t.status],
         ['PRIO', t => t.priority],
-        ['ASSIGNEE', t => t.assigneeName || '-'],
+        ['ASSIGNEE', t => (t.claimedBy ? `${t.assigneeName || '-'} [${t.claimedBy}]` : t.assigneeName || '-')],
         ['SUBS', t => (t.subtaskCount ? `${t.subtaskDoneCount}/${t.subtaskCount}` : '-')],
         ['DUE', t => t.due || '-'],
         ['TITLE', t => t.title],
@@ -738,6 +765,48 @@ export async function runCli(argv, io = {}) {
       const res = await client.request('POST', '/tasks', body);
       if (opts.json) return outJson(res);
       stdout(`Created ${res.task.key}: ${res.task.title} [rev ${res.rev}]`);
+      return 0;
+    }
+    if (sub === 'claim') {
+      if (!client.agent) {
+        throw new Error('Agent identifier required: pass --agent <name> or set GR8R_AGENT (auto-detected inside Pi sessions).');
+      }
+      if (opts.next) {
+        const body = { agent: client.agent };
+        if (opts.project) body.project = opts.project;
+        if (opts.parent !== undefined) body.parent = opts.parent;
+        const lbls = splitCsvList(opts.label || opts.labels);
+        if (lbls?.length) body.label = lbls.join(',');
+        if (opts.priority) body.priority = opts.priority;
+        if (opts.assignee) body.assignee = opts.assignee;
+        if (opts.status) body.claimStatus = opts.status;
+        const res = await client.request('POST', '/tasks/claim-next', body);
+        if (opts.json) return outJson(res);
+        if (!res.task) {
+          stdout(`No ready tasks available [rev ${res.rev}]`);
+          return 0;
+        }
+        stdout(`Claimed ${res.task.key} [${res.task.claimedBy}] -> ${res.task.status}: ${res.task.title} [rev ${res.rev}]`);
+        return 0;
+      }
+      const ref = pos[2];
+      if (!ref) throw new Error('Usage: gr8r task claim <key-or-id> [--force] [--agent NAME]  (or --next [-p PROJECT])');
+      const body = { agent: client.agent, force: !!opts.force };
+      if (opts.status) body.status = opts.status;
+      if (opts.assignee !== undefined) body.assignee = nullableOpt(opts.assignee);
+      const res = await client.request('POST', `/tasks/${encodeURIComponent(ref)}/claim`, body);
+      if (opts.json) return outJson(res);
+      stdout(`Claimed ${res.task.key} [${res.task.claimedBy}] -> ${res.task.status}: ${res.task.title} [rev ${res.rev}]`);
+      return 0;
+    }
+    if (sub === 'release') {
+      const ref = pos[2];
+      if (!ref) throw new Error('Usage: gr8r task release <key-or-id> [--status todo]');
+      const body = {};
+      if (opts.status) body.status = opts.status;
+      const res = await client.request('POST', `/tasks/${encodeURIComponent(ref)}/release`, body);
+      if (opts.json) return outJson(res);
+      stdout(`Released ${res.task.key} -> ${res.task.status}: ${res.task.title} [rev ${res.rev}]`);
       return 0;
     }
     if (sub === 'update' || sub === 'start' || sub === 'done' || sub === 'cancel' || sub === 'reopen') {

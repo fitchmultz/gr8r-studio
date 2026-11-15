@@ -8,6 +8,8 @@ import {
   applyTaskPatch,
   applyWorkspacePatch,
   childrenOfTask,
+  claimNextReadyTask,
+  claimTask,
   createDefaultState,
   createLabel,
   createProject,
@@ -21,10 +23,13 @@ import {
   ensureLabels,
   formatProjectForApi,
   formatTaskForApi,
+  isTaskBlocked,
   isTaskOverdue,
+  isTaskReady,
   projectProgress,
   promoteSubtask,
   queryTasks,
+  releaseTask,
   removeMember,
   removeSubtask,
   resolveLabel,
@@ -1360,4 +1365,74 @@ test('custom workspace labels and parent/child sub-issues enforce cycle, cascade
   assert.equal(Boolean(tab2.data.tasks.find(x => x.id === epic.id).parent && tab2.data.tasks.find(x => x.id === childA.id).parent), false);
   deleteTasks(state.data, [epic.id]);
   assert.equal(childA.parent, null);
+});
+
+test('agent claims, --ready queue ordering, dependency unblocking, and claim cleanup enforce multi-agent invariants', () => {
+  const state = createDefaultState(FIXED_NOW);
+  const p = createProject(state.data, { name: 'Swarm Queue', key: 'SWM' }, { now: FIXED_NOW });
+  const blocker = createTask(state.data, { project: p.id, title: 'Step 1: Schema', priority: 'medium', status: 'todo' }, { now: FIXED_NOW });
+  const blocked = createTask(state.data, { project: p.id, title: 'Step 2: API', priority: 'urgent', status: 'todo', deps: [blocker.key] }, { now: FIXED_NOW });
+  const urgentReady = createTask(state.data, { project: p.id, title: 'Hotfix', priority: 'high', status: 'todo' }, { now: FIXED_NOW });
+
+  assert.equal(isTaskBlocked(state.data, blocked), true);
+  assert.equal(isTaskReady(state.data, blocked), false);
+  assert.equal(isTaskReady(state.data, blocker), true);
+
+  // --ready orders urgent/high before medium and excludes blocked tasks.
+  assert.deepEqual(
+    queryTasks(state.data, { project: p.id, ready: true, status: 'open' }).map(t => t.key),
+    [urgentReady.key, blocker.key],
+  );
+
+  // Claiming a blocked task without --force fails with 409.
+  assert.throws(() => claimTask(state.data, blocked, { agent: 'pi:worker-1', now: FIXED_NOW + 10 }), DomainError);
+
+  // claimNextReadyTask atomically claims the highest-priority ready slice.
+  const firstClaimed = claimNextReadyTask(state.data, { project: p.id }, { agent: 'pi:worker-1', now: FIXED_NOW + 20 });
+  assert.equal(firstClaimed.key, urgentReady.key);
+  assert.equal(firstClaimed.status, 'progress');
+  assert.equal(firstClaimed.claimedBy, 'pi:worker-1');
+
+  // Idempotent re-claim by the same agent succeeds; competing agent gets 409 unless --force.
+  assert.equal(claimTask(state.data, urgentReady, { agent: 'pi:worker-1', now: FIXED_NOW + 30 }).claimedBy, 'pi:worker-1');
+  assert.throws(() => claimTask(state.data, urgentReady, { agent: 'pi:worker-2', now: FIXED_NOW + 40 }), DomainError);
+  assert.equal(claimTask(state.data, urgentReady, { agent: 'pi:worker-2', force: true, now: FIXED_NOW + 50 }).claimedBy, 'pi:worker-2');
+
+  // Next worker gets blocker; third worker sees empty queue (null).
+  const secondClaimed = claimNextReadyTask(state.data, { project: p.id }, { agent: 'pi:worker-3', now: FIXED_NOW + 60 });
+  assert.equal(secondClaimed.key, blocker.key);
+  assert.equal(claimNextReadyTask(state.data, { project: p.id }, { agent: 'pi:worker-4', now: FIXED_NOW + 70 }), null);
+
+  // Completing blocker clears its claim AND unblocks Step 2 in the ready queue.
+  applyTaskPatch(state.data, blocker, { status: 'done' }, { agent: 'pi:worker-3', now: FIXED_NOW + 80 });
+  assert.equal(blocker.claimedBy, null);
+  assert.equal(isTaskReady(state.data, blocked), true);
+
+  const cmt = addComment(state.data, blocked, 'Ready to start', { agent: 'pi:worker-4', now: FIXED_NOW + 90 });
+  assert.equal(cmt.agent, 'pi:worker-4');
+
+  // Explicit release returns task to todo and clears claim.
+  releaseTask(state.data, urgentReady, { status: 'todo', agent: 'pi:worker-2', now: FIXED_NOW + 100 });
+  assert.equal(urgentReady.claimedBy, null);
+  assert.equal(urgentReady.status, 'todo');
+
+  // Fractional drag-drop orders sort numerically in --ready, and concurrent todo patches scrub claims.
+  const pOrder = createProject(state.data, { name: 'Order Tie-Break', key: 'ORD' }, { now: FIXED_NOW });
+  const ordA = createTask(state.data, { project: pOrder.id, title: 'Ord 5', priority: 'medium', status: 'todo', order: 5 }, { now: FIXED_NOW });
+  const midDrag = createTask(state.data, { project: pOrder.id, title: 'Ord 5.001', priority: 'medium', status: 'todo', order: 5.001 }, { now: FIXED_NOW });
+  const lateInt = createTask(state.data, { project: pOrder.id, title: 'Ord 6', priority: 'medium', status: 'todo', order: 6 }, { now: FIXED_NOW });
+  createTask(state.data, { project: pOrder.id, title: 'In review', priority: 'urgent', status: 'review' }, { now: FIXED_NOW });
+  assert.deepEqual(
+    queryTasks(state.data, { project: pOrder.id, ready: true, status: 'open' }).map(t => t.key),
+    [ordA.key, midDrag.key, lateInt.key],
+  );
+  claimTask(state.data, midDrag, { agent: 'pi:worker-9', now: FIXED_NOW + 110 });
+  applyWorkspacePatch(state, { tasks: { updated: { [midDrag.id]: { fields: { set: { status: 'todo' } } } } } });
+  assert.equal(midDrag.claimedBy, null);
+  assert.equal(isTaskReady(state.data, midDrag), true);
+
+  const sub = addSubtask(state.data, ordA, 'Wire subtask attribution', { agent: 'pi:worker-9', now: FIXED_NOW + 120 });
+  updateSubtask(state.data, ordA, sub.id, { assignee: 'me', due: '2026-12-01' }, { agent: 'pi:worker-9', now: FIXED_NOW + 121 });
+  assert.equal(state.data.activity[0].agent, 'pi:worker-9');
+  assert.equal(state.data.activity[1].agent, 'pi:worker-9');
 });

@@ -21,6 +21,7 @@ import {
   duplicateTask as domainDuplicateTask,
   makeProjectKey,
   nextTaskKey,
+  releaseTask as domainReleaseTask,
   removeMember as domainRemoveMember,
   removeSubtask as domainRemoveSubtask,
   toggleReaction as domainToggleReaction,
@@ -491,6 +492,14 @@ A.cancelTask = el => {
   S.ui.pop = null;
   updateTask(t.id, { status: 'canceled' });
   if (!S.ui.offline) toast(`Canceled “${t.title}”`, { action: 'Undo', onAction: () => updateTask(t.id, { status: prev }) });
+};
+A.releaseTaskClaim = el => {
+  const t = task(el.dataset.id);
+  if (!t || !t.claimedBy) return;
+  const prevAgent = t.claimedBy;
+  if (mutate(() => domainReleaseTask(D(), t))) {
+    toast(`Released claim from ${prevAgent}`);
+  }
 };
 A.toggleFavTask = el => {
   const t = task(el.dataset.id);
