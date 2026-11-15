@@ -749,4 +749,28 @@ test('syncGitHubPullRequests handles draft/ready/merge, stacked (1/n) PRs, Refs 
     { now: Date.parse('2026-11-15T12:00:40Z') },
   );
   assert.equal(tBackfill.status, 'review');
+
+  // 7. Stale webhook redelivery after a newer body edit unlinked KEY-123 does not re-link the PR or flip status.
+  const tUnlink = createTask(state.data, { project: pid.id, title: 'Unlink redelivery guard', status: 'todo' }, { now: FIXED_NOW });
+  const openWithKey = {
+    repo: 'fitchmultz/pi-durable',
+    number: 401,
+    title: 'Refactor router',
+    body: `Closes ${tUnlink.key}`,
+    state: 'open',
+    draft: false,
+    updatedAt: '2026-11-15T01:00:00Z',
+  };
+  syncGitHubPullRequests(state.data, openWithKey, { now: FIXED_NOW + 2000 });
+  assert.equal(tUnlink.status, 'review');
+  assert.equal(tUnlink.prs.length, 1);
+
+  syncGitHubPullRequests(state.data, { ...openWithKey, body: 'Removed accidental task ref', updatedAt: '2026-11-15T01:05:00Z' }, { now: FIXED_NOW + 2100 });
+  assert.equal(tUnlink.prs.length, 0);
+  applyTaskPatch(state.data, tUnlink.id, { status: 'todo' }, { now: FIXED_NOW + 2200 });
+
+  const staleRedelivery = syncGitHubPullRequests(state.data, openWithKey, { now: FIXED_NOW + 2300 });
+  assert.equal(staleRedelivery.changed, false);
+  assert.equal(tUnlink.prs.length, 0);
+  assert.equal(tUnlink.status, 'todo');
 });

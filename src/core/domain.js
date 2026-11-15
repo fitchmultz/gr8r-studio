@@ -1051,6 +1051,7 @@ const KNOWN_DATA_KEYS = new Set([
   'tasks',
   'comments',
   'activity',
+  'prWatermarks',
   ...KEYED_DATA_LISTS,
 ]);
 
@@ -1760,8 +1761,13 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
   let changed = false;
 
   for (const incoming of normalized) {
+    const prKey = `${incoming.repo.toLowerCase()}#${incoming.number}`;
+    const prevWatermark = isPlainObject(data.prWatermarks) ? data.prWatermarks[prKey] || 0 : 0;
+    if (prevWatermark > 0 && incoming.updatedAt > 0 && incoming.updatedAt < prevWatermark) continue;
+
     const refs = extractPullRequestTaskRefs(data, incoming);
     const samePr = x => x.repo.toLowerCase() === incoming.repo.toLowerCase() && x.number === incoming.number;
+    let unlinkedAny = false;
 
     if (incoming.bodyProvided) {
       for (const t of data.tasks) {
@@ -1773,6 +1779,7 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
         t.updated = Math.max(t.updated || 0, now);
         touchedIds.add(t.id);
         changed = true;
+        unlinkedAny = true;
       }
     }
 
@@ -1853,6 +1860,13 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
       t.updated = Math.max(t.updated || 0, now);
       touchedIds.add(t.id);
       changed = true;
+    }
+
+    if (incoming.updatedAt > 0 && (unlinkedAny || refs.size > 0 || prevWatermark > 0)) {
+      if (!isPlainObject(data.prWatermarks)) data.prWatermarks = {};
+      if ((data.prWatermarks[prKey] || 0) < incoming.updatedAt) {
+        data.prWatermarks[prKey] = incoming.updatedAt;
+      }
     }
   }
 
