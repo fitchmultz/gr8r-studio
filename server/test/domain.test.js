@@ -923,4 +923,47 @@ test('syncGitHubPullRequests handles draft/ready/merge, stacked (1/n) PRs, Refs 
     { now: Date.parse('2026-11-15T04:00:00Z') },
   );
   assert.equal(tCross.status, 'done');
+
+  // Cross-repo stack whose (1/2) was synced merged without timestamps at 03:00 completes when (2/2) syncs at 03:05 with mergedAt 02:30.
+  const tCrossCli = createTask(state.data, { project: pid.id, title: 'Cross-repo timestamp-less partial', status: 'todo' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/front', number: 30, title: `Feature UI (1/2) (${tCrossCli.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-15T03:00:00Z') },
+  );
+  assert.equal(tCrossCli.status, 'progress');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/back',
+      number: 40,
+      title: `Feature API (2/2) (${tCrossCli.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: '2026-11-15T02:30:00Z',
+      updatedAt: '2026-11-15T02:31:00Z',
+    },
+    { now: Date.parse('2026-11-15T03:05:00Z') },
+  );
+  assert.equal(tCrossCli.status, 'done');
+
+  // Cross-repo stack whose (1/2) opens without timestamps, (2/2) merges while (1/2) is open, then (1/2) merges without timestamps reaches done.
+  const tCrossOpenCli = createTask(state.data, { project: pid.id, title: 'Cross-repo open CLI partial', status: 'todo' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/front', number: 50, title: `Feature UI (1/2) (${tCrossOpenCli.key})`, state: 'open', draft: false },
+    { now: Date.parse('2026-11-15T03:10:00Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/back', number: 60, title: `Feature API (2/2) (${tCrossOpenCli.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-15T03:15:00Z') },
+  );
+  assert.equal(tCrossOpenCli.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/front', number: 50, title: `Feature UI (1/2) (${tCrossOpenCli.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-15T03:20:00Z') },
+  );
+  assert.equal(tCrossOpenCli.status, 'done');
 });

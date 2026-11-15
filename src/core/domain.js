@@ -494,8 +494,11 @@ export function normalizeTaskPrLink(raw) {
   if (typeof raw.createdAt === 'number' && Number.isFinite(raw.createdAt) && raw.createdAt > 0) {
     out.createdAt = raw.createdAt;
   }
-  if (typeof raw.firstSeenAt === 'number' && Number.isFinite(raw.firstSeenAt) && raw.firstSeenAt > 0) {
-    out.firstSeenAt = raw.firstSeenAt;
+  if (typeof raw.linkedSeq === 'number' && Number.isFinite(raw.linkedSeq) && raw.linkedSeq > 0) {
+    out.linkedSeq = raw.linkedSeq;
+  }
+  if (state === 'merged' && typeof raw.mergedSeq === 'number' && Number.isFinite(raw.mergedSeq) && raw.mergedSeq > 0) {
+    out.mergedSeq = raw.mergedSeq;
   }
   if (state === 'merged' && typeof raw.mergedAt === 'number' && Number.isFinite(raw.mergedAt) && raw.mergedAt > 0) {
     out.mergedAt = raw.mergedAt;
@@ -1731,7 +1734,6 @@ export function extractPullRequestTaskRefs(data, pr) {
 function isIncompleteStackMerge(taskPrs, mergedLink, preExistingMergedKeys = new Set()) {
   const part = parseStackPart(mergedLink.title);
   if (!part || part.index >= part.total) return false;
-  const mergedStart = mergedLink.createdAt || mergedLink.firstSeenAt || 0;
   return !taskPrs.some(other => {
     if (other.state !== 'merged' || !other.closing) return false;
     const otherPart = parseStackPart(other.title);
@@ -1741,15 +1743,15 @@ function isIncompleteStackMerge(taskPrs, mergedLink, preExistingMergedKeys = new
       return Boolean(other.mergedAt && mergedLink.createdAt && other.mergedAt >= mergedLink.createdAt);
     }
     const otherKey = `${other.repo.toLowerCase()}#${other.number}`;
-    if (other.mergedAt) return !mergedStart || other.mergedAt >= mergedStart;
+    if (mergedLink.createdAt && other.mergedAt) return other.mergedAt >= mergedLink.createdAt;
+    if (!mergedLink.createdAt && other.mergedSeq && mergedLink.linkedSeq) return other.mergedSeq > mergedLink.linkedSeq;
     return !preExistingMergedKeys.has(otherKey);
   });
 }
 
 function isNewerPartialThan(partial, link) {
   if (partial.repo.toLowerCase() === link.repo.toLowerCase()) return partial.number > link.number;
-  const partialStart = partial.createdAt || partial.firstSeenAt || 0;
-  return Boolean(link.mergedAt && partialStart && link.mergedAt < partialStart);
+  return Boolean(link.mergedAt && partial.createdAt && link.mergedAt < partial.createdAt);
 }
 
 function unsatisfiedMergedPartials(taskPrs, preExistingMergedKeys) {
@@ -1798,6 +1800,10 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
       const prev = t.prs.find(samePr) || null;
       if (prev && prev.updatedAt > 0 && incoming.updatedAt > 0 && incoming.updatedAt < prev.updatedAt) continue;
 
+      let maxSeq = t.prs.reduce((m, x) => Math.max(m, x.linkedSeq || 0, x.mergedSeq || 0), 0);
+      const linkedSeq = prev?.linkedSeq || ++maxSeq;
+      const mergedSeq = incoming.state === 'merged' ? (prev?.state === 'merged' && prev?.mergedSeq) || maxSeq + 1 : undefined;
+
       const nextLink = normalizeTaskPrLink({
         repo: incoming.repo,
         number: incoming.number,
@@ -1809,7 +1815,8 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
         closing: refInfo.closing,
         updatedAt: incoming.updatedAt,
         createdAt: incoming.createdAt || prev?.createdAt,
-        firstSeenAt: prev?.firstSeenAt || incoming.createdAt || now,
+        linkedSeq,
+        mergedSeq,
         mergedAt:
           incoming.state === 'merged'
             ? prev?.state === 'merged'
