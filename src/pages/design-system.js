@@ -1,8 +1,8 @@
 /* ---------------- DESIGN SYSTEM ---------------- */
 import { dOff } from '../core/utils.js';
 import { ic } from '../core/icons.js';
-import { LABELS, PCOLORS, PRIOS, STATUSES } from '../core/constants.js';
-import { S, allTasks, task } from '../core/store.js';
+import { PCOLORS, PRIOS, STATUSES } from '../core/constants.js';
+import { S, allTasks, labelsList, task } from '../core/store.js';
 import { av, avStack, empty, lbl, pStatus, prPill, progBar, stPill } from '../ui/helpers.js';
 import { sItem } from '../shell/layout.js';
 import { sk, skRows } from '../shell/skeletons.js';
@@ -43,7 +43,9 @@ export function pageSystem() {
     ]
       .map(([n, v]) => tok(n, v))
       .join('')}</div></div>
-    <div class="ds-sec"><h2>Status & priority <span>Always paired with text or a tooltip</span></h2><div class="ds-row">${STATUSES.map(s => `<span class="pillbtn bordered">${stPill(s.id)}</span>`).join('')}</div><div class="ds-row">${PRIOS.map(p => `<span class="pillbtn bordered">${prPill(p.id)}</span>`).join('')}</div><div class="ds-row">${LABELS.map(l => lbl(l.id)).join('')}</div></div>
+    <div class="ds-sec"><h2>Status & priority <span>Always paired with text or a tooltip</span></h2><div class="ds-row">${STATUSES.map(s => `<span class="pillbtn bordered">${stPill(s.id)}</span>`).join('')}</div><div class="ds-row">${PRIOS.map(p => `<span class="pillbtn bordered">${prPill(p.id)}</span>`).join('')}</div><div class="ds-row">${labelsList()
+      .map(l => lbl(l.id))
+      .join('')}</div></div>
     <div class="ds-sec"><h2>Typography <span>Geist · Geist Mono</span></h2><div class="panel" style="padding:4px 16px">${[
       ['Page title', 'var(--fs-2xl)', 600, 'Website Redesign'],
       ['Section title', 'var(--fs-xl)', 600, 'Upcoming deadlines'],

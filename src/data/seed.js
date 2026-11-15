@@ -1,4 +1,5 @@
 /* ---------- seed data ---------- */
+import { LABELS } from '../core/constants.js';
 import { dOff, minsAgo, todayDate } from '../core/dates.js';
 
 export function seed(now = Date.now()) {
@@ -92,6 +93,7 @@ export function seed(now = Date.now()) {
     me: 'm1',
     members,
     teams: [],
+    labels: LABELS.map(l => ({ ...l })),
     projects,
     tasks: T,
     comments: [],

@@ -2,13 +2,17 @@
 import { esc } from '../core/utils.js';
 import { ic } from '../core/icons.js';
 import { PR, STATUSES, isClosedStatus } from '../core/constants.js';
-import { S, commentsOf, pColor, proj } from '../core/store.js';
+import { S, childrenOf, commentsOf, pColor, proj, task } from '../core/store.js';
 import { av, dueHtml, lbl, prIcon, progBar, stIcon } from '../ui/helpers.js';
 import { fxc } from '../shell/render.js';
 
 export function kcard(t, opt = {}) {
   const cc = commentsOf(t.id).length;
   const ac = t.attachments.length;
+  const parentTask = t.parent ? task(t.parent) : null;
+  const kids = childrenOf(t.id);
+  const activeKids = kids.filter(c => c.status !== 'canceled');
+  const doneKids = activeKids.filter(c => c.status === 'done').length;
   const sd = t.subtasks.filter(s => s.done).length;
   const p = proj(t.project);
   return `<div class="kcard ${isClosedStatus(t.status) ? 'done' : ''}${fxc('done', t.id)}${fxc('added', t.id)}${fxc('moved', t.id)}" draggable="true" data-drag-card="${t.id}" data-a="openTask" data-id="${t.id}" data-ctx="task" role="button" tabindex="0" aria-label="${esc(t.title)}">
@@ -18,6 +22,8 @@ export function kcard(t, opt = {}) {
     <div class="meta">
       ${opt.showProj ? `<span class="m" data-tip="${esc(p.name)}"><span class="pdot" style="--c:${pColor(p)}"></span></span>` : ''}
       <span class="key">${t.key}</span>
+      ${parentTask ? `<span class="m mono" data-tip="Sub-issue of ${esc(parentTask.key)}: ${esc(parentTask.title)}" style="font-size:11px">↳ ${parentTask.key}</span>` : ''}
+      ${kids.length ? `<span class="m num" data-tip="${doneKids}/${activeKids.length} sub-issues done">${ic('git-fork', 12)}${doneKids}/${activeKids.length}</span>` : ''}
       <button class="m" data-a="pop" data-pop="priority" data-id="${t.id}" data-tip="${PR[t.priority].name}" aria-label="Priority: ${PR[t.priority].name}">${prIcon(t.priority, 13)}</button>
       ${t.due ? `<button class="m" data-a="pop" data-pop="date" data-field="due" data-id="${t.id}" aria-label="Due date">${dueHtml(t)}</button>` : ''}
       ${t.recur ? `<span class="m" data-tip="Repeats ${t.recur.toLowerCase()}">${ic('repeat', 12)}</span>` : ''}

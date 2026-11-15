@@ -6,22 +6,31 @@ import {
   addComment,
   addSubtask,
   applyTaskPatch,
+  applyWorkspacePatch,
+  childrenOfTask,
   createDefaultState,
+  createLabel,
   createProject,
   createTask,
+  deleteLabel,
   deleteProject,
   deleteTasks,
+  diffWorkspacePatch,
   duplicateProject,
   duplicateTask,
+  ensureLabels,
   formatProjectForApi,
+  formatTaskForApi,
   isTaskOverdue,
   projectProgress,
   promoteSubtask,
   queryTasks,
   removeMember,
   removeSubtask,
+  resolveLabel,
   searchWorkspace,
   syncGitHubPullRequests,
+  updateLabel,
   updateProject,
   updateSubtask,
 } from '../../src/core/domain.js';
@@ -1246,4 +1255,109 @@ test('canceled status excludes tasks from open/overdue counts and progress denom
     { now: FIXED_NOW + 5000 },
   );
   assert.equal(tTodo.status, 'done');
+});
+
+test('custom workspace labels and parent/child sub-issues enforce cycle, cascade, and concurrent patch invariants', () => {
+  const state = createDefaultState(FIXED_NOW);
+  // Simulate a pre-migration workspace without data.labels on disk.
+  delete state.data.labels;
+  const baseSnap = structuredClone(state);
+  ensureLabels(state.data);
+  // Pure lazy initialization emits no spurious workspace diff.
+  assert.deepEqual(diffWorkspacePatch(baseSnap, state), {});
+
+  const infra = createLabel(state.data, { name: 'Infra', color: 'indigo' });
+  assert.equal(infra.id, 'infra');
+  assert.throws(() => createLabel(state.data, { name: 'infra' }), DomainError);
+  assert.throws(() => createLabel(state.data, { name: 'Poison', color: 'constructor' }), DomainError);
+  assert.throws(() => createLabel(state.data, { id: 'prototype', name: 'Bad Explicit Id' }), DomainError);
+  updateLabel(state.data, 'Infra', { name: 'Infrastructure', color: '#2288dd' });
+  assert.equal(infra.c, '#2288DD');
+
+  // Ordinary label names like "Prototype" get a safe non-colliding id and survive diff/applyWorkspacePatch.
+  const protoSnap = structuredClone(state);
+  const protoLbl = createLabel(state.data, { name: 'Prototype', color: 'teal' });
+  assert.equal(protoLbl.id, 'label-prototype');
+  const protoSynced = structuredClone(protoSnap);
+  applyWorkspacePatch(protoSynced, diffWorkspacePatch(protoSnap, state));
+  assert.equal(resolveLabel(protoSynced.data, 'Prototype')?.id, 'label-prototype');
+
+  const p = createProject(state.data, { name: 'Agent Hierarchy', key: 'AGH' }, { now: FIXED_NOW });
+  const pOther = createProject(state.data, { name: 'Other Project', key: 'OTH' }, { now: FIXED_NOW });
+  const epic = createTask(state.data, { project: p.id, title: 'Epic: Linear Parity', labels: ['Infrastructure'] }, { now: FIXED_NOW });
+  assert.deepEqual(epic.labels, ['infra']);
+
+  const childA = createTask(state.data, { project: p.id, parent: epic.key, title: 'Slice A', status: 'done' }, { now: FIXED_NOW });
+  const childB = createTask(state.data, { project: p.id, parent: epic.id, title: 'Slice B', status: 'todo' }, { now: FIXED_NOW });
+  const childCanceled = createTask(state.data, { project: p.id, parent: epic.id, title: 'Canceled slice', status: 'canceled' }, { now: FIXED_NOW });
+
+  // Self-parent, ancestor cycles, and cross-project parents are rejected.
+  assert.throws(() => applyTaskPatch(state.data, epic, { parent: epic.id }), DomainError);
+  assert.throws(() => applyTaskPatch(state.data, epic, { parent: childA.id }), DomainError);
+  const otherTask = createTask(state.data, { project: pOther.id, title: 'Foreign task' }, { now: FIXED_NOW });
+  assert.throws(() => applyTaskPatch(state.data, childA, { parent: otherTask.id }), DomainError);
+
+  const epicApi = formatTaskForApi(state.data, epic);
+  assert.equal(epicApi.childCount, 2);
+  assert.equal(epicApi.childDoneCount, 1);
+  assert.equal(formatTaskForApi(state.data, childA).parentKey, epic.key);
+
+  assert.deepEqual(
+    queryTasks(state.data, { project: p.id, parent: epic.key }).map(t => t.key),
+    [childA.key, childB.key, childCanceled.key],
+  );
+  assert.deepEqual(
+    queryTasks(state.data, { project: p.id, parent: 'none' }).map(t => t.key),
+    [epic.key],
+  );
+
+  // Promoting a subtask attaches it as a child sub-issue of the parent task.
+  const sub = addSubtask(state.data, childB, 'Promoted piece', { now: FIXED_NOW });
+  const promoted = promoteSubtask(state.data, childB, sub.id, { now: FIXED_NOW });
+  assert.equal(promoted.parent, childB.id);
+
+  // Duplicating a project remaps parent links across copied tasks.
+  const pDup = duplicateProject(state.data, p, { now: FIXED_NOW });
+  const dupTasks = queryTasks(state.data, { project: pDup.id });
+  const dupEpic = dupTasks.find(t => t.title === epic.title);
+  const dupChildA = dupTasks.find(t => t.title === childA.title);
+  assert.equal(dupChildA.parent, dupEpic.id);
+
+  // Moving a parent task to another project detaches children left behind; deleting a label strips it from tasks.
+  const preDeleteSnap = structuredClone(state);
+  state.views = { [`p:${p.id}`]: { filters: [{ f: 'labels', op: 'is', v: ['infra'] }] } };
+  state.data.savedViews.push({ id: 'sv-infra', name: 'Infra only', project: p.id, filters: [{ f: 'labels', op: 'is', v: ['infra'] }] });
+  deleteLabel(state.data, 'infra', { views: state.views });
+  assert.deepEqual(epic.labels, []);
+  assert.deepEqual(state.views[`p:${p.id}`].filters, []);
+  assert.deepEqual(state.data.savedViews.find(v => v.id === 'sv-infra').filters, []);
+  const offlineClient = structuredClone(preDeleteSnap);
+  offlineClient.data.savedViews.push({
+    id: 'sv-offline',
+    name: 'Offline infra',
+    project: p.id,
+    filters: [{ f: 'labels', op: 'is', v: ['infra', 'bug'] }],
+  });
+  offlineClient.views = { [`p:${p.id}`]: { filters: [{ f: 'labels', op: 'is', v: ['infra'] }] } };
+  applyWorkspacePatch(state, diffWorkspacePatch(preDeleteSnap, offlineClient));
+  assert.deepEqual(state.data.savedViews.find(v => v.id === 'sv-offline').filters, [{ f: 'labels', op: 'is', v: ['bug'] }]);
+  assert.deepEqual(state.views[`p:${p.id}`].filters, []);
+  applyTaskPatch(state.data, childB, { project: pOther.id }, { now: FIXED_NOW });
+  assert.equal(childB.parent, null);
+  assert.equal(promoted.parent, null);
+
+  // Concurrent offline cycle (A.parent = B and B.parent = A) is sanitized on applyWorkspacePatch.
+  assert.equal(childrenOfTask(state.data, epic.id).length, 2);
+  const tab2 = structuredClone(state);
+  const res = applyWorkspacePatch(tab2, {
+    tasks: {
+      updated: {
+        [epic.id]: { fields: { set: { parent: childA.id } } },
+      },
+    },
+  });
+  assert.equal(res.rekeyed, true);
+  assert.equal(Boolean(tab2.data.tasks.find(x => x.id === epic.id).parent && tab2.data.tasks.find(x => x.id === childA.id).parent), false);
+  deleteTasks(state.data, [epic.id]);
+  assert.equal(childA.parent, null);
 });

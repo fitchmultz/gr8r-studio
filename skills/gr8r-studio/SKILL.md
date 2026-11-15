@@ -78,7 +78,7 @@ Valid vocabulary values (verify with `gr8r status` if unsure):
 
 - **Task status:** `backlog`, `todo`, `progress`, `review`, `done`, `canceled` (`open` is accepted as a filter on `gr8r tasks` and excludes both `done` and `canceled`)
 - **Priority:** `urgent`, `high`, `medium`, `low`, `none`
-- **Labels:** `design`, `frontend`, `backend`, `research`, `content`, `bug`, `qa`, `growth`
+- **Labels:** workspace-editable (`gr8r labels` lists current labels; `gr8r label create <name> [--color indigo]` adds custom labels)
 - **Project status:** `planning`, `active`, `risk`, `hold`, `complete`
 
 ### Track progress, subtasks, and verification receipts
@@ -93,6 +93,11 @@ gr8r subtask done PID-201 s_01_1 --note "Shipped in PR #42"
 # Add a new subtask or promote one to a full task
 gr8r subtask add PID-201 "Run production smoke check"
 gr8r subtask promote PID-201 s_01_2
+
+# Create or filter parent/child sub-issues inside a project
+gr8r task create "Sub-slice: Schema migration" -p PID --parent PID-201
+gr8r tasks -p PID --parent PID-201
+gr8r tasks -p PID --parent none
 
 # Record PR/deploy verification in comments and complete the task
 gr8r task done PID-201 --comment "Merged PR #42 (sha abc1234) and verified live."

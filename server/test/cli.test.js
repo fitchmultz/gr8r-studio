@@ -230,4 +230,19 @@ test('gr8r CLI guides user to GR8R_TOKEN when /api/config bootstrap is disabled,
     env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' },
   });
   assert.equal(JSON.parse(openAfterCancel.stdout).tasks.length, 0);
+
+  const lblCreate = await invoke(['label', 'create', 'Infra', '--color', 'indigo'], {
+    env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' },
+  });
+  assert.match(lblCreate.stdout, /Created label infra/);
+  await invoke(['task', 'create', 'Parent initiative', '-p', 'PID', '-l', 'Infra'], {
+    env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' },
+  });
+  await invoke(['task', 'create', 'Child slice', '-p', 'PID', '--parent', 'PID-202'], {
+    env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' },
+  });
+  const parentView = await invoke(['task', 'view', 'PID-202'], {
+    env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' },
+  });
+  assert.match(parentView.stdout, /--- Sub-issues \(0\/1\) ---\n- \[todo\] PID-203\s+Child slice/);
 });
