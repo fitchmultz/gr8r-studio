@@ -755,6 +755,15 @@ export function formatByteSize(bytes) {
   return `${(b / 1048576).toFixed(1)} MB`;
 }
 
+export function buildAttachmentBlobUrl(file) {
+  if (!file?.blobId) return '';
+  const qp = new URLSearchParams();
+  if (file.name) qp.set('name', file.name);
+  if (file.mime) qp.set('mime', file.mime);
+  const qs = qp.toString();
+  return `/api/blobs/${file.blobId}${qs ? '?' + qs : ''}`;
+}
+
 export function attachFileRecord(data, fields = {}, opts = {}) {
   const now = opts.now ?? Date.now();
   const by = opts.by !== undefined ? resolveMember(data, opts.by) || data.me : data.me;
@@ -789,7 +798,8 @@ export function attachFileRecord(data, fields = {}, opts = {}) {
   const sizeBytes = fields.sizeBytes !== undefined ? Math.max(0, Number(fields.sizeBytes) || 0) : undefined;
   const size = fields.size ? String(fields.size) : formatByteSize(sizeBytes ?? 0);
   const mime = fields.mime ? String(fields.mime).trim() : undefined;
-  const url = blobId ? `/api/blobs/${blobId}` : fields.url ? String(fields.url) : undefined;
+  const rawUrl = !blobId && fields.url && !String(fields.url).startsWith('blob:') ? String(fields.url) : undefined;
+  const url = blobId ? buildAttachmentBlobUrl({ blobId, name, mime }) : rawUrl;
   const id = fields.id || uid('f');
   const base = {
     id,
@@ -822,7 +832,7 @@ export function formatFileForApi(data, f) {
   const t = f.task ? findTask(data, f.task) : null;
   return {
     ...f,
-    url: f.blobId ? `/api/blobs/${f.blobId}` : f.url || null,
+    url: f.blobId ? buildAttachmentBlobUrl(f) : f.url && !String(f.url).startsWith('blob:') ? f.url : null,
     byName: f.by ? findMember(data, f.by)?.name || null : null,
     projectKey: p?.key || null,
     projectName: p?.name || null,
@@ -2574,6 +2584,10 @@ export function applyWorkspacePatch(targetState, patch) {
         rekeyed = true;
         continue;
       }
+      if (typeof f.url === 'string' && f.url.startsWith('blob:')) {
+        delete f.url;
+        rekeyed = true;
+      }
       if (f.task) {
         const pt = findTask(d, f.task);
         if (pt && f.project !== pt.project) {
@@ -2591,11 +2605,29 @@ export function applyWorkspacePatch(targetState, patch) {
   }
   if (Array.isArray(d.docs)) {
     const keptDocs = [];
+    const seenSlugsByProject = new Map();
     for (const doc of d.docs) {
       if (!doc || !findProject(d, doc.project)) {
         rekeyed = true;
         continue;
       }
+      let projSlugs = seenSlugsByProject.get(doc.project);
+      if (!projSlugs) {
+        projSlugs = new Set();
+        seenSlugsByProject.set(doc.project, projSlugs);
+      }
+      const cleanBase = slugifyDocSlug(doc.slug || doc.title);
+      const safeBase = UNSAFE_OBJECT_IDS.has(cleanBase) ? `doc-${cleanBase}` : cleanBase;
+      let nextSlug = safeBase;
+      let suffix = 2;
+      while (projSlugs.has(nextSlug)) {
+        nextSlug = `${safeBase}-${suffix++}`;
+      }
+      if (nextSlug !== doc.slug) {
+        doc.slug = nextSlug;
+        rekeyed = true;
+      }
+      projSlugs.add(doc.slug);
       if (doc.by && !findMember(d, doc.by)) {
         doc.by = d.me;
         rekeyed = true;

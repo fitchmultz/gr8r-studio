@@ -859,6 +859,11 @@ A.expandRow = el => {
 A.rmAttach = el => {
   const t = task(el.dataset.id);
   const f = t.attachments.find(a => a.id === el.dataset.aid);
+  const localUrl = S.ui.localPreviews?.[el.dataset.aid];
+  if (localUrl) {
+    URL.revokeObjectURL(localUrl);
+    delete S.ui.localPreviews[el.dataset.aid];
+  }
   mutate(() => {
     t.attachments = t.attachments.filter(a => a.id !== el.dataset.aid);
     D().files = (D().files || []).filter(x => x.id !== el.dataset.aid);
@@ -913,7 +918,6 @@ export function handleFiles(files, ctx) {
         });
       return;
     }
-    const localUrl = file.type?.startsWith('image/') ? URL.createObjectURL(file) : undefined;
     const iv = setInterval(() => {
       up.pct = Math.min(100, up.pct + 9 + Math.round(Math.random() * 22));
       const bar = document.getElementById('upbar-' + up.id),
@@ -923,18 +927,22 @@ export function handleFiles(files, ctx) {
       if (up.pct >= 100) {
         clearInterval(iv);
         S.ui.uploads = S.ui.uploads.filter(x => x !== up);
+        let rec = null;
         mutate(() => {
-          attachFileRecord(D(), {
+          rec = attachFileRecord(D(), {
             name: up.name,
             type: fileType(up.name),
             size: up.size,
             sizeBytes: file.size,
             mime: file.type || undefined,
-            url: localUrl,
             project: up.project,
             task: up.task || null,
           });
         });
+        if (rec && file.type?.startsWith('image/')) {
+          S.ui.localPreviews = S.ui.localPreviews || {};
+          S.ui.localPreviews[rec.id] = URL.createObjectURL(file);
+        }
         toast(`Uploaded ${up.name}`);
       }
     }, 220);

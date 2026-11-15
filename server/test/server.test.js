@@ -694,6 +694,42 @@ test('/api/blobs enforces auth, cookie-backed <img> reads, CSP sandbox, and atta
   assert.equal(getSvg.status, 200);
   assert.match(getSvg.headers.get('content-disposition') || '', /^attachment; filename="evil\.svg"$/);
 
+  // Non-ASCII filenames serve 200 with RFC 5987 filename* without throwing ERR_INVALID_CHAR.
+  const upUni = await fetch(base + '/api/blobs', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'image/png', 'x-file-name': encodeURIComponent('Übersicht 🙂.png') },
+    body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01]),
+  });
+  assert.equal(upUni.status, 201);
+  const uniMeta = await upUni.json();
+  const getUni = await fetch(base + `/api/blobs/${uniMeta.blobId}`, { headers: { cookie: cookiePair } });
+  assert.equal(getUni.status, 200);
+  assert.match(getUni.headers.get('content-disposition') || '', /filename\*=UTF-8''%C3%9Cbersicht%20%F0%9F%99%82\.png/);
+
+  // Identical bytes uploaded under two different names/MIMEs preserve both sidecar fallback and per-attachment URLs.
+  const sharedBytes = Buffer.from('%PDF-1.4 shared payload');
+  const upFirst = await (
+    await fetch(base + '/api/blobs', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/pdf', 'x-file-name': 'spec.pdf' },
+      body: sharedBytes,
+    })
+  ).json();
+  const upSecond = await (
+    await fetch(base + '/api/blobs', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'text/plain', 'x-file-name': 'notes.txt' },
+      body: sharedBytes,
+    })
+  ).json();
+  assert.equal(upFirst.blobId, upSecond.blobId);
+  const bareFirst = await fetch(base + `/api/blobs/${upFirst.blobId}`, { headers: auth });
+  assert.equal(bareFirst.headers.get('content-type'), 'application/pdf');
+  assert.match(bareFirst.headers.get('content-disposition') || '', /filename="spec\.pdf"/);
+  const secondByUrl = await fetch(base + upSecond.url, { headers: auth });
+  assert.equal(secondByUrl.headers.get('content-type'), 'text/plain');
+  assert.match(secondByUrl.headers.get('content-disposition') || '', /filename="notes\.txt"/);
+
   // Malformed percent-encoding returns 400 cleanly without throwing URIError.
   assert.equal((await fetch(base + '/api/blobs/%E0%A4%A', { headers: auth })).status, 400);
 });

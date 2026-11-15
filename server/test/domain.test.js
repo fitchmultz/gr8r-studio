@@ -26,6 +26,7 @@ import {
   duplicateProject,
   duplicateTask,
   ensureLabels,
+  fileTypeFromName,
   formatDocForApi,
   formatProjectForApi,
   formatTaskForApi,
@@ -1535,12 +1536,16 @@ test('persisted attachment records and Markdown Project Docs round-trip, search,
   const sha = 'a'.repeat(64);
   const fileRec = attachFileRecord(
     state.data,
-    { task: t.key, name: 'qa-shot.png', blobId: sha, sizeBytes: 4096, mime: 'image/png' },
+    { task: t.key, name: 'qa-shot.png', blobId: sha, sizeBytes: 4096, mime: 'image/png', url: 'blob:http://localhost/dead' },
     { agent: 'pi:qa-agent', now: FIXED_NOW + 10 },
   );
-  assert.equal(fileRec.url, `/api/blobs/${sha}`);
+  assert.equal(fileRec.url, `/api/blobs/${sha}?name=qa-shot.png&mime=image%2Fpng`);
   assert.equal(t.attachments.length, 1);
   assert.equal(t.attachments[0].blobId, sha);
+  assert.equal(fileTypeFromName('bundle.tgz'), 'zip');
+  assert.equal(fileTypeFromName('App.tsx'), 'code');
+  const localOnly = attachFileRecord(state.data, { project: p.id, name: 'local.png', url: 'blob:http://localhost/ephemeral' }, { now: FIXED_NOW + 15 });
+  assert.equal(localOnly.url, undefined);
 
   deleteWorkspaceFile(state.data, fileRec.id, { now: FIXED_NOW + 20 });
   assert.equal(t.attachments.length, 0);
@@ -1564,8 +1569,12 @@ test('persisted attachment records and Markdown Project Docs round-trip, search,
   assert.match(formatDocForApi(state.data, doc).bodyMarkdown, /Rollback/);
 
   const peer = structuredClone(snapBeforeDoc);
+  createDoc(peer.data, { project: p.id, title: 'Runbook & Architecture', bodyMarkdown: 'Peer concurrent doc' }, { now: FIXED_NOW + 35 });
   applyWorkspacePatch(peer, diffWorkspacePatch(snapBeforeDoc, state));
-  assert.equal(docsOfProject(peer.data, p.id).length, 1);
+  const mergedSlugs = docsOfProject(peer.data, p.id)
+    .map(d => d.slug)
+    .sort();
+  assert.deepEqual(mergedSlugs, ['runbook-architecture', 'runbook-architecture-2']);
 
   deleteDoc(state.data, doc.id, { now: FIXED_NOW + 50 });
   assert.equal(docsOfProject(state.data, p.id).length, 0);

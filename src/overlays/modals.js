@@ -3,7 +3,7 @@ import { $$, MOD, ago, esc, fmtDate } from '../core/utils.js';
 import { ic } from '../core/icons.js';
 import { PCOLORS, PICONS } from '../core/constants.js';
 import { D, S, mem, pColor, proj, task, teamsList } from '../core/store.js';
-import { FT, av, filePrev, lbl, prPill, stPill } from '../ui/helpers.js';
+import { FT, av, filePrev, lbl, prPill, resolveAttachmentPreviewUrl, stPill } from '../ui/helpers.js';
 import { focusKey, render } from '../shell/render.js';
 import { teamModal } from '../features/teams.js';
 
@@ -274,12 +274,12 @@ export function shortcutsModal(H) {
 export function filePreviewModal(m, H) {
   const f = m.file;
   const t = FT[f.type] || FT.other;
-  const blobUrl = f.blobId ? `/api/blobs/${f.blobId}` : f.url || '';
+  const blobUrl = resolveAttachmentPreviewUrl(f);
   const previewHtml =
     f.type === 'img' && blobUrl
       ? `<img src="${esc(blobUrl)}" alt="${esc(f.name)}" style="max-height:62vh;width:100%;object-fit:contain;display:block;background:var(--surface-2)">`
       : filePrev(f).replace('class="fprev"', 'class="fprev" style="aspect-ratio:16/9"');
-  const downloadUrl = blobUrl ? (blobUrl.startsWith('/api/blobs/') ? `${blobUrl}?download=1&name=${encodeURIComponent(f.name)}` : blobUrl) : '';
+  const downloadUrl = blobUrl ? (blobUrl.startsWith('/api/blobs/') ? `${blobUrl}${blobUrl.includes('?') ? '&' : '?'}download=1` : blobUrl) : '';
   return `${H(esc(f.name), `${t.n} · ${f.size} · Uploaded by ${esc(mem(f.by)?.name || 'you')} ${ago(f.at)}`)}
   <div class="modal-b"><div style="border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden">${previewHtml}</div>
   ${m.tid ? `<div class="row faint" style="font-size:12.5px">${ic('link', 13)}Attached to <button class="link" data-a="openTask" data-id="${m.tid}">${esc(task(m.tid)?.title)}</button></div>` : ''}</div>

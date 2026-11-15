@@ -290,22 +290,32 @@ export function startServer({
       } catch {
         /* optional metadata */
       }
-      const rawMime = String(meta.mime || 'application/octet-stream')
-        .split(';')[0]
-        .trim()
-        .toLowerCase();
+      const requestedMime = String(url.searchParams.get('mime') || '').trim();
+      const validRequestedMime = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+(?:;\s*charset=[a-z0-9._-]+)?$/i.test(requestedMime) ? requestedMime : '';
+      const effectiveMime = validRequestedMime || meta.mime || 'application/octet-stream';
+      const rawMime = String(effectiveMime).split(';')[0].trim().toLowerCase();
       const forceDownload = url.searchParams.get('download') === '1' || !SAFE_INLINE_BLOB_MIMES.has(rawMime);
-      const requestedName = url.searchParams.get('name');
-      const safeName =
-        String(requestedName || meta.name || blobId)
-          .replace(/[/\\"\r\n]/g, '_')
+      const effectiveName =
+        String(url.searchParams.get('name') || meta.name || blobId)
+          .replace(/[/\\\r\n]/g, '_')
           .trim() || blobId;
+      const asciiName =
+        effectiveName
+          .normalize('NFKD')
+          .replace(/[^\x20-\x7e]/g, '_')
+          .replace(/["\\;]/g, '_')
+          .trim() || blobId;
+      const utf8Star = encodeURIComponent(effectiveName).replace(/['()*]/g, ch => '%' + ch.charCodeAt(0).toString(16).toUpperCase());
+      const disposition =
+        asciiName === effectiveName
+          ? `${forceDownload ? 'attachment' : 'inline'}; filename="${asciiName}"`
+          : `${forceDownload ? 'attachment' : 'inline'}; filename="${asciiName}"; filename*=UTF-8''${utf8Star}`;
       const headers = {
-        'content-type': meta.mime || 'application/octet-stream',
+        'content-type': effectiveMime,
         'cache-control': 'private, max-age=31536000, immutable',
         'x-content-type-options': 'nosniff',
         'content-security-policy': "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; sandbox",
-        'content-disposition': `${forceDownload ? 'attachment' : 'inline'}; filename="${safeName}"`,
+        'content-disposition': disposition,
       };
       if (req.method === 'HEAD') {
         const st = fs.statSync(blobPath);
@@ -379,12 +389,15 @@ export function startServer({
         fs.writeFileSync(tmp, buf);
         fs.renameSync(tmp, dest);
       }
-      const metaTmp = `${dest}.json.${process.pid}.${Date.now()}.tmp`;
-      fs.writeFileSync(metaTmp, JSON.stringify({ name, mime, sizeBytes: buf.length }));
-      fs.renameSync(metaTmp, dest + '.json');
+      if (!fs.existsSync(dest + '.json')) {
+        const metaTmp = `${dest}.json.${process.pid}.${Date.now()}.tmp`;
+        fs.writeFileSync(metaTmp, JSON.stringify({ name, mime, sizeBytes: buf.length }));
+        fs.renameSync(metaTmp, dest + '.json');
+      }
+      const qp = new URLSearchParams({ name, mime });
       return send(res, 201, {
         blobId,
-        url: `/api/blobs/${blobId}`,
+        url: `/api/blobs/${blobId}?${qp.toString()}`,
         name,
         mime,
         sizeBytes: buf.length,
