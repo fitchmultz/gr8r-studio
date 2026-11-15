@@ -9,8 +9,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-const DEFAULT_URL = 'http://127.0.0.1:4180';
+const DEFAULT_URL = 'https://alienarchy.tail854973.ts.net:8443';
 const TAILSCALE_PROXY = 'http://127.0.0.1:1055';
+const PROXY_RETRY_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH']);
 
 export function configFilePath(env = process.env) {
   if (env.GR8R_CONFIG) return env.GR8R_CONFIG;
@@ -83,6 +84,7 @@ function rawHttpRequest(targetUrl, { method = 'GET', headers = {}, body, proxyUr
     : false;
 
   return new Promise((resolve, reject) => {
+    let connected = false;
     const req = mod.request(
       u,
       {
@@ -106,7 +108,18 @@ function rawHttpRequest(targetUrl, { method = 'GET', headers = {}, body, proxyUr
         });
       },
     );
-    req.once('timeout', () => req.destroy(new Error(`Request timed out: ${method} ${u.href}`)));
+    req.once('socket', sock => {
+      if (!sock.connecting) connected = true;
+      else
+        sock.once('connect', () => {
+          connected = true;
+        });
+    });
+    req.once('timeout', () => {
+      const err = new Error(`Request timed out: ${method} ${u.href}`);
+      err.code = connected ? 'ERR_HTTP_REQUEST_TIMEOUT' : 'ETIMEDOUT';
+      req.destroy(err);
+    });
     req.once('error', reject);
     if (payload) req.write(payload);
     req.end();
@@ -132,7 +145,7 @@ export class Gr8rClient {
       return await rawHttpRequest(fullUrl, { ...opts, proxyUrl: this.proxy || undefined, noProxy: this.noProxy });
     } catch (err) {
       const host = new URL(fullUrl).hostname;
-      if (!this.proxy && !this.autoProxyChecked && (err?.code === 'ENOTFOUND' || err?.code === 'EAI_AGAIN') && host.endsWith('.ts.net')) {
+      if (!this.proxy && !this.autoProxyChecked && PROXY_RETRY_CODES.has(err?.code) && host.endsWith('.ts.net')) {
         this.autoProxyChecked = true;
         const p = new URL(TAILSCALE_PROXY);
         if (await probeTcpPort(p.hostname, +p.port)) {
