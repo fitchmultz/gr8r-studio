@@ -407,9 +407,12 @@ export const NOTIF_TYPES = ['blocker', 'mention', 'assign', 'comment', 'update']
 
 export function mentionsWorkspaceOwner(data, rawText) {
   const np = data.notifPrefs || {};
+  if (np.push_mention === false) return false;
   if (np.mention_all === false && !np.mention_ws && np.mention_team === false) return false;
   const stripped = stripCodeAndComments(String(rawText ?? ''));
-  const tokens = [...stripped.matchAll(/(?:^|[^\w])@([a-z0-9._-]+)/gi)].map(m => m[1].toLowerCase());
+  const tokens = [...stripped.matchAll(/(?:^|[^\w])@([a-z0-9._-]+)/gi)]
+    .map(m => m[1].replace(/[._-]+$/, '').toLowerCase())
+    .filter(Boolean);
   if (!tokens.length) return false;
   const owner = findMember(data, data.me);
   const ownerTokens = new Set(['me', 'owner']);
@@ -910,14 +913,16 @@ export function createTask(data, fields = {}, opts = {}) {
   data.tasks.push(t);
   logActivity(data, 'created', t, '', { by, agent, now });
   const isExternalCreate = Boolean(agent) || by !== data.me;
-  if (opts.needsOwner) {
-    pushNotif(data, { type: 'blocker', by, agent, task: t, text: 'needs your input on', snippet: stripHtml(t.desc) || t.title }, { now });
-  } else if (isExternalCreate) {
-    const descText = stripHtml(t.desc);
-    if (descText && mentionsWorkspaceOwner(data, descText)) {
-      pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: descText }, { now });
-    } else if (assignee && assignee === data.me && data.notifPrefs?.assign_self !== false) {
-      pushNotif(data, { type: 'assign', by, agent, task: t, text: 'assigned you', snippet: t.title }, { now });
+  if (!opts.skipNotifs) {
+    if (opts.needsOwner) {
+      pushNotif(data, { type: 'blocker', by, agent, task: t, text: 'needs your input on', snippet: stripHtml(t.desc) || t.title }, { now });
+    } else if (isExternalCreate) {
+      const descMd = htmlToMarkdown(t.desc || '');
+      if (descMd && mentionsWorkspaceOwner(data, descMd)) {
+        pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: stripHtml(t.desc) || t.title }, { now });
+      } else if (assignee && assignee === data.me && data.notifPrefs?.assign_self !== false && data.notifPrefs?.push_assign !== false) {
+        pushNotif(data, { type: 'assign', by, agent, task: t, text: 'assigned you', snippet: t.title }, { now });
+      }
     }
   }
   return t;
@@ -1126,7 +1131,7 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
             attachments: [],
             prs: [],
           },
-          { by, agent, now },
+          { by, agent, now, skipNotifs: true },
         );
         delete spawned.prevStatus;
         delete spawned.claimedBy;
@@ -1138,13 +1143,21 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
       logActivity(data, nv ? 'claimed' : 'released', t, nv ? `(${nv})` : '', { by, agent: nv || agent, now });
     } else if (k === 'assignee') {
       logActivity(data, 'assigned', t, nv ? `to ${findMember(data, nv)?.name}` : '(unassigned)', { by, agent, now });
-      if (isExternalActor && nv && nv === data.me && data.notifPrefs?.assign_self !== false && !opts.needsOwner) {
+      if (
+        isExternalActor &&
+        nv &&
+        nv === data.me &&
+        data.notifPrefs?.assign_self !== false &&
+        data.notifPrefs?.push_assign !== false &&
+        !opts.needsOwner
+      ) {
         pushNotif(data, { type: 'assign', by, agent, task: t, text: 'assigned you', snippet: t.title }, { now });
       }
     } else if (k === 'desc') {
-      const prevPlain = stripHtml(old || '');
+      const prevMd = htmlToMarkdown(old || '');
+      const nextMd = htmlToMarkdown(nv || '');
       const nextPlain = stripHtml(nv || '');
-      if (isExternalActor && !opts.needsOwner && !mentionsWorkspaceOwner(data, prevPlain) && mentionsWorkspaceOwner(data, nextPlain)) {
+      if (isExternalActor && !opts.needsOwner && !mentionsWorkspaceOwner(data, prevMd) && mentionsWorkspaceOwner(data, nextMd)) {
         pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: nextPlain }, { now });
       }
     } else if (k === 'priority') logActivity(data, 'changed priority of', t, `to ${PR[nv].name}`, { by, agent, now });
