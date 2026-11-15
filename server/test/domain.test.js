@@ -706,4 +706,47 @@ test('syncGitHubPullRequests handles draft/ready/merge, stacked (1/n) PRs, Refs 
     { now: FIXED_NOW + 1400 },
   );
   assert.equal(t1.status, 'review');
+
+  // Backfilling a prior cycle's (2/2) without timestamps after a new follow-up (1/2) is already open
+  // does not synthesize a fake mergedAt that prematurely completes the follow-up (1/2) on merge.
+  const tBackfill = createTask(state.data, { project: pid.id, title: 'Backfill order guard', status: 'todo' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 303,
+      title: `Follow-up (1/2) (${tBackfill.key})`,
+      state: 'open',
+      draft: false,
+      createdAt: '2026-11-15T03:00:00Z',
+      updatedAt: '2026-11-15T03:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T12:00:00Z') },
+  );
+  assert.equal(tBackfill.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 302,
+      title: `Prior cycle (2/2) (${tBackfill.key})`,
+      state: 'merged',
+      merged: true,
+    },
+    { now: Date.parse('2026-11-15T12:00:20Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 303,
+      title: `Follow-up (1/2) (${tBackfill.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T03:00:00Z',
+      updatedAt: '2026-11-15T03:10:00Z',
+    },
+    { now: Date.parse('2026-11-15T12:00:40Z') },
+  );
+  assert.equal(tBackfill.status, 'review');
 });

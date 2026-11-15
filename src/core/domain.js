@@ -1735,11 +1735,15 @@ function isIncompleteStackMerge(taskPrs, mergedLink, preExistingMergedKeys = new
     if (other.state !== 'merged' || !other.closing) return false;
     const otherPart = parseStackPart(other.title);
     if (!otherPart) return false;
+    if (otherPart.total !== part.total || otherPart.index < part.total) return false;
     const otherKey = `${other.repo.toLowerCase()}#${other.number}`;
     if (!mergedLink.createdAt && preExistingMergedKeys.has(otherKey)) return false;
-    const otherMergedAt = other.mergedAt || other.updatedAt || 0;
-    if (mergedStart && otherMergedAt && otherMergedAt < mergedStart) return false;
-    return otherPart.total === part.total && otherPart.index >= part.total;
+    if (other.mergedAt) {
+      return !mergedStart || other.mergedAt >= mergedStart;
+    }
+    if (preExistingMergedKeys.has(otherKey)) return false;
+    if (other.repo.toLowerCase() === mergedLink.repo.toLowerCase() && other.number < mergedLink.number) return false;
+    return true;
   });
 }
 
@@ -1791,7 +1795,10 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
         updatedAt: incoming.updatedAt,
         createdAt: incoming.createdAt || prev?.createdAt,
         firstSeenAt: prev?.firstSeenAt || incoming.createdAt || now,
-        mergedAt: incoming.state === 'merged' ? (prev?.state === 'merged' && prev?.mergedAt) || incoming.mergedAt || incoming.updatedAt || now : undefined,
+        mergedAt:
+          incoming.state === 'merged'
+            ? (prev?.state === 'merged' && prev?.mergedAt) || incoming.mergedAt || incoming.updatedAt || (prev?.state === 'open' ? now : undefined)
+            : undefined,
       });
       if (!nextLink || deepEqual(prev, nextLink)) continue;
 
@@ -1828,7 +1835,7 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
       } else if (becameMerged && nextLink.closing) {
         const hasOpenPr = t.prs.some(x => x.state === 'open');
         if (!hasOpenPr) {
-          const preMerged = !prev ? preExistingMergedByTask.get(t.id) : new Set();
+          const preMerged = preExistingMergedByTask.get(t.id) || new Set();
           if (isIncompleteStackMerge(t.prs, nextLink, preMerged)) {
             if (t.status === 'backlog' || t.status === 'todo') applyTaskPatch(data, t, { status: 'progress' }, { by, now });
           } else if (t.status !== 'done') {
