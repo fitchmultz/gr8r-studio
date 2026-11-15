@@ -1742,16 +1742,18 @@ function isIncompleteStackMerge(taskPrs, mergedLink, preExistingMergedKeys = new
       if (other.number > mergedLink.number) return true;
       return Boolean(other.mergedAt && mergedLink.createdAt && other.mergedAt >= mergedLink.createdAt);
     }
+    if (mergedLink.createdAt) return Boolean(other.mergedAt && other.mergedAt >= mergedLink.createdAt);
+    if (other.mergedSeq && mergedLink.linkedSeq) return other.mergedSeq > mergedLink.linkedSeq;
     const otherKey = `${other.repo.toLowerCase()}#${other.number}`;
-    if (mergedLink.createdAt && other.mergedAt) return other.mergedAt >= mergedLink.createdAt;
-    if (!mergedLink.createdAt && other.mergedSeq && mergedLink.linkedSeq) return other.mergedSeq > mergedLink.linkedSeq;
     return !preExistingMergedKeys.has(otherKey);
   });
 }
 
 function isNewerPartialThan(partial, link) {
   if (partial.repo.toLowerCase() === link.repo.toLowerCase()) return partial.number > link.number;
-  return Boolean(link.mergedAt && partial.createdAt && link.mergedAt < partial.createdAt);
+  if (partial.createdAt) return !link.mergedAt || link.mergedAt < partial.createdAt;
+  if (partial.linkedSeq && link.mergedSeq) return partial.linkedSeq > link.mergedSeq;
+  return true;
 }
 
 function unsatisfiedMergedPartials(taskPrs, preExistingMergedKeys) {

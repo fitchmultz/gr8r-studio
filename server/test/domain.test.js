@@ -966,4 +966,41 @@ test('syncGitHubPullRequests handles draft/ready/merge, stacked (1/n) PRs, Refs 
     { now: Date.parse('2026-11-15T03:20:00Z') },
   );
   assert.equal(tCrossOpenCli.status, 'done');
+
+  // Timestamp-less cross-repo backfill of a prior (2/2) after a timestamped follow-up (1/2) merged stays review until a real mergedAt >= createdAt arrives.
+  const tCrossBackfill = createTask(state.data, { project: pid.id, title: 'Cross-repo timestamp-less backfill guard', status: 'todo' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/front',
+      number: 70,
+      title: `Follow-up UI (1/2) (${tCrossBackfill.key})`,
+      state: 'open',
+      draft: false,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T01:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T01:00:00Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/front',
+      number: 70,
+      title: `Follow-up UI (1/2) (${tCrossBackfill.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T01:00:00Z',
+      mergedAt: '2026-11-15T02:00:00Z',
+      updatedAt: '2026-11-15T02:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T02:00:00Z') },
+  );
+  assert.equal(tCrossBackfill.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/back', number: 5, title: `Prior cycle (2/2) (${tCrossBackfill.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-15T03:00:00Z') },
+  );
+  assert.equal(tCrossBackfill.status, 'review');
 });
