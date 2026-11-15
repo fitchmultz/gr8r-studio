@@ -122,7 +122,7 @@ function parseJsonBody(raw) {
   }
 }
 
-export async function handleDomainApi({ req, res, url, getStore, commitState, readBody, send, hasBlob }) {
+export async function handleDomainApi({ req, res, url, getStore, commitState, readBody, send, hasBlob, hasAttachableBlob = hasBlob }) {
   let segments;
   try {
     segments = url.pathname
@@ -433,7 +433,7 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
             if (bid === 'invalid') {
               throw new DomainError('Invalid blobId: expected 64-char sha256 hex', 400);
             }
-            if (bid && hasBlob && !hasBlob(bid)) {
+            if (bid && hasAttachableBlob && !hasAttachableBlob(bid)) {
               throw new DomainError('Blob not found on server; upload via POST /api/blobs first', 409);
             }
           }

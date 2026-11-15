@@ -1121,6 +1121,20 @@ export function duplicateProject(data, projectOrRef, opts = {}) {
       { by, now },
     );
   }
+  const projOnlyFiles = (data.files || []).filter(f => f && f.project === p.id && !f.task);
+  if (projOnlyFiles.length) {
+    data.files = Array.isArray(data.files) ? data.files : [];
+    for (let i = projOnlyFiles.length - 1; i >= 0; i--) {
+      data.files.unshift({
+        ...structuredClone(projOnlyFiles[i]),
+        id: uid('f'),
+        project: copy.id,
+        task: null,
+        by,
+        at: now,
+      });
+    }
+  }
   return copy;
 }
 
@@ -1273,6 +1287,13 @@ export function duplicateTask(data, taskOrRef, opts = {}) {
   const src = requireTask(data, taskOrRef);
   const targetProject = requireProject(data, opts.project ?? src.project);
   const status = opts.status ?? src.status;
+  const clonedAttachments = (src.attachments || []).map(a => ({
+    ...structuredClone(a),
+    id: uid('f'),
+    by,
+    ...(agent ? { agent } : {}),
+    at: now,
+  }));
   const copy = createTask(
     data,
     {
@@ -1288,6 +1309,7 @@ export function duplicateTask(data, taskOrRef, opts = {}) {
         id: uid('s'),
         assignee: validMemberId(data, s.assignee),
       })),
+      attachments: clonedAttachments,
       prs: [],
       deps: opts.deps !== undefined ? opts.deps : activeProjectDeps(data, targetProject.id, src.deps, src.id),
       parent: opts.parent !== undefined ? opts.parent : targetProject.id === src.project ? activeProjectParent(data, targetProject.id, src.parent, null) : null,
@@ -1310,6 +1332,16 @@ export function duplicateTask(data, taskOrRef, opts = {}) {
   if (!isClosedStatus(status)) delete copy.prevStatus;
   delete copy.claimedBy;
   delete copy.claimedAt;
+  if (clonedAttachments.length) {
+    data.files = Array.isArray(data.files) ? data.files : [];
+    for (let i = clonedAttachments.length - 1; i >= 0; i--) {
+      data.files.unshift({
+        ...structuredClone(clonedAttachments[i]),
+        project: targetProject.id,
+        task: copy.id,
+      });
+    }
+  }
   return copy;
 }
 
@@ -2554,6 +2586,12 @@ export function applyWorkspacePatch(targetState, patch) {
   }
 
   // 5. Generic keyed lists
+  const preExistingDocIds = new Set((d.docs || []).map(doc => doc?.id).filter(Boolean));
+  const updatedSlugDocIds = new Set(
+    Object.entries(patch.docs?.updated || {})
+      .filter(([, u]) => u?.fields?.set && Object.hasOwn(u.fields.set, 'slug'))
+      .map(([id]) => id),
+  );
   for (const key of KEYED_DATA_LISTS) {
     if (patch[key] === undefined) continue;
     if (key === 'labels') ensureLabels(d);
@@ -2621,12 +2659,31 @@ export function applyWorkspacePatch(targetState, patch) {
   }
   if (Array.isArray(d.docs)) {
     const keptDocs = [];
-    const seenSlugsByProject = new Map();
     for (const doc of d.docs) {
       if (!doc || !findProject(d, doc.project)) {
         rekeyed = true;
         continue;
       }
+      if (doc.by && !findMember(d, doc.by)) {
+        doc.by = d.me;
+        rekeyed = true;
+      }
+      if (doc.updatedBy && !findMember(d, doc.updatedBy)) {
+        doc.updatedBy = d.me;
+        rekeyed = true;
+      }
+      keptDocs.push(doc);
+    }
+    /* Assign unique slugs to pre-existing untouched docs first so a racing
+       concurrent create (even when unshifted to index 0 via docs.order) never
+       steals an existing document's stable slug. */
+    const seenSlugsByProject = new Map();
+    const slugPriorityOrder = [
+      ...keptDocs.filter(doc => preExistingDocIds.has(doc.id) && !updatedSlugDocIds.has(doc.id)),
+      ...keptDocs.filter(doc => preExistingDocIds.has(doc.id) && updatedSlugDocIds.has(doc.id)),
+      ...keptDocs.filter(doc => !preExistingDocIds.has(doc.id)),
+    ];
+    for (const doc of slugPriorityOrder) {
       let projSlugs = seenSlugsByProject.get(doc.project);
       if (!projSlugs) {
         projSlugs = new Set();
@@ -2644,15 +2701,6 @@ export function applyWorkspacePatch(targetState, patch) {
         rekeyed = true;
       }
       projSlugs.add(doc.slug);
-      if (doc.by && !findMember(d, doc.by)) {
-        doc.by = d.me;
-        rekeyed = true;
-      }
-      if (doc.updatedBy && !findMember(d, doc.updatedBy)) {
-        doc.updatedBy = d.me;
-        rekeyed = true;
-      }
-      keptDocs.push(doc);
     }
     if (keptDocs.length !== d.docs.length) d.docs = keptDocs;
   }

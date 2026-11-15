@@ -1550,6 +1550,7 @@ test('persisted attachment records and Markdown Project Docs round-trip, search,
   deleteWorkspaceFile(state.data, fileRec.id, { now: FIXED_NOW + 20 });
   assert.equal(t.attachments.length, 0);
 
+  const notesDoc = createDoc(state.data, { project: p.id, title: 'Notes', bodyMarkdown: 'Existing base doc' }, { now: FIXED_NOW + 25 });
   const snapBeforeDoc = structuredClone(state);
   const doc = createDoc(
     state.data,
@@ -1569,14 +1570,18 @@ test('persisted attachment records and Markdown Project Docs round-trip, search,
   assert.match(formatDocForApi(state.data, doc).bodyMarkdown, /Rollback/);
 
   const peer = structuredClone(snapBeforeDoc);
-  createDoc(peer.data, { project: p.id, title: 'Runbook & Architecture', bodyMarkdown: 'Peer concurrent doc' }, { now: FIXED_NOW + 35 });
+  const peerExistingDoc = createDoc(
+    peer.data,
+    { project: p.id, title: 'Runbook & Architecture', bodyMarkdown: 'Peer established doc' },
+    { now: FIXED_NOW + 35 },
+  );
   applyWorkspacePatch(peer, diffWorkspacePatch(snapBeforeDoc, state));
-  const mergedSlugs = docsOfProject(peer.data, p.id)
-    .map(d => d.slug)
-    .sort();
-  assert.deepEqual(mergedSlugs, ['runbook-architecture', 'runbook-architecture-2']);
+  const peerDocsAfter = docsOfProject(peer.data, p.id);
+  assert.equal(peerDocsAfter.find(d => d.id === peerExistingDoc.id)?.slug, 'runbook-architecture');
+  assert.equal(peerDocsAfter.find(d => d.id === doc.id)?.slug, 'runbook-architecture-2');
 
   deleteDoc(state.data, doc.id, { now: FIXED_NOW + 50 });
+  deleteDoc(state.data, notesDoc.id, { now: FIXED_NOW + 51 });
   assert.equal(docsOfProject(state.data, p.id).length, 0);
 
   // Renaming a doc title and creating a new doc with the old title keeps the original slug resolvable.
@@ -1589,4 +1594,32 @@ test('persisted attachment records and Markdown Project Docs round-trip, search,
   const projFile = attachFileRecord(state.data, { project: 'DCB', target: 'DCB', name: 'spec.pdf', blobId: sha }, { now: FIXED_NOW + 65 });
   assert.equal(projFile.project, p.id);
   assert.equal(projFile.task, null);
+
+  // Duplicating a task or project mints distinct attachment IDs and data.files rows so deleting from the copy keeps the original intact.
+  const origAttach = attachFileRecord(state.data, { task: t.id, name: 'qa-shot.png', blobId: sha, sizeBytes: 42 }, { now: FIXED_NOW + 70 });
+  const tCopy = duplicateTask(state.data, t.id, { now: FIXED_NOW + 71 });
+  assert.equal(tCopy.attachments.length, 1);
+  assert.notEqual(tCopy.attachments[0].id, origAttach.id);
+  assert.equal(
+    state.data.files.some(f => f.id === tCopy.attachments[0].id && f.task === tCopy.id),
+    true,
+  );
+  deleteWorkspaceFile(state.data, tCopy.attachments[0].id, { now: FIXED_NOW + 72 });
+  assert.equal(tCopy.attachments.length, 0);
+  assert.equal(t.attachments.length, 1);
+  assert.equal(
+    state.data.files.some(f => f.id === origAttach.id && f.task === t.id),
+    true,
+  );
+
+  const pCopy = duplicateProject(state.data, p.id, { now: FIXED_NOW + 73 });
+  const pCopyFiles = state.data.files.filter(f => f.project === pCopy.id);
+  assert.equal(
+    pCopyFiles.some(f => !f.task && f.name === 'spec.pdf' && f.id !== projFile.id),
+    true,
+  );
+  assert.equal(
+    pCopyFiles.some(f => f.task && f.name === 'qa-shot.png' && f.id !== origAttach.id),
+    true,
+  );
 });

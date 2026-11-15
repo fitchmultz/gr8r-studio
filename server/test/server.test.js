@@ -943,4 +943,54 @@ test('/api/blobs enforces auth, cookie-backed <img> reads, CSP sandbox, and atta
     false,
   );
   assert.equal((await fetch(base4 + `/api/blobs/${preRestartUp.blobId}`, { headers: auth })).status, 200);
+
+  // Deleting a file/task hides GET /api/blobs/:sha immediately (404), restores cleanly on Undo within blobDeleteGraceMs, and unlinks from disk after grace expiry.
+  const undoSrv = await withServer(t, { trustBootstrap: 'none', blobLeaseMs: 200, blobDeleteGraceMs: 120 });
+  const undoProj = await (
+    await fetch(undoSrv.base + '/api/projects', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Undo Project', key: 'UND' }),
+    })
+  ).json();
+  const undoUp = await (
+    await fetch(undoSrv.base + '/api/blobs', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'image/png', 'x-file-name': 'undo.png' },
+      body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x77, 0x88]),
+    })
+  ).json();
+  const undoFile = await (
+    await fetch(undoSrv.base + '/api/files', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ project: 'UND', name: 'undo.png', blobId: undoUp.blobId, sizeBytes: 6, mime: 'image/png' }),
+    })
+  ).json();
+  const beforeDelSnap = await (await fetch(undoSrv.base + '/api/state', { headers: auth })).json();
+  const delPatch = await fetch(undoSrv.base + '/api/workspace', {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ baseRev: beforeDelSnap.rev, patch: { files: { deleted: [undoFile.file.id] } } }),
+  });
+  assert.equal(delPatch.status, 200);
+  assert.equal((await fetch(undoSrv.base + `/api/blobs/${undoUp.blobId}`, { headers: auth })).status, 404);
+
+  const restorePatch = await fetch(undoSrv.base + '/api/workspace', {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      baseRev: beforeDelSnap.rev + 1,
+      patch: { files: { created: [beforeDelSnap.state.data.files[0]] } },
+    }),
+  });
+  assert.equal(restorePatch.status, 200);
+  const restoreJson = await restorePatch.json();
+  assert.equal(restoreJson.droppedFiles, undefined);
+  assert.equal((await fetch(undoSrv.base + `/api/blobs/${undoUp.blobId}`, { headers: auth })).status, 200);
+
+  await fetch(undoSrv.base + `/api/files/${undoFile.file.id}`, { method: 'DELETE', headers: auth });
+  await new Promise(r => setTimeout(r, 175));
+  assert.equal(fs.existsSync(path.join(path.dirname(undoSrv.dataFile), 'blobs', undoUp.blobId)), false);
+  assert.ok(undoProj.project.id);
 });

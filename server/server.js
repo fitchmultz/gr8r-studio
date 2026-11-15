@@ -21,6 +21,7 @@ const MAX_BODY = 10 * 1024 * 1024;
 /* Binary attachments (screenshots, recordings, PDFs) are stored out-of-line on disk up to 50 MB. */
 const MAX_BLOB_BYTES = 50 * 1024 * 1024;
 const PENDING_BLOB_TTL_MS = 5 * 60 * 1000;
+const DELETE_GRACE_TTL_MS = 30 * 1000;
 const SAFE_INLINE_BLOB_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf', 'text/plain']);
 const EXT_BLOB_MIMES = {
   '.png': 'image/png',
@@ -173,6 +174,7 @@ export function startServer({
   trustBootstrap = process.env.GR8R_TRUST_BOOTSTRAP || 'tailnet',
   webhookSecret = process.env.GR8R_GITHUB_WEBHOOK_SECRET || '',
   blobLeaseMs = PENDING_BLOB_TTL_MS,
+  blobDeleteGraceMs = Math.min(DELETE_GRACE_TTL_MS, blobLeaseMs),
 }) {
   if (!token) throw new Error('startServer: token is required');
   const trustMode = normalizeTrustBootstrap(trustBootstrap);
@@ -203,13 +205,28 @@ export function startServer({
   const subscribers = new Set();
   const sweepTimers = new Set();
 
-  const hasBlob = blobId => /^[0-9a-f]{64}$/.test(String(blobId || '')) && fs.existsSync(path.join(BLOBS_DIR, blobId));
   const readBlobMeta = blobId => {
     try {
       return JSON.parse(fs.readFileSync(path.join(BLOBS_DIR, `${blobId}.json`), 'utf8'));
     } catch {
       return null;
     }
+  };
+  const hasBlob = blobId => {
+    if (!/^[0-9a-f]{64}$/.test(String(blobId || '')) || !fs.existsSync(path.join(BLOBS_DIR, blobId))) return false;
+    const meta = readBlobMeta(blobId);
+    if (!meta?.deletedUntil) return true;
+    const now = Date.now();
+    const hasUploadLease = Array.isArray(meta.leases) && meta.leases.some(exp => exp > now);
+    return hasUploadLease || now < meta.deletedUntil;
+  };
+  const hasAttachableBlob = blobId => {
+    if (!hasBlob(blobId)) return false;
+    const meta = readBlobMeta(blobId);
+    if (!meta?.deletedUntil) return true;
+    const now = Date.now();
+    const hasUploadLease = Array.isArray(meta.leases) && meta.leases.some(exp => exp > now);
+    return hasUploadLease || blobRefCounts(store.state?.data).has(blobId);
   };
   const writeBlobMeta = (blobId, meta) => {
     const dest = path.join(BLOBS_DIR, blobId);
@@ -244,6 +261,7 @@ export function startServer({
       if (!/^[0-9a-f]{64}$/.test(entry) || refCounts.has(entry)) continue;
       const meta = readBlobMeta(entry);
       let liveLeases = Array.isArray(meta?.leases) ? meta.leases.filter(exp => exp > now) : [];
+      const deletedUntil = typeof meta?.deletedUntil === 'number' && meta.deletedUntil > now ? meta.deletedUntil : 0;
       let isPending = meta?.pending === true;
       if (!meta) {
         try {
@@ -254,8 +272,9 @@ export function startServer({
           continue;
         }
       }
-      if (liveLeases.length > 0) {
-        if (armTimers) scheduleSweep(Math.max(...liveLeases) - now);
+      const maxHold = Math.max(0, ...liveLeases, deletedUntil);
+      if (maxHold > now && !(sweepAllUnreferenced && liveLeases.length === 0)) {
+        if (armTimers) scheduleSweep(maxHold - now);
         continue;
       }
       if (sweepAllUnreferenced || isPending) {
@@ -288,8 +307,8 @@ export function startServer({
       if (meta) {
         const liveLeases = Array.isArray(meta.leases) ? meta.leases.filter(exp => exp > now) : [];
         if (nextCount > prevCount) liveLeases.splice(0, nextCount - prevCount);
-        if (meta.pending !== false || !Array.isArray(meta.leases) || meta.leases.length !== liveLeases.length) {
-          writeBlobMeta(bid, { ...meta, pending: false, leases: liveLeases });
+        if (meta.pending !== false || meta.deletedUntil || !Array.isArray(meta.leases) || meta.leases.length !== liveLeases.length) {
+          writeBlobMeta(bid, { ...meta, pending: false, deletedUntil: 0, leases: liveLeases });
         }
       }
     }
@@ -298,8 +317,11 @@ export function startServer({
         const meta = readBlobMeta(bid);
         const liveLeases = Array.isArray(meta?.leases) ? meta.leases.filter(exp => exp > now) : [];
         if (liveLeases.length > 0 && meta) {
-          writeBlobMeta(bid, { ...meta, pending: true, leases: liveLeases });
+          writeBlobMeta(bid, { ...meta, pending: true, deletedUntil: 0, leases: liveLeases });
           scheduleSweep(Math.max(...liveLeases) - now);
+        } else if (blobDeleteGraceMs > 0) {
+          writeBlobMeta(bid, { ...(meta || {}), pending: true, deletedUntil: now + blobDeleteGraceMs, leases: [] });
+          scheduleSweep(blobDeleteGraceMs);
         } else {
           unlinkBlob(bid);
         }
@@ -408,6 +430,13 @@ export function startServer({
         meta = JSON.parse(fs.readFileSync(blobPath + '.json', 'utf8'));
       } catch {
         /* optional metadata */
+      }
+      if (meta.deletedUntil) {
+        const now = Date.now();
+        const hasUploadLease = Array.isArray(meta.leases) && meta.leases.some(exp => exp > now);
+        if (!hasUploadLease && !blobRefCounts(store.state?.data).has(blobId)) {
+          return send(res, 404, { error: 'blob not found' });
+        }
       }
       const requestedMime = String(url.searchParams.get('mime') || '').trim();
       const validRequestedMime = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+(?:;\s*charset=[a-z0-9._-]+)?$/i.test(requestedMime) ? requestedMime : '';
@@ -524,6 +553,7 @@ export function startServer({
         mime: prevMeta?.mime || mime,
         sizeBytes: buf.length,
         pending,
+        deletedUntil: 0,
         leases: liveLeases,
       });
       scheduleSweep(blobLeaseMs);
@@ -582,7 +612,7 @@ export function startServer({
         ...(droppedFiles.length ? { droppedFiles } : {}),
       });
     }
-    return handleDomainApi({ req, res, url, getStore: () => store, commitState, readBody, send, hasBlob });
+    return handleDomainApi({ req, res, url, getStore: () => store, commitState, readBody, send, hasBlob, hasAttachableBlob });
   }
 
   function serveStatic(res, url) {

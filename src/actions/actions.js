@@ -866,7 +866,10 @@ A.rmAttach = el => {
   }
   mutate(() => {
     t.attachments = t.attachments.filter(a => a.id !== el.dataset.aid);
-    D().files = (D().files || []).filter(x => x.id !== el.dataset.aid);
+    const stillUsed = D().tasks.some(ot => ot.id !== t.id && (ot.attachments || []).some(a => a.id === el.dataset.aid));
+    if (!stillUsed) {
+      D().files = (D().files || []).filter(x => x.id !== el.dataset.aid);
+    }
     logAct('removed a file from', t);
   });
   toast(`Removed ${f.name}`);
