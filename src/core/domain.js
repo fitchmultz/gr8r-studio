@@ -395,6 +395,9 @@ export function deleteProject(data, projectOrRef) {
   data.projects = data.projects.filter(x => x.id !== p.id);
   data.projOrder = (data.projOrder || []).filter(id => id !== p.id);
   data.files = (data.files || []).filter(f => f.project !== p.id);
+  if (Array.isArray(data.savedViews)) {
+    data.savedViews = data.savedViews.filter(v => v.project !== p.id);
+  }
   return p;
 }
 
@@ -1146,7 +1149,7 @@ function reorderByIds(list, orderIds) {
   return out;
 }
 
-function applyGenericKeyedList(targetArr, diff, { filterCreated } = {}) {
+function applyGenericKeyedList(targetArr, diff, { filterCreated, onAdjust } = {}) {
   let list = Array.isArray(targetArr) ? targetArr : [];
   if (!diff) return list;
   if (!isPlainObject(diff)) throw new DomainError('Invalid list patch', 400);
@@ -1160,13 +1163,17 @@ function applyGenericKeyedList(targetArr, diff, { filterCreated } = {}) {
       if (UNSAFE_KEYS.has(id)) continue;
       const cur = byId.get(id);
       if (cur) applyPlainFields(cur, itemDiff);
+      else onAdjust?.();
     }
   }
   if (Array.isArray(diff.created)) {
     const existing = new Set(list.map(x => x.id));
     for (const raw of diff.created) {
       if (!isPlainObject(raw) || typeof raw.id !== 'string' || !raw.id || existing.has(raw.id)) continue;
-      if (filterCreated && !filterCreated(raw)) continue;
+      if (filterCreated && !filterCreated(raw)) {
+        onAdjust?.();
+        continue;
+      }
       list.push(structuredClone(raw));
       existing.add(raw.id);
     }
@@ -1352,10 +1359,19 @@ export function applyWorkspacePatch(targetState, patch) {
     if (!isPlainObject(patch.members)) throw new DomainError('Invalid members patch', 400);
     if (Array.isArray(patch.members.deleted)) {
       for (const mid of patch.members.deleted) {
-        if (mid !== d.me && findMember(d, mid)) removeMember(d, mid);
+        if (mid === d.me) rekeyed = true;
+        else if (findMember(d, mid)) removeMember(d, mid);
       }
     }
-    d.members = applyGenericKeyedList(d.members, { ...patch.members, deleted: [] });
+    d.members = applyGenericKeyedList(
+      d.members,
+      { ...patch.members, deleted: [] },
+      {
+        onAdjust: () => {
+          rekeyed = true;
+        },
+      },
+    );
   }
 
   // 3. Tasks & nested subtasks
@@ -1397,7 +1413,11 @@ export function applyWorkspacePatch(targetState, patch) {
           }
         }
         if (tDiff.subtasks) {
-          t.subtasks = applyGenericKeyedList(t.subtasks || [], tDiff.subtasks);
+          t.subtasks = applyGenericKeyedList(t.subtasks || [], tDiff.subtasks, {
+            onAdjust: () => {
+              rekeyed = true;
+            },
+          });
         }
       }
     }
@@ -1470,7 +1490,10 @@ export function applyWorkspacePatch(targetState, patch) {
       for (const [cid, cDiff] of Object.entries(patch.comments.updated)) {
         if (UNSAFE_KEYS.has(cid) || !isPlainObject(cDiff)) continue;
         const c = byId.get(cid);
-        if (!c) continue;
+        if (!c) {
+          rekeyed = true;
+          continue;
+        }
         if (cDiff.fields) applyPlainFields(c, cDiff.fields);
         if (cDiff.re) c.re = applyObjectMap(c.re || {}, cDiff.re);
       }
@@ -1479,7 +1502,10 @@ export function applyWorkspacePatch(targetState, patch) {
       const existing = new Set((d.comments || []).map(c => c.id));
       for (const raw of patch.comments.created) {
         if (!isPlainObject(raw) || typeof raw.id !== 'string' || !raw.id || existing.has(raw.id)) continue;
-        if (!findTask(d, raw.task)) continue;
+        if (!findTask(d, raw.task)) {
+          rekeyed = true;
+          continue;
+        }
         d.comments.push(structuredClone(raw));
         existing.add(raw.id);
       }
@@ -1492,6 +1518,9 @@ export function applyWorkspacePatch(targetState, patch) {
     if (patch[key] === undefined) continue;
     d[key] = applyGenericKeyedList(d[key], patch[key], {
       filterCreated: raw => (!raw.project || !!findProject(d, raw.project)) && (!raw.task || !!findTask(d, raw.task)),
+      onAdjust: () => {
+        rekeyed = true;
+      },
     });
   }
 
@@ -1529,7 +1558,10 @@ export function applyWorkspacePatch(targetState, patch) {
   // 8. Maps & scalars
   if (patch.ws) d.ws = applyObjectMap(d.ws, patch.ws);
   if (patch.notifPrefs) d.notifPrefs = applyObjectMap(d.notifPrefs, patch.notifPrefs);
-  if (patch.me !== undefined && findMember(d, patch.me)) d.me = patch.me;
+  if (patch.me !== undefined) {
+    if (findMember(d, patch.me)) d.me = patch.me;
+    else rekeyed = true;
+  }
   if (Array.isArray(patch.recentSearches)) d.recentSearches = structuredClone(patch.recentSearches);
   if (isPlainObject(patch.extraData)) {
     for (const [k, v] of Object.entries(patch.extraData)) {

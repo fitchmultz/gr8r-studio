@@ -426,4 +426,31 @@ test('diffWorkspacePatch and applyWorkspacePatch merge concurrent field, subtask
     true,
   );
   assert.equal(rescueServer.data.files.find(f => f.id === 'f_rescue')?.project, pDest.id);
+
+  // Creating a savedView on project P, deleting P in the same patch, then undoing and renaming the savedView
+  // keeps client and server in sync throughout without dropping the savedView.
+  const svBase = createDefaultState(FIXED_NOW);
+  const pView = createProject(svBase.data, { name: 'View Host', key: 'VWH' }, { now: FIXED_NOW });
+  const svServer = structuredClone(svBase);
+  const svBrowser = structuredClone(svBase);
+  svBrowser.data.savedViews.push({ id: 'sv_1', name: 'Triage', project: pView.id, layout: 'board', filters: {} });
+  const undoSnapshot = structuredClone(svBrowser);
+  deleteProject(svBrowser.data, pView.id);
+  assert.equal(svBrowser.data.savedViews.length, 0);
+
+  applyWorkspacePatch(svServer, diffWorkspacePatch(svBase, svBrowser));
+  assert.equal(
+    svServer.data.projects.some(p => p.id === pView.id),
+    false,
+  );
+  assert.equal(svServer.data.savedViews.length, 0);
+
+  // Undo restores both project VWH and savedView sv_1, then renaming sv_1 propagates cleanly to server.
+  applyWorkspacePatch(svServer, diffWorkspacePatch(svBrowser, undoSnapshot));
+  assert.equal(svServer.data.savedViews.find(v => v.id === 'sv_1')?.name, 'Triage');
+  const renamedBrowser = structuredClone(undoSnapshot);
+  renamedBrowser.data.savedViews.find(v => v.id === 'sv_1').name = 'Bug Triage';
+  const renameOut = applyWorkspacePatch(svServer, diffWorkspacePatch(undoSnapshot, renamedBrowser));
+  assert.equal(renameOut.rekeyed, false);
+  assert.equal(svServer.data.savedViews.find(v => v.id === 'sv_1')?.name, 'Bug Triage');
 });
