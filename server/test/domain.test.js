@@ -1597,6 +1597,19 @@ test('persisted attachment records and Markdown Project Docs round-trip, search,
   assert.equal(slugUpdBase.data.docs.find(x => x.id === d1.id)?.slug, 'alpha');
   assert.equal(slugUpdBase.data.docs.find(x => x.id === d2.id)?.slug, 'alpha-2');
 
+  // Moving a doc out of a concurrently deleted project into p does not steal p's untouched doc slug.
+  const pRescueSrc = createProject(state.data, { name: 'Rescue Src', key: 'RSC' }, { now: FIXED_NOW + 63 });
+  const dRescueMoved = createDoc(state.data, { project: pRescueSrc.id, title: 'Alpha' }, { now: FIXED_NOW + 64 });
+  const rescueBase = structuredClone(state);
+  const rescuePeer = structuredClone(state);
+  rescuePeer.data.docs.find(x => x.id === dRescueMoved.id).project = p.id;
+  deleteProject(rescuePeer.data, pRescueSrc.id, { now: FIXED_NOW + 64 });
+  applyWorkspacePatch(rescueBase, diffWorkspacePatch(state, rescuePeer));
+  assert.equal(rescueBase.data.docs.find(x => x.id === d1.id)?.slug, 'alpha');
+  assert.equal(rescueBase.data.docs.find(x => x.id === dRescueMoved.id)?.slug, 'alpha-3');
+  deleteDoc(state.data, dRescueMoved.id, { now: FIXED_NOW + 64 });
+  deleteProject(state.data, pRescueSrc.id, { now: FIXED_NOW + 64 });
+
   // attachFileRecord supports { project, target: <project-ref> } without misclassifying project ref as task.
   const projFile = attachFileRecord(state.data, { project: 'DCB', target: 'DCB', name: 'spec.pdf', blobId: sha }, { now: FIXED_NOW + 65 });
   assert.equal(projFile.project, p.id);

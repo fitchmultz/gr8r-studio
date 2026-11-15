@@ -2326,6 +2326,7 @@ export function applyWorkspacePatch(targetState, patch) {
   }
   const d = targetState.data;
   let rekeyed = false;
+  const prevDocLoc = new Map((Array.isArray(d.docs) ? d.docs : []).filter(doc => doc?.id).map(doc => [doc.id, `${doc.project}:${doc.slug}`]));
 
   const deletedProjIds = new Set(Array.isArray(patch.projects?.deleted) ? patch.projects.deleted : []);
   const deletedTaskIds = new Set(Array.isArray(patch.tasks?.deleted) ? patch.tasks.deleted : []);
@@ -2586,7 +2587,6 @@ export function applyWorkspacePatch(targetState, patch) {
   }
 
   // 5. Generic keyed lists
-  const prevDocLoc = new Map((d.docs || []).filter(doc => doc?.id).map(doc => [doc.id, `${doc.project}:${doc.slug}`]));
   for (const key of KEYED_DATA_LISTS) {
     if (patch[key] === undefined) continue;
     if (key === 'labels') ensureLabels(d);
