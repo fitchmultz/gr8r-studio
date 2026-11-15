@@ -13,6 +13,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DomainError, formatTaskForApi, syncGitHubPullRequests } from '../src/core/domain.js';
 import { handleDomainApi } from './api.js';
+import { blobRefCounts, sanitizeStateBlobs } from './blobs.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 /* The workspace blob is ~100 KB; 10 MB bounds request memory while leaving room to grow. */
@@ -163,29 +164,6 @@ function verifyGitHubSignature(rawBuf, sigHeader, secret) {
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
-function blobRefCounts(data) {
-  const counts = new Map();
-  if (!data || typeof data !== 'object') return counts;
-  const seenFileIds = new Set();
-  const files = Array.isArray(data.files) ? data.files : [];
-  for (const f of files) {
-    if (f && typeof f.blobId === 'string' && /^[0-9a-f]{64}$/.test(f.blobId)) {
-      if (f.id) seenFileIds.add(f.id);
-      counts.set(f.blobId, (counts.get(f.blobId) || 0) + 1);
-    }
-  }
-  const tasks = Array.isArray(data.tasks) ? data.tasks : [];
-  for (const t of tasks) {
-    const atts = Array.isArray(t?.attachments) ? t.attachments : [];
-    for (const a of atts) {
-      if (a && (!a.id || !seenFileIds.has(a.id)) && typeof a.blobId === 'string' && /^[0-9a-f]{64}$/.test(a.blobId)) {
-        counts.set(a.blobId, (counts.get(a.blobId) || 0) + 1);
-      }
-    }
-  }
-  return counts;
-}
-
 export function startServer({
   port = 0,
   host = '127.0.0.1',
@@ -225,6 +203,7 @@ export function startServer({
   const subscribers = new Set();
   const pendingBlobUploads = new Map();
   const sweepTimers = new Set();
+  const preexistingUninitializedBlobs = new Set();
 
   const hasBlob = blobId => /^[0-9a-f]{64}$/.test(String(blobId || '')) && fs.existsSync(path.join(BLOBS_DIR, blobId));
   const consumeBlobLeases = (blobId, count, now = Date.now()) => {
@@ -243,6 +222,7 @@ export function startServer({
     const refCounts = blobRefCounts(store.state?.data);
     for (const entry of fs.readdirSync(BLOBS_DIR)) {
       if (!/^[0-9a-f]{64}$/.test(entry)) continue;
+      if (!store.state && preexistingUninitializedBlobs.has(entry)) continue;
       if (!refCounts.has(entry) && !pendingBlobUploads.has(entry)) {
         try {
           fs.rmSync(path.join(BLOBS_DIR, entry), { force: true });
@@ -271,21 +251,28 @@ export function startServer({
     pendingBlobUploads.set(blobId, list);
     scheduleSweep(blobLeaseMs);
   };
-  /* Recover unexpired upload leases from disk mtimes so restarts do not drop in-flight uploads. */
+  /* Recover unexpired upload leases from disk mtimes so restarts do not drop in-flight uploads,
+     and preserve preexisting blobs while state.json is uninitialized so browser /api/sync recovery keeps them. */
   if (fs.existsSync(BLOBS_DIR)) {
-    const initNow = Date.now();
-    const initRefs = blobRefCounts(store.state?.data);
-    for (const entry of fs.readdirSync(BLOBS_DIR)) {
-      if (!/^[0-9a-f]{64}$/.test(entry) || initRefs.has(entry)) continue;
-      try {
-        const st = fs.statSync(path.join(BLOBS_DIR, entry));
-        const exp = st.mtimeMs + blobLeaseMs;
-        if (exp > initNow) {
-          pendingBlobUploads.set(entry, [exp]);
-          scheduleSweep(exp - initNow);
+    if (!store.state) {
+      for (const entry of fs.readdirSync(BLOBS_DIR)) {
+        if (/^[0-9a-f]{64}$/.test(entry)) preexistingUninitializedBlobs.add(entry);
+      }
+    } else {
+      const initNow = Date.now();
+      const initRefs = blobRefCounts(store.state?.data);
+      for (const entry of fs.readdirSync(BLOBS_DIR)) {
+        if (!/^[0-9a-f]{64}$/.test(entry) || initRefs.has(entry)) continue;
+        try {
+          const st = fs.statSync(path.join(BLOBS_DIR, entry));
+          const exp = st.mtimeMs + blobLeaseMs;
+          if (exp > initNow) {
+            pendingBlobUploads.set(entry, [exp]);
+            scheduleSweep(exp - initNow);
+          }
+        } catch {
+          /* ignore unreadable or disappearing entry */
         }
-      } catch {
-        /* ignore unreadable or disappearing entry */
       }
     }
   }
@@ -306,6 +293,7 @@ export function startServer({
     const next = { rev: store.rev + 1, state };
     writeStore(DATA, next);
     store = next;
+    preexistingUninitializedBlobs.clear();
     const now = Date.now();
     const nextCounts = blobRefCounts(state?.data);
     for (const [bid, nextCount] of nextCounts) {
@@ -578,8 +566,15 @@ export function startServer({
       const { baseRev, state } = body || {};
       if (typeof baseRev !== 'number' || !state || !state.data || !Array.isArray(state.data.tasks)) return send(res, 400, { error: 'invalid state' });
       if (baseRev !== store.rev) return send(res, 409, store);
-      commitState(state);
-      return send(res, 200, { rev: store.rev });
+      const prevCounts = blobRefCounts(store.state?.data);
+      const nextState = structuredClone(state);
+      const { changed: blobSanitized, droppedFiles } = sanitizeStateBlobs(nextState.data, prevCounts, hasBlob);
+      commitState(nextState);
+      return send(res, 200, {
+        rev: store.rev,
+        ...(blobSanitized ? { merged: true, state: store.state } : {}),
+        ...(droppedFiles.length ? { droppedFiles } : {}),
+      });
     }
     return handleDomainApi({ req, res, url, getStore: () => store, commitState, readBody, send, hasBlob });
   }

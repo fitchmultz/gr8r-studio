@@ -1,6 +1,7 @@
 /* Domain REST API for Gr8r Studio: atomic project, task, subtask, comment,
    activity, and search operations backed by src/core/domain.js. */
 import { PRIOS, PSTAT, STATUSES } from '../src/core/constants.js';
+import { blobRefCounts, normalizeBlobRef, sanitizeStateBlobs } from './blobs.js';
 import {
   DomainError,
   addComment,
@@ -121,23 +122,6 @@ function parseJsonBody(raw) {
   }
 }
 
-function referencedBlobIds(data) {
-  const out = new Set();
-  if (!data || typeof data !== 'object') return out;
-  const files = Array.isArray(data.files) ? data.files : [];
-  for (const f of files) {
-    if (f && typeof f.blobId === 'string' && /^[0-9a-f]{64}$/.test(f.blobId)) out.add(f.blobId);
-  }
-  const tasks = Array.isArray(data.tasks) ? data.tasks : [];
-  for (const t of tasks) {
-    const atts = Array.isArray(t?.attachments) ? t.attachments : [];
-    for (const a of atts) {
-      if (a && typeof a.blobId === 'string' && /^[0-9a-f]{64}$/.test(a.blobId)) out.add(a.blobId);
-    }
-  }
-  return out;
-}
-
 export async function handleDomainApi({ req, res, url, getStore, commitState, readBody, send, hasBlob }) {
   let segments;
   try {
@@ -251,22 +235,17 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
         return send(res, 200, { rev: cur.rev, merged, ...(merged ? { state: cur.state } : {}) });
       }
       const draft = structuredClone(cur.state);
+      const prevCounts = blobRefCounts(cur.state?.data);
       const { rekeyed } = applyWorkspacePatch(draft, body.patch);
-      if (hasBlob) {
-        const prevRefs = referencedBlobIds(cur.state?.data);
-        for (const bid of referencedBlobIds(draft.data)) {
-          if (!prevRefs.has(bid) && !hasBlob(bid)) {
-            return send(res, 409, {
-              error: 'Blob not found on server; upload via POST /api/blobs first',
-              rev: cur.rev,
-              state: cur.state,
-            });
-          }
-        }
-      }
-      const merged = baseRev !== cur.rev || rekeyed;
+      const { changed: blobSanitized, droppedFiles } = sanitizeStateBlobs(draft.data, prevCounts, hasBlob);
+      const merged = baseRev !== cur.rev || rekeyed || blobSanitized;
       const committed = commitState(draft);
-      return send(res, 200, { rev: committed.rev, merged, ...(merged ? { state: committed.state } : {}) });
+      return send(res, 200, {
+        rev: committed.rev,
+        merged,
+        ...(merged ? { state: committed.state } : {}),
+        ...(droppedFiles.length ? { droppedFiles } : {}),
+      });
     }
 
     // POST /api/github/pull-requests — idempotently link PRs to KEY-123 tasks & transition status
@@ -450,8 +429,11 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
       if (segments.length === 1 && method === 'POST') {
         const result = await mutate((data, body) => {
           if (body.blobId !== undefined && body.blobId !== null && body.blobId !== '') {
-            const bid = String(body.blobId).trim().toLowerCase();
-            if (/^[0-9a-f]{64}$/.test(bid) && hasBlob && !hasBlob(bid)) {
+            const bid = normalizeBlobRef(body.blobId);
+            if (bid === 'invalid') {
+              throw new DomainError('Invalid blobId: expected 64-char sha256 hex', 400);
+            }
+            if (bid && hasBlob && !hasBlob(bid)) {
               throw new DomainError('Blob not found on server; upload via POST /api/blobs first', 409);
             }
           }

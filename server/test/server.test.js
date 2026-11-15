@@ -819,13 +819,20 @@ test('/api/blobs enforces auth, cookie-backed <img> reads, CSP sandbox, and atta
   const dataFile = path.join(restartDir, 'state.json');
   const distDir = path.join(restartDir, 'dist');
   fs.mkdirSync(distDir);
-  const srv1 = await startServer({ port: 0, token: 'secret', dataFile, distDir, trustBootstrap: 'none', blobLeaseMs: 5000 });
+  const srv1 = await startServer({ port: 0, token: 'secret', dataFile, distDir, trustBootstrap: 'none', blobLeaseMs: 60 });
   const base1 = `http://127.0.0.1:${srv1.port}`;
   const pRes = await (
     await fetch(base1 + '/api/projects', {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
       body: JSON.stringify({ name: 'Restart Safe', key: 'RST' }),
+    })
+  ).json();
+  const tRes = await (
+    await fetch(base1 + '/api/tasks', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ project: 'RST', title: 'Initial title' }),
     })
   ).json();
   const preRestartUp = await (
@@ -837,35 +844,88 @@ test('/api/blobs enforces auth, cookie-backed <img> reads, CSP sandbox, and atta
   ).json();
   await srv1.close();
 
-  const srv2 = await startServer({ port: 0, token: 'secret', dataFile, distDir, trustBootstrap: 'none', blobLeaseMs: 5000 });
-  t.after(() => srv2.close());
+  const srv2 = await startServer({ port: 0, token: 'secret', dataFile, distDir, trustBootstrap: 'none', blobLeaseMs: 120 });
   const base2 = `http://127.0.0.1:${srv2.port}`;
+  // Uppercase/padded blobId in PATCH /api/workspace is normalized and protected from lease GC.
   const patchOk = await fetch(base2 + '/api/workspace', {
     method: 'PATCH',
     headers: { ...auth, 'content-type': 'application/json' },
     body: JSON.stringify({
-      baseRev: pRes.rev,
+      baseRev: tRes.rev,
       patch: {
         files: {
-          created: [{ id: 'f_survive', name: 'survive.png', project: pRes.project.id, blobId: preRestartUp.blobId, mime: 'image/png', sizeBytes: 6 }],
+          created: [
+            {
+              id: 'f_survive',
+              name: 'survive.png',
+              project: pRes.project.id,
+              blobId: `  ${preRestartUp.blobId.toUpperCase()}  `,
+              mime: 'image/png',
+              sizeBytes: 6,
+            },
+          ],
         },
       },
     }),
   });
   assert.equal(patchOk.status, 200);
+  await new Promise(r => setTimeout(r, 170));
   assert.equal((await fetch(base2 + `/api/blobs/${preRestartUp.blobId}`, { headers: auth })).status, 200);
 
+  // PATCH /api/workspace with a missing blob + an unrelated task edit preserves the task edit and strips only the dead attachment.
   const patchMissingBlob = await fetch(base2 + '/api/workspace', {
     method: 'PATCH',
     headers: { ...auth, 'content-type': 'application/json' },
     body: JSON.stringify({
-      baseRev: pRes.rev + 1,
+      baseRev: tRes.rev + 1,
       patch: {
+        tasks: {
+          updated: {
+            [tRes.task.id]: { fields: { set: { title: 'LOCAL UNSYNCED EDIT' } } },
+          },
+        },
         files: {
-          created: [{ id: 'f_missing', name: 'missing.png', project: pRes.project.id, blobId: 'a'.repeat(64), mime: 'image/png', sizeBytes: 6 }],
+          created: [{ id: 'f_missing', name: 'missing.png', project: pRes.project.id, blobId: 'A'.repeat(64), mime: 'image/png', sizeBytes: 6 }],
         },
       },
     }),
   });
-  assert.equal(patchMissingBlob.status, 409);
+  assert.equal(patchMissingBlob.status, 200);
+  const patchMissingJson = await patchMissingBlob.json();
+  assert.equal(patchMissingJson.merged, true);
+  assert.deepEqual(patchMissingJson.droppedFiles, ['missing.png']);
+  assert.equal(patchMissingJson.state.data.tasks.find(x => x.id === tRes.task.id).title, 'LOCAL UNSYNCED EDIT');
+  assert.equal(
+    patchMissingJson.state.data.files.some(f => f.id === 'f_missing'),
+    false,
+  );
+
+  // state.json loss + restart preserves surviving blobs for browser POST /api/sync re-seed, while stripping missing rev-0 blob refs.
+  const savedClientState = structuredClone(patchMissingJson.state);
+  savedClientState.data.files.push({ id: 'f_dead_sync', name: 'dead-sync.png', project: pRes.project.id, blobId: 'b'.repeat(64) });
+  await srv2.close();
+  fs.rmSync(dataFile, { force: true });
+  await new Promise(r => setTimeout(r, 90));
+
+  const srv3 = await startServer({ port: 0, token: 'secret', dataFile, distDir, trustBootstrap: 'none', blobLeaseMs: 40 });
+  t.after(() => srv3.close());
+  const base3 = `http://127.0.0.1:${srv3.port}`;
+  await new Promise(r => setTimeout(r, 90));
+  const reseed = await fetch(base3 + '/api/sync', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ baseRev: 0, state: savedClientState }),
+  });
+  assert.equal(reseed.status, 200);
+  const reseedJson = await reseed.json();
+  assert.deepEqual(reseedJson.droppedFiles, ['dead-sync.png']);
+  assert.equal(
+    reseedJson.state.data.files.some(f => f.id === 'f_survive'),
+    true,
+  );
+  assert.equal(
+    reseedJson.state.data.files.some(f => f.id === 'f_dead_sync'),
+    false,
+  );
+  assert.equal((await fetch(base3 + `/api/blobs/${preRestartUp.blobId}`, { headers: auth })).status, 200);
 });

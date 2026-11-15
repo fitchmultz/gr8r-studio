@@ -234,7 +234,6 @@ async function push() {
             clearSyncedBase();
             continue;
           }
-          if (j.error && j.error !== 'uninitialized') toast(j.error);
           adopt(j.rev, j.state);
           return;
         }
@@ -244,6 +243,9 @@ async function push() {
         }
         authWarned = false;
         const j = await r.json();
+        if (j.droppedFiles?.length) {
+          toast(`Skipped expired attachment upload (${j.droppedFiles.join(', ')}) — please re-attach`);
+        }
         if (j.merged && j.state) {
           if (getPendingSave() === blob) {
             adopt(j.rev, j.state);
@@ -292,7 +294,20 @@ async function push() {
         return;
       }
       authWarned = false;
-      stampRev((await r.json()).rev, blob);
+      const j = await r.json();
+      if (j.droppedFiles?.length) {
+        toast(`Skipped expired attachment upload (${j.droppedFiles.join(', ')}) — please re-attach`);
+      }
+      if (j.merged && j.state) {
+        if (getPendingSave() === blob) {
+          adopt(j.rev, j.state);
+        } else {
+          rebasePendingSave(j.rev, j.state, blob);
+          render();
+        }
+      } else {
+        stampRev(j.rev, blob);
+      }
     }
   } finally {
     pushing = false;
