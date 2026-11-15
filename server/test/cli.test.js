@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { runCli } from '../../cli/gr8r.js';
 import { startServer } from '../server.js';
 
@@ -150,4 +152,24 @@ test('gr8r CLI manages config, projects, tasks, Markdown stdin, subtasks, commen
 
   r = await invoke(['activity', '-p', 'PID', '--limit', '5', '--json'], { env });
   assert.ok(JSON.parse(r.stdout).activity.length >= 4);
+
+  // Closed consumer pipes (e.g. `gr8r tasks --json | head -c 5`) exit 0 without unhandled EPIPE.
+  const cliPath = fileURLToPath(new URL('../../cli/gr8r.js', import.meta.url));
+  const child = spawn(process.execPath, [cliPath, 'tasks', '--json'], {
+    env: { ...process.env, ...env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stderrText = '';
+  child.stderr.on('data', d => {
+    stderrText += String(d);
+  });
+  await new Promise(resolve => {
+    child.stdout.once('data', () => {
+      child.stdout.destroy();
+      resolve();
+    });
+  });
+  const exitCode = await new Promise(resolve => child.once('exit', resolve));
+  assert.equal(exitCode, 0, stderrText);
+  assert.equal(stderrText, '');
 });

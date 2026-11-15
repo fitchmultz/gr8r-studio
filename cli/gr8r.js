@@ -830,6 +830,12 @@ function safeRealpath(p) {
 }
 
 if (process.argv[1] && safeRealpath(process.argv[1]) === safeRealpath(fileURLToPath(import.meta.url))) {
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on('error', err => {
+      if (err?.code === 'EPIPE') process.exit(0);
+      throw err;
+    });
+  }
   runCli(process.argv.slice(2)).then(
     code => {
       process.exitCode = code;
