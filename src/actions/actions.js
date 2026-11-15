@@ -2,7 +2,7 @@
    ACTIONS · INPUT HANDLERS · DRAG & DROP · KEYBOARD · INIT
    ===================================================================== */
 import { $, $$, TODAY, addD, dOff, esc, fmtDate, iso, parse, uid } from '../core/utils.js';
-import { PR, PSTAT } from '../core/constants.js';
+import { PR, PSTAT, isClosedStatus } from '../core/constants.js';
 import { seed } from '../data/seed.js';
 import { D, DEFAULT_PREFS, S, allTasks, canSee, commentsOf, logAct, me, mem, proj, save, task, tasksOf, visibleProjects } from '../core/store.js';
 import {
@@ -163,7 +163,7 @@ A.goTasks = el => {
   v.mode = 'list';
   v.filters =
     f === 'open'
-      ? [{ f: 'status', op: 'not', v: ['done'] }]
+      ? [{ f: 'status', op: 'not', v: ['done', 'canceled'] }]
       : f === 'done'
         ? [
             { f: 'status', op: 'is', v: ['done'] },
@@ -361,10 +361,18 @@ A.toggleDrawerFull = () => {
 A.toggleDone = el => {
   const t = task(el.dataset.id);
   if (!t) return;
-  const wasDone = t.status === 'done';
+  const wasClosed = isClosedStatus(t.status);
   S.ui.pop = null;
-  updateTask(t.id, { status: wasDone ? (t.prevStatus && t.prevStatus !== 'done' ? t.prevStatus : 'todo') : 'done' });
-  if (!wasDone && !S.ui.offline) toast(`Completed “${t.title}”`, { action: 'Undo', onAction: () => updateTask(t.id, { status: t.prevStatus || 'todo' }) });
+  updateTask(t.id, { status: wasClosed ? (t.prevStatus && !isClosedStatus(t.prevStatus) ? t.prevStatus : 'todo') : 'done' });
+  if (!wasClosed && !S.ui.offline) toast(`Completed “${t.title}”`, { action: 'Undo', onAction: () => updateTask(t.id, { status: t.prevStatus || 'todo' }) });
+};
+A.cancelTask = el => {
+  const t = task(el.dataset.id);
+  if (!t || t.status === 'canceled') return;
+  const prev = t.status;
+  S.ui.pop = null;
+  updateTask(t.id, { status: 'canceled' });
+  if (!S.ui.offline) toast(`Canceled “${t.title}”`, { action: 'Undo', onAction: () => updateTask(t.id, { status: prev }) });
 };
 A.toggleFavTask = el => {
   const t = task(el.dataset.id);
@@ -1070,8 +1078,9 @@ A.colDoneAll = el => {
   if (mutate(() => ts.forEach(t => applyPatch(t, { status: 'done' }))))
     toast(`Marked ${ts.length} tasks as done`, { action: 'Undo', onAction: () => restore(snap) });
 };
-A.colArchive = () => {
-  const ts = colTasks(S.ui.pop.key, 'done');
+A.colArchive = el => {
+  const colId = el?.dataset?.id || 'done';
+  const ts = colTasks(S.ui.pop.key, colId);
   S.ui.pop = null;
   const snap = snapshot();
   if (
@@ -1082,7 +1091,7 @@ A.colArchive = () => {
       }),
     )
   )
-    toast(`Archived ${ts.length} completed tasks`, { action: 'Undo', onAction: () => restore(snap) });
+    toast(`Archived ${ts.length} ${colId === 'canceled' ? 'canceled' : 'completed'} tasks`, { action: 'Undo', onAction: () => restore(snap) });
 };
 A.colSortPrio = el => {
   const ts = colTasks(S.ui.pop.key, el.dataset.id).sort((a, b) => PR[b.priority].w - PR[a.priority].w);
@@ -1379,7 +1388,7 @@ A.assignToMember = el => {
 A.removeMember = el => {
   const m = mem(el.dataset.id);
   S.ui.pop = null;
-  const n = allTasks().filter(t => t.assignee === m.id && t.status !== 'done').length;
+  const n = allTasks().filter(t => t.assignee === m.id && !isClosedStatus(t.status)).length;
   confirmDlg({
     title: `Remove ${m.name}?`,
     body: `${esc(m.name)} will lose access to ${esc(D().ws.name)} immediately.${n ? ` Their <b>${n} open task${n > 1 ? 's' : ''}</b> will become unassigned.` : ''}`,

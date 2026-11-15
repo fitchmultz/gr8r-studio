@@ -221,4 +221,13 @@ test('gr8r CLI guides user to GR8R_TOKEN when /api/config bootstrap is disabled,
   assert.match(syncOut.stdout, /Synced PID-201 -> review/);
   const detailOut = await invoke(['task', 'view', 'PID-201'], { env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' } });
   assert.match(detailOut.stdout, /Pull requests:\n\s+\[open\] fitchmultz\/pi-durable#447/);
+
+  const cancelOut = await invoke(['task', 'cancel', 'PID-201', '--comment', 'Superseded by PID-202'], {
+    env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' },
+  });
+  assert.match(cancelOut.stdout, /Updated PID-201 -> canceled/);
+  const openAfterCancel = await invoke(['tasks', '-p', 'PID', '-s', 'open', '--json'], {
+    env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' },
+  });
+  assert.equal(JSON.parse(openAfterCancel.stdout).tasks.length, 0);
 });

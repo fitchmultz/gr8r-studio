@@ -76,7 +76,7 @@ EOF
 
 Valid vocabulary values (verify with `gr8r status` if unsure):
 
-- **Task status:** `backlog`, `todo`, `progress`, `review`, `done` (`open` is accepted as a filter on `gr8r tasks`)
+- **Task status:** `backlog`, `todo`, `progress`, `review`, `done`, `canceled` (`open` is accepted as a filter on `gr8r tasks` and excludes both `done` and `canceled`)
 - **Priority:** `urgent`, `high`, `medium`, `low`, `none`
 - **Labels:** `design`, `frontend`, `backend`, `research`, `content`, `bug`, `qa`, `growth`
 - **Project status:** `planning`, `active`, `risk`, `hold`, `complete`
@@ -96,6 +96,9 @@ gr8r subtask promote PID-201 s_01_2
 
 # Record PR/deploy verification in comments and complete the task
 gr8r task done PID-201 --comment "Merged PR #42 (sha abc1234) and verified live."
+
+# Cancel a superseded or out-of-scope task without deleting its rationale
+gr8r task cancel PID-201 --comment "Superseded by PID-204."
 
 # Update fields, dependencies, or append Markdown notes
 gr8r task update PID-202 --add-dep PID-201 --due 2026-11-18 --append-desc - <<'EOF'

@@ -13,11 +13,15 @@ import {
   deleteTasks,
   duplicateProject,
   duplicateTask,
+  formatProjectForApi,
+  isTaskOverdue,
+  projectProgress,
   promoteSubtask,
   queryTasks,
   removeMember,
   removeSubtask,
   searchWorkspace,
+  syncGitHubPullRequests,
   updateProject,
   updateSubtask,
 } from '../../src/core/domain.js';
@@ -1037,4 +1041,209 @@ test('syncGitHubPullRequests handles draft/ready/merge, stacked (1/n) PRs, Refs 
   );
   assert.equal(tCrossPrior.status, 'review');
   assert.equal(state.data.tasks.length, tasksBefore);
+});
+
+test('canceled status excludes tasks from open/overdue counts and progress denominator without counting as done', () => {
+  const state = createDefaultState(FIXED_NOW);
+  const p = createProject(state.data, { name: 'Cancelation Semantics', key: 'CAN' }, { now: FIXED_NOW });
+  const tDone = createTask(state.data, { project: p.id, title: 'Shipped slice', status: 'done' }, { now: FIXED_NOW });
+  const tTodo = createTask(state.data, { project: p.id, title: 'Superseded slice', status: 'progress', due: '2026-11-10' }, { now: FIXED_NOW });
+
+  assert.equal(isTaskOverdue(tTodo, FIXED_NOW), true);
+  assert.equal(projectProgress(state.data, p.id), 50);
+
+  // Cancel via British spelling alias as well to prevent agent spelling errors.
+  applyTaskPatch(state.data, tTodo, { status: 'cancelled' }, { now: FIXED_NOW + 100 });
+  assert.equal(tTodo.status, 'canceled');
+  assert.equal(tTodo.canceledAt, FIXED_NOW + 100);
+  assert.equal(tTodo.prevStatus, 'progress');
+  assert.equal(isTaskOverdue(tTodo, FIXED_NOW + 100), false);
+
+  // Canceled tasks are not open, not overdue, and excluded from progress denominator.
+  const apiProj = formatProjectForApi(state.data, p, FIXED_NOW + 100);
+  assert.equal(apiProj.taskCount, 2);
+  assert.equal(apiProj.doneCount, 1);
+  assert.equal(apiProj.canceledCount, 1);
+  assert.equal(apiProj.openCount, 0);
+  assert.equal(apiProj.overdueCount, 0);
+  assert.equal(apiProj.progress, 100);
+
+  assert.deepEqual(
+    queryTasks(state.data, { project: p.id, status: 'open' }, { now: FIXED_NOW + 100 }).map(t => t.key),
+    [],
+  );
+  assert.deepEqual(
+    queryTasks(state.data, { project: p.id, status: 'canceled' }, { now: FIXED_NOW + 100 }).map(t => t.key),
+    [tTodo.key],
+  );
+  assert.deepEqual(
+    queryTasks(state.data, { project: p.id, status: 'done' }, { now: FIXED_NOW + 100 }).map(t => t.key),
+    [tDone.key],
+  );
+
+  // Reopening clears canceledAt.
+  applyTaskPatch(state.data, tTodo, { status: 'todo' }, { now: FIXED_NOW + 200 });
+  assert.equal(tTodo.canceledAt, null);
+  assert.equal(projectProgress(state.data, p.id), 50);
+
+  // Timestamp-less or updatedAt-only merge syncs do not overwrite an explicit cancellation;
+  // only an explicit mergedAt after canceledAt completes the task.
+  syncGitHubPullRequests(state.data, { repo: 'acme/app', number: 12, title: `feat: attempt (${tTodo.key})`, state: 'open' }, { now: FIXED_NOW + 1000 });
+  applyTaskPatch(state.data, tTodo, { status: 'canceled' }, { now: FIXED_NOW + 2000 });
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/app', number: 12, title: `feat: attempt (${tTodo.key})`, state: 'merged', merged: true },
+    { now: FIXED_NOW + 3000 },
+  );
+  assert.equal(tTodo.status, 'canceled');
+  assert.equal(tTodo.canceledAt, FIXED_NOW + 2000);
+
+  // Resyncing PR #12 with an authoritative mergedAt older than canceledAt keeps the task canceled.
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/app',
+      number: 12,
+      title: `feat: attempt (${tTodo.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: new Date(FIXED_NOW + 1500).toISOString(),
+    },
+    { now: FIXED_NOW + 3500 },
+  );
+  assert.equal(tTodo.status, 'canceled');
+  assert.equal(tTodo.canceledAt, FIXED_NOW + 2000);
+
+  // Resyncing PR #15 with an authoritative mergedAt after canceledAt completes the task even after an earlier timestamp-less merge.
+  const tResync = createTask(state.data, { project: p.id, title: 'Resync slice', status: 'progress' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(state.data, { repo: 'acme/app', number: 15, title: `feat: resync (${tResync.key})`, state: 'open' }, { now: FIXED_NOW + 1000 });
+  applyTaskPatch(state.data, tResync, { status: 'canceled' }, { now: FIXED_NOW + 2000 });
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/app', number: 15, title: `feat: resync (${tResync.key})`, state: 'merged', merged: true },
+    { now: FIXED_NOW + 3000 },
+  );
+  assert.equal(tResync.status, 'canceled');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/app',
+      number: 15,
+      title: `feat: resync (${tResync.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: new Date(FIXED_NOW + 2500).toISOString(),
+    },
+    { now: FIXED_NOW + 4000 },
+  );
+  assert.equal(tResync.status, 'done');
+  assert.equal(tResync.prs.find(x => x.number === 15)?.mergedAt, FIXED_NOW + 2500);
+
+  // Deliberately reopened tasks with a pre-existing merged link lacking mergedAtExact stay reopened on timestamped resync.
+  const tReopened = createTask(
+    state.data,
+    { project: p.id, title: 'Reopened recurring slice', status: 'done', recur: 'Weekly', due: '2026-11-20' },
+    { now: FIXED_NOW },
+  );
+  tReopened.prs = [
+    {
+      repo: 'acme/app',
+      number: 16,
+      title: `feat: legacy (${tReopened.key})`,
+      url: 'https://github.com/acme/app/pull/16',
+      headRef: 'feat/legacy',
+      state: 'merged',
+      draft: false,
+      closing: true,
+      updatedAt: FIXED_NOW + 500,
+      linkedSeq: 1,
+      mergedSeq: 1,
+      mergedAt: FIXED_NOW + 500,
+    },
+  ];
+  applyTaskPatch(state.data, tReopened, { status: 'todo' }, { now: FIXED_NOW + 1000 });
+  const countBeforeResync = state.data.tasks.length;
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/app',
+      number: 16,
+      title: `feat: legacy (${tReopened.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: new Date(FIXED_NOW + 500).toISOString(),
+      updatedAt: new Date(FIXED_NOW + 6000).toISOString(),
+    },
+    { now: FIXED_NOW + 6000 },
+  );
+  assert.equal(tReopened.status, 'todo');
+  assert.equal(state.data.tasks.length, countBeforeResync);
+
+  // Two-PR canceled task: closing PR #80 merges after canceledAt while sibling PR #81 is still open;
+  // once #81 closes unmerged, the deferred post-cancel merge completes the task deterministically.
+  const tSibling = createTask(state.data, { project: p.id, title: 'Sibling PR slice', status: 'progress' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    [
+      { repo: 'acme/app', number: 80, title: `feat: attempt A (${tSibling.key})`, state: 'open' },
+      { repo: 'acme/app', number: 81, title: `feat: attempt B (${tSibling.key})`, state: 'open' },
+    ],
+    { now: FIXED_NOW + 500 },
+  );
+  applyTaskPatch(state.data, tSibling, { status: 'canceled' }, { now: FIXED_NOW + 1000 });
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/app',
+      number: 80,
+      title: `feat: attempt A (${tSibling.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: new Date(FIXED_NOW + 1800).toISOString(),
+      updatedAt: new Date(FIXED_NOW + 2000).toISOString(),
+    },
+    { now: FIXED_NOW + 2000 },
+  );
+  assert.equal(tSibling.status, 'canceled');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/app',
+      number: 81,
+      title: `feat: attempt B (${tSibling.key})`,
+      state: 'closed',
+      merged: false,
+      updatedAt: new Date(FIXED_NOW + 3000).toISOString(),
+    },
+    { now: FIXED_NOW + 3000 },
+  );
+  assert.equal(tSibling.status, 'done');
+
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/app',
+      number: 13,
+      title: `feat: superseded (${tTodo.key})`,
+      state: 'merged',
+      merged: true,
+      updatedAt: new Date(FIXED_NOW + 4000).toISOString(),
+    },
+    { now: FIXED_NOW + 4000 },
+  );
+  assert.equal(tTodo.status, 'canceled');
+
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/app',
+      number: 14,
+      title: `feat: replacement (${tTodo.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: new Date(FIXED_NOW + 5000).toISOString(),
+    },
+    { now: FIXED_NOW + 5000 },
+  );
+  assert.equal(tTodo.status, 'done');
 });

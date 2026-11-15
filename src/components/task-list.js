@@ -3,7 +3,7 @@
    ===================================================================== */
 import { ago, esc, relDate } from '../core/utils.js';
 import { ic } from '../core/icons.js';
-import { PR, ST } from '../core/constants.js';
+import { PR, ST, isClosedStatus } from '../core/constants.js';
 import { D, S, commentsOf, isOver, mem, pColor, proj, task } from '../core/store.js';
 import { av, dueHtml, empty, lbl, prIcon, prPill, stIcon, stPill } from '../ui/helpers.js';
 import { fxc } from '../shell/render.js';
@@ -45,11 +45,11 @@ export function taskRow(t, cols, tpl, opt = {}) {
   const editing = S.ui.editCell && S.ui.editCell.id === t.id && S.ui.editCell.f === 'title';
   const cc = commentsOf(t.id).length;
   const sd = t.subtasks.filter(s => s.done).length;
-  return `<div class="trow ${t.status === 'done' ? 'done' : ''} ${sel ? 'sel' : ''}${fxc('done', t.id)}${fxc('added', t.id)}" style="--cols:${tpl}" data-task-row="${t.id}" data-group="${opt.group || ''}" data-lkey="${opt.key || ''}" data-ctx="task" data-id="${t.id}">
+  return `<div class="trow ${isClosedStatus(t.status) ? 'done' : ''} ${sel ? 'sel' : ''}${fxc('done', t.id)}${fxc('added', t.id)}" style="--cols:${tpl}" data-task-row="${t.id}" data-group="${opt.group || ''}" data-lkey="${opt.key || ''}" data-ctx="task" data-id="${t.id}">
     <div class="handle" draggable="${opt.drag !== false}" data-drag-row="${t.id}" aria-hidden="true">${opt.drag !== false ? ic('grip-vertical', 14) : ''}</div>
     <div class="c-check">${
       opt.complete
-        ? `<input type="checkbox" class="check round" ${t.status === 'done' ? 'checked' : ''} data-a="toggleDone" data-id="${t.id}" aria-label="Mark ${esc(t.title)} complete">`
+        ? `<input type="checkbox" class="check round" ${isClosedStatus(t.status) ? 'checked' : ''} data-a="toggleDone" data-id="${t.id}" aria-label="${isClosedStatus(t.status) ? 'Reopen' : 'Mark complete'}: ${esc(t.title)}">`
         : `<input type="checkbox" class="check" ${sel ? 'checked' : ''} data-a="selRow" data-id="${t.id}" aria-label="Select ${esc(t.title)}">`
     }</div>
     <div class="ttl" ${editing ? '' : `data-a="openTask" data-id="${t.id}"`} data-dbl="editTitle">
@@ -135,8 +135,8 @@ export function actHtml(a, opt = {}) {
 }
 export function miniRow(t, opt = {}) {
   const p = proj(t.project);
-  return `<div class="mini ${t.status === 'done' ? 'done' : ''}${fxc('done', t.id)}${fxc('added', t.id)}" data-a="openTask" data-id="${t.id}" data-ctx="task" role="button" tabindex="0">
-    <input type="checkbox" class="check round" ${t.status === 'done' ? 'checked' : ''} data-a="toggleDone" data-id="${t.id}" aria-label="Complete ${esc(t.title)}">
+  return `<div class="mini ${isClosedStatus(t.status) ? 'done' : ''}${fxc('done', t.id)}${fxc('added', t.id)}" data-a="openTask" data-id="${t.id}" data-ctx="task" role="button" tabindex="0">
+    <input type="checkbox" class="check round" ${isClosedStatus(t.status) ? 'checked' : ''} data-a="toggleDone" data-id="${t.id}" aria-label="${isClosedStatus(t.status) ? 'Reopen' : 'Complete'} ${esc(t.title)}">
     <span data-tip="${ST[t.status].name}">${stIcon(t.status)}</span>
     <span class="tt">${esc(t.title)}</span>
     ${opt.noProj ? '' : `<span class="pj hide-m"><span class="pdot" style="--c:${pColor(p)}"></span><span class="trunc">${esc(p.name)}</span></span>`}

@@ -308,6 +308,7 @@ Commands:
   task update <ref> [flags]                 Atomically update task fields
   task start <ref> [-a me]                  Move task to 'progress'
   task done <ref> [--comment TEXT]          Complete task (and optionally post a comment)
+  task cancel <ref> [--comment TEXT]        Cancel task (and optionally post rationale)
   task reopen <ref> [--status todo]         Reopen a completed task
   task delete <ref> --yes                   Permanently delete a task
 
@@ -373,6 +374,7 @@ export async function runCli(argv, io = {}) {
       state: { type: 'string' },
       head: { type: 'string' },
       'pr-url': { type: 'string' },
+      'merged-at': { type: 'string' },
       merged: { type: 'boolean' },
       draft: { type: 'boolean' },
       comment: { type: 'string' },
@@ -491,7 +493,7 @@ export async function runCli(argv, io = {}) {
         ['ID', p => p.id],
         ['NAME', p => p.name],
         ['STATUS', p => (p.archived ? `${p.status} (archived)` : p.status)],
-        ['TASKS', p => `${p.doneCount}/${p.taskCount}`],
+        ['TASKS', p => `${p.doneCount}/${p.taskCount - (p.canceledCount || 0)}`],
         ['DUE', p => p.due || '-'],
       ]),
     );
@@ -505,7 +507,9 @@ export async function runCli(argv, io = {}) {
       const res = await client.request('GET', `/projects/${encodeURIComponent(ref)}${opts.archived ? '?archived=true' : ''}`);
       if (opts.json) return outJson(res);
       const p = res.project;
-      stdout(`${p.key}  ${p.name} (${p.status}) — ${p.progress}% (${p.doneCount}/${p.taskCount} done) | rev ${res.rev}`);
+      const activeTotal = p.taskCount - (p.canceledCount || 0);
+      const cancelSuffix = p.canceledCount ? `, ${p.canceledCount} canceled` : '';
+      stdout(`${p.key}  ${p.name} (${p.status}) — ${p.progress}% (${p.doneCount}/${activeTotal} done${cancelSuffix}) | rev ${res.rev}`);
       if (p.desc) stdout(p.desc);
       if (p.milestones?.length) {
         stdout('\nMilestones:');
@@ -672,7 +676,7 @@ export async function runCli(argv, io = {}) {
       stdout(`Created ${res.task.key}: ${res.task.title} [rev ${res.rev}]`);
       return 0;
     }
-    if (sub === 'update' || sub === 'start' || sub === 'done' || sub === 'reopen') {
+    if (sub === 'update' || sub === 'start' || sub === 'done' || sub === 'cancel' || sub === 'reopen') {
       const ref = pos[2];
       if (!ref) throw new Error(`Usage: gr8r task ${sub} <key-or-id> [flags]`);
       if (opts.fav && opts['no-fav']) throw new Error('Cannot combine --fav and --no-fav');
@@ -685,6 +689,7 @@ export async function runCli(argv, io = {}) {
       const body = {};
       if (sub === 'start') body.status = 'progress';
       if (sub === 'done') body.status = 'done';
+      if (sub === 'cancel') body.status = 'canceled';
       if (sub === 'reopen') body.status = opts.status || 'todo';
       if (opts.title !== undefined) body.title = opts.title;
       if (opts.status !== undefined && sub === 'update') body.status = opts.status;
@@ -830,6 +835,7 @@ export async function runCli(argv, io = {}) {
       if (opts.title !== undefined) item.title = opts.title;
       if (opts.head !== undefined) item.headRef = opts.head;
       if (opts['pr-url'] !== undefined) item.url = opts['pr-url'];
+      if (opts['merged-at'] !== undefined) item.mergedAt = opts['merged-at'];
       if (opts.body !== undefined || opts['body-file'] !== undefined) item.body = resolveTextArg(opts.body, opts['body-file'], readStdin);
       pullRequests = [item];
     } else {
