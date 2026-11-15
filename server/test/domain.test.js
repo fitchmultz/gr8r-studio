@@ -13,6 +13,9 @@ import {
   deleteTasks,
   duplicateProject,
   duplicateTask,
+  formatProjectForApi,
+  isTaskOverdue,
+  projectProgress,
   promoteSubtask,
   queryTasks,
   removeMember,
@@ -1037,4 +1040,48 @@ test('syncGitHubPullRequests handles draft/ready/merge, stacked (1/n) PRs, Refs 
   );
   assert.equal(tCrossPrior.status, 'review');
   assert.equal(state.data.tasks.length, tasksBefore);
+});
+
+test('canceled status excludes tasks from open/overdue counts and progress denominator without counting as done', () => {
+  const state = createDefaultState(FIXED_NOW);
+  const p = createProject(state.data, { name: 'Cancelation Semantics', key: 'CAN' }, { now: FIXED_NOW });
+  const tDone = createTask(state.data, { project: p.id, title: 'Shipped slice', status: 'done' }, { now: FIXED_NOW });
+  const tTodo = createTask(state.data, { project: p.id, title: 'Superseded slice', status: 'progress', due: '2026-11-10' }, { now: FIXED_NOW });
+
+  assert.equal(isTaskOverdue(tTodo, FIXED_NOW), true);
+  assert.equal(projectProgress(state.data, p.id), 50);
+
+  // Cancel via British spelling alias as well to prevent agent spelling errors.
+  applyTaskPatch(state.data, tTodo, { status: 'cancelled' }, { now: FIXED_NOW + 100 });
+  assert.equal(tTodo.status, 'canceled');
+  assert.equal(tTodo.canceledAt, FIXED_NOW + 100);
+  assert.equal(tTodo.prevStatus, 'progress');
+  assert.equal(isTaskOverdue(tTodo, FIXED_NOW + 100), false);
+
+  // Canceled tasks are not open, not overdue, and excluded from progress denominator.
+  const apiProj = formatProjectForApi(state.data, p, FIXED_NOW + 100);
+  assert.equal(apiProj.taskCount, 2);
+  assert.equal(apiProj.doneCount, 1);
+  assert.equal(apiProj.canceledCount, 1);
+  assert.equal(apiProj.openCount, 0);
+  assert.equal(apiProj.overdueCount, 0);
+  assert.equal(apiProj.progress, 100);
+
+  assert.deepEqual(
+    queryTasks(state.data, { project: p.id, status: 'open' }, { now: FIXED_NOW + 100 }).map(t => t.key),
+    [],
+  );
+  assert.deepEqual(
+    queryTasks(state.data, { project: p.id, status: 'canceled' }, { now: FIXED_NOW + 100 }).map(t => t.key),
+    [tTodo.key],
+  );
+  assert.deepEqual(
+    queryTasks(state.data, { project: p.id, status: 'done' }, { now: FIXED_NOW + 100 }).map(t => t.key),
+    [tDone.key],
+  );
+
+  // Reopening clears canceledAt.
+  applyTaskPatch(state.data, tTodo, { status: 'todo' }, { now: FIXED_NOW + 200 });
+  assert.equal(tTodo.canceledAt, null);
+  assert.equal(projectProgress(state.data, p.id), 50);
 });

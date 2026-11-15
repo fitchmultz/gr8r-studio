@@ -1,6 +1,6 @@
 /* ---------------- CONTEXT MENUS ---------------- */
 import { ic } from '../core/icons.js';
-import { ST } from '../core/constants.js';
+import { ST, isClosedStatus } from '../core/constants.js';
 import { D, mem, proj, task, visibleProjects } from '../core/store.js';
 
 export function ctxMenu(p) {
@@ -13,7 +13,8 @@ export function ctxMenu(p) {
     return (
       I('openTask', 'panel-right-open', 'Open') +
       I('editTask', 'pencil', 'Edit', '', 'E') +
-      I('toggleDone', t.status === 'done' ? 'rotate-ccw' : 'circle-check', t.status === 'done' ? 'Reopen' : 'Mark complete') +
+      I('toggleDone', isClosedStatus(t.status) ? 'rotate-ccw' : 'circle-check', isClosedStatus(t.status) ? 'Reopen' : 'Mark complete') +
+      (t.status !== 'canceled' ? I('cancelTask', 'circle-slash', 'Cancel task') : '') +
       sep +
       I('ctxStatus', 'circle-dot', 'Status…') +
       I('ctxAssign', 'user', 'Assign to…') +
@@ -51,7 +52,11 @@ export function ctxMenu(p) {
       `<div class="mh">${ST[p.id].name}</div>` +
       I('colAdd', 'plus', 'Add task') +
       I('colCollapse', 'fold-horizontal', 'Collapse column') +
-      (p.id !== 'done' ? I('colDoneAll', 'check-check', 'Mark all as done') : I('colArchive', 'archive', 'Archive completed')) +
+      (p.id === 'done'
+        ? I('colArchive', 'archive', 'Archive completed')
+        : p.id === 'canceled'
+          ? I('colArchive', 'archive', 'Archive canceled')
+          : I('colDoneAll', 'check-check', 'Mark all as done')) +
       I('colSortPrio', 'arrow-down-wide-narrow', 'Sort by priority')
     );
   }

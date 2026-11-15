@@ -1,6 +1,7 @@
 /* ---------- MY TASKS ---------- */
 import { TODAY, dOff, diffD, parse } from '../core/utils.js';
 import { ic } from '../core/icons.js';
+import { isClosedStatus } from '../core/constants.js';
 import { D, S, allTasks, isOver } from '../core/store.js';
 import { applyView, viewOf, viewToolbar } from '../shell/view-engine.js';
 import { listHtml } from '../components/task-list.js';
@@ -19,14 +20,14 @@ export function pageMyTasks() {
       key: 'today',
       name: 'Today',
       html: ic('sun', 14),
-      tasks: mine.filter(t => t.status !== 'done' && t.due && diffD(parse(t.due), TODAY) === 0),
+      tasks: mine.filter(t => !isClosedStatus(t.status) && t.due && diffD(parse(t.due), TODAY) === 0),
       set: { due: dOff(0) },
     },
     {
       key: 'upcoming',
       name: 'Upcoming',
       html: ic('calendar-days', 14),
-      tasks: mine.filter(t => t.status !== 'done' && (!t.due || diffD(parse(t.due), TODAY) > 0)),
+      tasks: mine.filter(t => !isClosedStatus(t.status) && (!t.due || diffD(parse(t.due), TODAY) > 0)),
       set: { due: dOff(3) },
     },
     {
@@ -37,6 +38,18 @@ export function pageMyTasks() {
       set: { status: 'done' },
       collapsed: true,
     },
+    ...(mine.some(t => t.status === 'canceled')
+      ? [
+          {
+            key: 'canceled',
+            name: 'Canceled',
+            html: `<span style="color:var(--text-3)">${ic('circle-slash', 14)}</span>`,
+            tasks: mine.filter(t => t.status === 'canceled'),
+            set: { status: 'canceled' },
+            collapsed: true,
+          },
+        ]
+      : []),
   ];
   const mode = S.ui.myView;
   return `<div class="page flush">

@@ -1,7 +1,7 @@
 /* ---------- BOARD ---------- */
 import { esc } from '../core/utils.js';
 import { ic } from '../core/icons.js';
-import { PR, STATUSES } from '../core/constants.js';
+import { PR, STATUSES, isClosedStatus } from '../core/constants.js';
 import { S, commentsOf, pColor, proj } from '../core/store.js';
 import { av, dueHtml, lbl, prIcon, progBar, stIcon } from '../ui/helpers.js';
 import { fxc } from '../shell/render.js';
@@ -11,9 +11,9 @@ export function kcard(t, opt = {}) {
   const ac = t.attachments.length;
   const sd = t.subtasks.filter(s => s.done).length;
   const p = proj(t.project);
-  return `<div class="kcard ${t.status === 'done' ? 'done' : ''}${fxc('done', t.id)}${fxc('added', t.id)}${fxc('moved', t.id)}" draggable="true" data-drag-card="${t.id}" data-a="openTask" data-id="${t.id}" data-ctx="task" role="button" tabindex="0" aria-label="${esc(t.title)}">
+  return `<div class="kcard ${isClosedStatus(t.status) ? 'done' : ''}${fxc('done', t.id)}${fxc('added', t.id)}${fxc('moved', t.id)}" draggable="true" data-drag-card="${t.id}" data-a="openTask" data-id="${t.id}" data-ctx="task" role="button" tabindex="0" aria-label="${esc(t.title)}">
     ${t.labels.length ? `<div class="labels">${t.labels.map(lbl).join('')}</div>` : ''}
-    <div class="top">${t.status === 'done' ? `<span class="done-ic" style="margin:2px 7px 0 0;display:inline-flex" aria-label="Done">${stIcon('done', 14)}</span>` : ''}<div class="title">${esc(t.title)}</div></div>
+    <div class="top">${isClosedStatus(t.status) ? `<span class="done-ic" style="margin:2px 7px 0 0;display:inline-flex" aria-label="${t.status === 'canceled' ? 'Canceled' : 'Done'}">${stIcon(t.status, 14)}</span>` : ''}<div class="title">${esc(t.title)}</div></div>
     ${t.subtasks.length ? `<div class="subp">${ic('list-checks', 12)}<span class="num">${sd}/${t.subtasks.length}</span>${progBar(Math.round((sd / t.subtasks.length) * 100), sd === t.subtasks.length ? 'green' : '')}</div>` : ''}
     <div class="meta">
       ${opt.showProj ? `<span class="m" data-tip="${esc(p.name)}"><span class="pdot" style="--c:${pColor(p)}"></span></span>` : ''}
@@ -25,7 +25,7 @@ export function kcard(t, opt = {}) {
       ${ac ? `<span class="m" aria-label="${ac} attachments">${ic('paperclip', 12)}${ac}</span>` : ''}
       <button class="m" data-a="pop" data-pop="assignee" data-id="${t.id}" style="margin-left:auto" aria-label="Assignee">${av(t.assignee, 'sm')}</button>
     </div>
-    <div class="hacts"><button class="ibtn ibtn-xs" data-a="toggleDone" data-id="${t.id}" data-tip="${t.status === 'done' ? 'Reopen' : 'Mark complete'}" aria-label="${t.status === 'done' ? 'Reopen' : 'Mark complete'}">${ic(t.status === 'done' ? 'rotate-ccw' : 'check', 13)}</button><button class="ibtn ibtn-xs" data-a="editTask" data-id="${t.id}" data-tip="Quick edit" aria-label="Quick edit">${ic('pencil', 12)}</button><button class="ibtn ibtn-xs" data-a="ctxBtn" data-ctx="task" data-id="${t.id}" aria-label="More">${ic('ellipsis', 13)}</button></div>
+    <div class="hacts"><button class="ibtn ibtn-xs" data-a="toggleDone" data-id="${t.id}" data-tip="${isClosedStatus(t.status) ? 'Reopen' : 'Mark complete'}" aria-label="${isClosedStatus(t.status) ? 'Reopen' : 'Mark complete'}">${ic(isClosedStatus(t.status) ? 'rotate-ccw' : 'check', 13)}</button><button class="ibtn ibtn-xs" data-a="editTask" data-id="${t.id}" data-tip="Quick edit" aria-label="Quick edit">${ic('pencil', 12)}</button><button class="ibtn ibtn-xs" data-a="ctxBtn" data-ctx="task" data-id="${t.id}" aria-label="More">${ic('ellipsis', 13)}</button></div>
   </div>`;
 }
 export function boardHtml(ts, key, opt = {}) {

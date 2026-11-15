@@ -1,7 +1,7 @@
 /* ---------- OVERVIEW ---------- */
 import { TODAY, dayBucket, diffD, esc, fmtDate, parse } from '../core/utils.js';
 import { ic } from '../core/icons.js';
-import { STATUSES } from '../core/constants.js';
+import { STATUSES, isClosedStatus } from '../core/constants.js';
 import { D, TM, isOver, mem, pColor, progressOf, task, tasksOf } from '../core/store.js';
 import { av, avStack, empty, pStatus, stIcon } from '../ui/helpers.js';
 import { sortTasks } from '../shell/view-engine.js';
@@ -9,11 +9,13 @@ import { actHtml, miniRow } from '../components/task-list.js';
 
 export function projOverview(p) {
   const ts = tasksOf(p.id);
+  const active = ts.filter(t => t.status !== 'canceled');
+  const canceledCount = ts.length - active.length;
   const pr = progressOf(p.id);
   const cnt = STATUSES.map(s => ({ s, n: ts.filter(t => t.status === s.id).length }));
   const over = ts.filter(isOver);
   const soon = sortTasks(
-    ts.filter(t => t.status !== 'done' && t.due),
+    ts.filter(t => !isClosedStatus(t.status) && t.due),
     { f: 'due', dir: 1 },
   ).slice(0, 6);
   const acts = D()
@@ -24,7 +26,7 @@ export function projOverview(p) {
     <div class="grid2">
       <div class="stack">
         <section class="panel"><div class="panel-h"><h2>About</h2><div class="acts"><button class="btn btn-sm btn-ghost" data-a="editProject" data-id="${p.id}">${ic('pencil', 13)}Edit</button></div></div><div class="panel-b" style="font-size:14px;line-height:1.6;color:var(--text)">${esc(p.desc)}</div></section>
-        <section class="panel"><div class="panel-h"><h2>Progress</h2><div class="acts"><span class="faint" style="font-size:12px">${ts.filter(t => t.status === 'done').length} of ${ts.length} tasks done</span></div></div>
+        <section class="panel"><div class="panel-h"><h2>Progress</h2><div class="acts"><span class="faint" style="font-size:12px">${ts.filter(t => t.status === 'done').length} of ${active.length} active tasks done${canceledCount ? ` · ${canceledCount} canceled` : ''}</span></div></div>
           <div class="panel-b">
             <div class="row" style="align-items:baseline;gap:10px;margin-bottom:10px"><span style="font-size:30px;font-weight:600;letter-spacing:-.03em" class="num">${pr}%</span><span class="muted">${daysLeft >= 0 ? `${daysLeft} days until ${fmtDate(p.due)}` : `Ended ${fmtDate(p.due)}`}</span>${over.length ? `<span class="badge red">${ic('clock-alert', 11)}${over.length} overdue</span>` : ''}</div>
             <div class="stackbar" style="height:8px;margin-bottom:12px">${cnt.map(c => `<i style="width:${(c.n / Math.max(ts.length, 1)) * 100}%;background:var(--st-${c.s.id})" title="${c.s.name}: ${c.n}"></i>`).join('')}</div>

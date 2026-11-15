@@ -1,6 +1,6 @@
 /* ---------- store ---------- */
 import { TODAY, diffD, iso, parse } from './utils.js';
-import { PCOLORS } from './constants.js';
+import { PCOLORS, isClosedStatus } from './constants.js';
 import { seed } from '../data/seed.js';
 import { DEFAULT_PREFS, applyWorkspacePatch, diffWorkspacePatch, ensureTeams, isWorkspacePatchEmpty, logActivity } from './domain.js';
 
@@ -171,15 +171,16 @@ export const visibleProjects = () =>
 export const canSee = p => !p.private || p.members.includes(D().me);
 export const tasksOf = pid => D().tasks.filter(t => t.project === pid && !t.archived);
 export const allTasks = () => D().tasks.filter(t => !t.archived && canSee(proj(t.project)));
-export const isOver = t => t.due && t.status !== 'done' && diffD(parse(t.due), TODAY) < 0;
+export const isOver = t => t.due && !isClosedStatus(t.status) && diffD(parse(t.due), TODAY) < 0;
 export const commentsOf = tid => D().comments.filter(c => c.task === tid);
 export function progressOf(pid) {
-  const ts = tasksOf(pid);
-  if (!ts.length) return 0;
-  return Math.round((ts.filter(t => t.status === 'done').length / ts.length) * 100);
+  const active = tasksOf(pid).filter(t => t.status !== 'canceled');
+  if (!active.length) return 0;
+  return Math.round((active.filter(t => t.status === 'done').length / active.length) * 100);
 }
 export function taskProg(t) {
   if (t.status === 'done') return 100;
+  if (t.status === 'canceled') return 0;
   if (t.subtasks.length) return Math.round((t.subtasks.filter(s => s.done).length / t.subtasks.length) * 100);
   return { backlog: 0, todo: 5, progress: 45, review: 80 }[t.status] || 0;
 }

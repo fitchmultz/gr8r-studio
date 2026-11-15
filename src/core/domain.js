@@ -1,5 +1,5 @@
 /* Pure DOM-free workspace domain rules shared by browser actions and server API. */
-import { LB, PCOLORS, PICONS, PR, PSTAT, ST, STATUSES, TEAMS_SEED } from './constants.js';
+import { LB, PCOLORS, PICONS, PR, PSTAT, ST, STATUSES, TEAMS_SEED, isClosedStatus } from './constants.js';
 import { addD, dOff, diffD, formatDateWith, isIsoDate, iso, parse, todayDate, uid } from './dates.js';
 import { htmlToMarkdown, markdownToHtml, stripHtml } from './markdown.js';
 import { seed } from '../data/seed.js';
@@ -52,12 +52,12 @@ export const visibleProjectsOf = (data, actor = data.me) =>
 export const tasksOfProject = (data, pid) => data.tasks.filter(t => t.project === pid && !t.archived);
 export const allTasksOf = (data, actor = data.me) => data.tasks.filter(t => !t.archived && canSeeProject(data, findProject(data, t.project), actor));
 export const commentsOfTask = (data, tid) => data.comments.filter(c => c.task === tid);
-export const isTaskOverdue = (t, now = Date.now()) => !!(t.due && t.status !== 'done' && diffD(parse(t.due), todayDate(now)) < 0);
+export const isTaskOverdue = (t, now = Date.now()) => !!(t.due && !isClosedStatus(t.status) && diffD(parse(t.due), todayDate(now)) < 0);
 
 export function projectProgress(data, pid) {
-  const ts = tasksOfProject(data, pid);
-  if (!ts.length) return 0;
-  return Math.round((ts.filter(t => t.status === 'done').length / ts.length) * 100);
+  const active = tasksOfProject(data, pid).filter(t => t.status !== 'canceled');
+  if (!active.length) return 0;
+  return Math.round((active.filter(t => t.status === 'done').length / active.length) * 100);
 }
 
 export function ensureTeams(data) {
@@ -151,8 +151,14 @@ export function requireSubtask(task, ref) {
 
 /* ---------- validators ---------- */
 function validateStatus(status) {
-  if (!ST[status]) throw new DomainError(`Invalid status "${status}". Expected one of: ${Object.keys(ST).join(', ')}`);
-  return status;
+  const normalized =
+    String(status ?? '')
+      .trim()
+      .toLowerCase() === 'cancelled'
+      ? 'canceled'
+      : status;
+  if (!ST[normalized]) throw new DomainError(`Invalid status "${status}". Expected one of: ${Object.keys(ST).join(', ')}`);
+  return normalized;
 }
 function validatePriority(priority) {
   if (!PR[priority]) throw new DomainError(`Invalid priority "${priority}". Expected one of: ${Object.keys(PR).join(', ')}`);
@@ -554,6 +560,8 @@ export function createTask(data, fields = {}, opts = {}) {
   };
   if (status === 'done') t.completedAt = fields.completedAt ?? now;
   if (fields.completedAt === null) t.completedAt = null;
+  if (status === 'canceled') t.canceledAt = fields.canceledAt ?? now;
+  if (fields.canceledAt === null) t.canceledAt = null;
   data.tasks.push(t);
   logActivity(data, 'created', t, '', { by, now });
   return t;
@@ -586,13 +594,17 @@ export function duplicateTask(data, taskOrRef, opts = {}) {
       updated: now,
       fav: false,
       completedAt: status === 'done' ? now : null,
+      canceledAt: status === 'canceled' ? now : null,
     },
     { by, now },
   );
   if (status !== 'done') {
     delete copy.completedAt;
-    delete copy.prevStatus;
   }
+  if (status !== 'canceled') {
+    delete copy.canceledAt;
+  }
+  if (!isClosedStatus(status)) delete copy.prevStatus;
   return copy;
 }
 
@@ -682,11 +694,18 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
     if (k === 'status') {
       if (nv === 'done') {
         t.completedAt = now;
-        t.prevStatus = old;
+        t.canceledAt = null;
+        if (!isClosedStatus(old)) t.prevStatus = old;
         completed = true;
         logActivity(data, 'completed', t, '', { by, now });
+      } else if (nv === 'canceled') {
+        t.canceledAt = now;
+        t.completedAt = null;
+        if (!isClosedStatus(old)) t.prevStatus = old;
+        logActivity(data, 'canceled', t, '', { by, now });
       } else {
         if (old === 'done') t.completedAt = null;
+        if (old === 'canceled') t.canceledAt = null;
         logActivity(data, 'moved', t, `from ${ST[old].name} to ${ST[nv].name}`, { by, now });
       }
       if (nv === 'done' && t.recur && t.due) {
@@ -709,6 +728,7 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
               assignee: validMemberId(data, s.assignee),
             })),
             completedAt: null,
+            canceledAt: null,
             attachments: [],
             prs: [],
           },
@@ -899,14 +919,16 @@ export function formatTaskForApi(data, t) {
 export function formatProjectForApi(data, p, now = Date.now()) {
   const ts = tasksOfProject(data, p.id);
   const doneCount = ts.filter(t => t.status === 'done').length;
+  const canceledCount = ts.filter(t => t.status === 'canceled').length;
   return {
     ...p,
     leadName: findMember(data, p.lead)?.name || null,
     taskCount: ts.length,
-    openCount: ts.length - doneCount,
+    openCount: ts.filter(t => !isClosedStatus(t.status)).length,
     doneCount,
+    canceledCount,
     overdueCount: ts.filter(t => isTaskOverdue(t, now)).length,
-    progress: ts.length ? Math.round((doneCount / ts.length) * 100) : 0,
+    progress: projectProgress(data, p.id),
   };
 }
 
@@ -932,9 +954,12 @@ export function queryTasks(data, filters = {}, opts = {}) {
   if (filters.status) {
     const vals = String(filters.status)
       .split(',')
-      .map(s => s.trim().toLowerCase())
+      .map(s => {
+        const v = s.trim().toLowerCase();
+        return v === 'cancelled' ? 'canceled' : v;
+      })
       .filter(Boolean);
-    out = out.filter(t => vals.some(v => (v === 'open' ? t.status !== 'done' : t.status === v)));
+    out = out.filter(t => vals.some(v => (v === 'open' ? !isClosedStatus(t.status) : t.status === v)));
   }
   if (filters.priority) {
     const vals = new Set(
@@ -967,8 +992,8 @@ export function queryTasks(data, filters = {}, opts = {}) {
       if (!t.due) return false;
       const n = diffD(parse(t.due), today);
       if (v === 'overdue') return isTaskOverdue(t, now);
-      if (v === 'today') return t.status !== 'done' && n === 0;
-      if (v === 'week') return t.status !== 'done' && n >= 0 && n <= 7;
+      if (v === 'today') return !isClosedStatus(t.status) && n === 0;
+      if (v === 'week') return !isClosedStatus(t.status) && n >= 0 && n <= 7;
       if (isIsoDate(v)) return t.due === v;
       return true;
     });
@@ -1860,8 +1885,9 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
         if (t.status === 'backlog' || t.status === 'todo') applyTaskPatch(data, t, { status: 'progress' }, { by, now });
       } else if (becameOpenReady) {
         if (nextLink.closing) {
+          const closedAt = t.status === 'done' ? t.completedAt : t.status === 'canceled' ? t.canceledAt : 0;
           const reopenCompleted =
-            t.status === 'done' && (prev?.state === 'closed' || (nextLink.createdAt && t.completedAt && nextLink.createdAt > t.completedAt));
+            isClosedStatus(t.status) && (prev?.state === 'closed' || Boolean(nextLink.createdAt && closedAt && nextLink.createdAt > closedAt));
           if (['backlog', 'todo', 'progress'].includes(t.status) || reopenCompleted) {
             applyTaskPatch(data, t, { status: 'review' }, { by, now });
           }
@@ -1875,7 +1901,7 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
           const waitingOnStack = isIncompleteStackMerge(t.prs, nextLink, preMerged) || nowUnsatisfied.some(p => isNewerPartialThan(p, nextLink));
           if (waitingOnStack) {
             if (t.status === 'backlog' || t.status === 'todo') applyTaskPatch(data, t, { status: 'progress' }, { by, now });
-          } else if (t.status !== 'done') {
+          } else if (t.status !== 'done' && (t.status !== 'canceled' || !t.canceledAt || !nextLink.mergedAt || nextLink.mergedAt > t.canceledAt)) {
             applyTaskPatch(data, t, { status: 'done' }, { by, now });
           }
         }
@@ -1885,7 +1911,12 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
           const nowUnsatisfied = unsatisfiedMergedPartials(t.prs, preMerged);
           const nowKeys = new Set(nowUnsatisfied.map(p => `${p.repo.toLowerCase()}#${p.number}`));
           const newlySatisfied = prevUnsatisfied.some(p => !nowKeys.has(`${p.repo.toLowerCase()}#${p.number}`));
-          if (newlySatisfied && !nowUnsatisfied.some(p => isNewerPartialThan(p, nextLink)) && t.status !== 'done') {
+          if (
+            newlySatisfied &&
+            !nowUnsatisfied.some(p => isNewerPartialThan(p, nextLink)) &&
+            t.status !== 'done' &&
+            (t.status !== 'canceled' || !t.canceledAt || !nextLink.mergedAt || nextLink.mergedAt > t.canceledAt)
+          ) {
             applyTaskPatch(data, t, { status: 'done' }, { by, now });
           }
         }

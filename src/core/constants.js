@@ -5,8 +5,10 @@ export const STATUSES = [
   { id: 'progress', name: 'In Progress' },
   { id: 'review', name: 'Review' },
   { id: 'done', name: 'Done' },
+  { id: 'canceled', name: 'Canceled' },
 ];
 export const ST = Object.fromEntries(STATUSES.map(s => [s.id, s]));
+export const isClosedStatus = s => s === 'done' || s === 'canceled';
 export const PRIOS = [
   { id: 'urgent', name: 'Urgent', w: 4 },
   { id: 'high', name: 'High', w: 3 },
