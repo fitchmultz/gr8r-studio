@@ -83,6 +83,25 @@ test('gr8r CLI manages config, projects, tasks, Markdown stdin, subtasks, commen
   const unconfigured = new Gr8rClient({ env });
   assert.equal(unconfigured.apiBase, 'https://alienarchy.tail854973.ts.net:8443/api');
 
+  // Pre-connect timeout stamps ETIMEDOUT and enters the .ts.net auto-proxy check.
+  const blackholeClient = new Gr8rClient({ url: 'http://100.64.0.1:8443', proxy: '', env });
+  await assert.rejects(
+    () => blackholeClient.sendRaw('/health', { timeoutMs: 40 }),
+    err => {
+      assert.ok(['ETIMEDOUT', 'ENETUNREACH', 'EHOSTUNREACH', 'ECONNREFUSED'].includes(err?.code));
+      return true;
+    },
+  );
+
+  const slowSrv = http.createServer(() => {});
+  await new Promise(resolve => slowSrv.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => slowSrv.close(resolve)));
+  const slowClient = new Gr8rClient({ url: `http://127.0.0.1:${slowSrv.address().port}`, proxy: '', env });
+  await assert.rejects(
+    () => slowClient.sendRaw('/health', { timeoutMs: 40 }),
+    err => err?.code === 'ERR_HTTP_REQUEST_TIMEOUT',
+  );
+
   let r = await invoke(['config', 'set', '--url', baseUrl, '--proxy', proxy.url], { env });
   assert.equal(r.code, 0);
 

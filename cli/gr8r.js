@@ -84,6 +84,7 @@ function rawHttpRequest(targetUrl, { method = 'GET', headers = {}, body, proxyUr
     : false;
 
   return new Promise((resolve, reject) => {
+    let connected = false;
     const req = mod.request(
       u,
       {
@@ -107,7 +108,18 @@ function rawHttpRequest(targetUrl, { method = 'GET', headers = {}, body, proxyUr
         });
       },
     );
-    req.once('timeout', () => req.destroy(new Error(`Request timed out: ${method} ${u.href}`)));
+    req.once('socket', sock => {
+      if (!sock.connecting) connected = true;
+      else
+        sock.once('connect', () => {
+          connected = true;
+        });
+    });
+    req.once('timeout', () => {
+      const err = new Error(`Request timed out: ${method} ${u.href}`);
+      err.code = connected ? 'ERR_HTTP_REQUEST_TIMEOUT' : 'ETIMEDOUT';
+      req.destroy(err);
+    });
     req.once('error', reject);
     if (payload) req.write(payload);
     req.end();
