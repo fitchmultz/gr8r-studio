@@ -4,8 +4,9 @@
 import { ago, esc, relDate } from '../core/utils.js';
 import { ic } from '../core/icons.js';
 import { PR, ST, isClosedStatus } from '../core/constants.js';
+import { openDepsOfTask } from '../core/domain.js';
 import { D, S, childrenOf, commentsOf, isOver, mem, pColor, proj, task } from '../core/store.js';
-import { av, dueHtml, empty, lbl, prIcon, prPill, stIcon, stPill } from '../ui/helpers.js';
+import { agentBadge, av, dueHtml, empty, lbl, prIcon, prPill, stIcon, stPill } from '../ui/helpers.js';
 import { fxc } from '../shell/render.js';
 
 /* ---------- shared list renderer ---------- */
@@ -48,6 +49,7 @@ export function taskRow(t, cols, tpl, opt = {}) {
   const kids = childrenOf(t.id);
   const activeKids = kids.filter(c => c.status !== 'canceled');
   const doneKids = activeKids.filter(c => c.status === 'done').length;
+  const openDeps = openDepsOfTask(D(), t);
   const sd = t.subtasks.filter(s => s.done).length;
   return `<div class="trow ${isClosedStatus(t.status) ? 'done' : ''} ${sel ? 'sel' : ''}${fxc('done', t.id)}${fxc('added', t.id)}" style="--cols:${tpl}" data-task-row="${t.id}" data-group="${opt.group || ''}" data-lkey="${opt.key || ''}" data-ctx="task" data-id="${t.id}">
     <div class="handle" draggable="${opt.drag !== false}" data-drag-row="${t.id}" aria-hidden="true">${opt.drag !== false ? ic('grip-vertical', 14) : ''}</div>
@@ -61,6 +63,8 @@ export function taskRow(t, cols, tpl, opt = {}) {
       <span class="key">${t.key}</span>
       ${parentTask ? `<span class="meta-mini mono" data-tip="Sub-issue of ${esc(parentTask.key)}: ${esc(parentTask.title)}">↳ ${parentTask.key}</span>` : ''}
       ${editing ? `<input class="inline-in" id="edit-title" data-in="noop" data-blur="commitTitle" data-key-enter="commitTitle" data-id="${t.id}" value="${esc(t.title)}" aria-label="Task title">` : `<span class="tt">${esc(t.title)}</span>`}
+      ${t.claimedBy ? `<span class="meta-mini mono" data-tip="Claimed by ${esc(t.claimedBy)}">${ic('bot', 11)}${esc(t.claimedBy)}</span>` : ''}
+      ${!isClosedStatus(t.status) && openDeps.length ? `<span class="meta-mini" data-tip="Blocked by ${esc(openDeps.map(d => d.key).join(', '))}" style="color:var(--amber)">${ic('lock', 11)}</span>` : ''}
       ${t.recur ? `<span class="meta-mini" data-tip="Repeats ${t.recur.toLowerCase()}">${ic('repeat', 11)}</span>` : ''}
       ${kids.length ? `<span class="meta-mini" data-tip="Sub-issues">${ic('git-fork', 11)}${doneKids}/${activeKids.length}</span>` : ''}
       ${t.subtasks.length ? `<span class="meta-mini">${ic('list-checks', 11)}${sd}/${t.subtasks.length}</span>` : ''}
@@ -137,7 +141,7 @@ export function actHtml(a, opt = {}) {
     : p
       ? `<span class="obj" data-a="go" data-r="project" data-id="${p.id}">${esc(p.name)}</span>`
       : '';
-  return `<div class="fitem">${av(a.by, 'sm')}<div class="grow"><b>${esc(m?.id === D().me ? 'You' : m?.name || 'Someone')}</b> <span class="muted">${esc(a.verb)}</span> ${obj} ${a.extra ? `<span class="muted">${esc(a.extra)}</span>` : ''}${opt.proj && p && t ? ` <span class="faint">in ${esc(p.name)}</span>` : ''}</div><time>${ago(a.at)}</time></div>`;
+  return `<div class="fitem">${av(a.by, 'sm')}<div class="grow"><b>${esc(m?.id === D().me ? 'You' : m?.name || 'Someone')}</b> ${a.agent ? agentBadge(a.agent) + ' ' : ''}<span class="muted">${esc(a.verb)}</span> ${obj} ${a.extra ? `<span class="muted">${esc(a.extra)}</span>` : ''}${opt.proj && p && t ? ` <span class="faint">in ${esc(p.name)}</span>` : ''}</div><time>${ago(a.at)}</time></div>`;
 }
 export function miniRow(t, opt = {}) {
   const p = proj(t.project);

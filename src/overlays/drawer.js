@@ -3,9 +3,10 @@
    ===================================================================== */
 import { MOD, TODAY, ago, diffD, esc, fmtDate, parse, relDate } from '../core/utils.js';
 import { ic } from '../core/icons.js';
+import { openDepsOfTask } from '../core/domain.js';
 import { isClosedStatus } from '../core/constants.js';
 import { D, S, childrenOf, commentsOf, isOver, mem, pColor, proj, task } from '../core/store.js';
-import { FT, av, filePrev, fileType, fmtComment, lbl, progBar, stIcon } from '../ui/helpers.js';
+import { FT, agentBadge, av, filePrev, fileType, fmtComment, lbl, progBar, stIcon } from '../ui/helpers.js';
 import { fxc } from '../shell/render.js';
 import { cellAssignee, cellDue, cellPrio, cellProject, cellStatus } from '../components/task-list.js';
 import { modalHtml } from './modals.js';
@@ -36,6 +37,7 @@ export function drawerHtml(t) {
   const kids = childrenOf(t.id);
   const activeKids = kids.filter(c => c.status !== 'canceled');
   const doneKids = activeKids.filter(c => c.status === 'done').length;
+  const openDeps = openDepsOfTask(D(), t);
   const sd = t.subtasks.filter(s => s.done).length;
   const acts = D().activity.filter(a => a.task === t.id);
   const tab = u.drawerTab;
@@ -67,6 +69,7 @@ export function drawerHtml(t) {
         ? subtaskHtml(t, sub)
         : `
       ${t.status === 'done' ? `<div class="alert ok" style="margin-bottom:12px">${ic('circle-check', 15)}<span>Completed ${t.completedAt ? ago(t.completedAt) : ''}. <button class="link" data-a="toggleDone" data-id="${t.id}">Reopen task</button></span></div>` : t.status === 'canceled' ? `<div class="alert" style="margin-bottom:12px">${ic('circle-slash', 15)}<span>Canceled ${t.canceledAt ? ago(t.canceledAt) : ''}. <button class="link" data-a="toggleDone" data-id="${t.id}">Reopen task</button></span></div>` : isOver(t) ? `<div class="alert danger" style="margin-bottom:12px">${ic('clock-alert', 15)}<span>Overdue by ${-diffD(parse(t.due), TODAY)} day${-diffD(parse(t.due), TODAY) > 1 ? 's' : ''}. <button class="link" data-a="pop" data-pop="date" data-field="due" data-id="${t.id}">Reschedule</button></span></div>` : ''}
+      ${t.claimedBy ? `<div class="alert info" style="margin-bottom:12px">${ic('bot', 15)}<span>Claimed by <code class="mono">${esc(t.claimedBy)}</code>${t.claimedAt ? ` · ${ago(t.claimedAt)}` : ''}. <button class="link" data-a="releaseTaskClaim" data-id="${t.id}">Release claim</button></span></div>` : openDeps.length ? `<div class="alert" style="margin-bottom:12px">${ic('lock', 15)}<span>Blocked by ${openDeps.map(d => `<button class="link mono" data-a="openTask" data-id="${d.id}">${d.key}</button>`).join(', ')}.</span></div>` : ''}
       <textarea class="ttl-edit" id="d-title" rows="1" data-autosize data-blur="commitDrawerTitle" data-key-enter="blur" data-id="${t.id}" aria-label="Task title">${esc(t.title)}</textarea>
       <dl class="kv" style="margin-top:12px;${u.drawerFull ? 'grid-template-columns:112px minmax(0,1fr) 112px minmax(0,1fr)' : ''}">
         ${prop('circle-dot', 'Status', cellStatus(t))}
@@ -160,7 +163,7 @@ export function drawerHtml(t) {
             ${ment.length ? `<div class="pop" style="position:absolute;top:auto;bottom:calc(100% + 4px);left:0">${ment.map(m => `<button class="mi" data-a="pickMention" data-id="${t.id}" data-name="${esc(m.name)}">${av(m.id, 'sm', false)}${esc(m.name)}<span class="r">${esc(m.title)}</span></button>`).join('')}</div>` : ''}
           </div></div>`
             : `
-          <div style="padding-top:4px">${acts.map(a => `<div class="act-line"><span class="ico">${av(a.by, 'sm', false)}</span><span class="grow"><b>${esc(mem(a.by)?.id === D().me ? 'You' : mem(a.by)?.name)}</b> ${esc(a.verb.replace(/ of$/, ''))}${a.extra ? ' ' + esc(a.extra) : ''}</span><time class="faint" style="font-size:11.5px">${ago(a.at)}</time></div>`).join('')}
+          <div style="padding-top:4px">${acts.map(a => `<div class="act-line"><span class="ico">${av(a.by, 'sm', false)}</span><span class="grow"><b>${esc(mem(a.by)?.id === D().me ? 'You' : mem(a.by)?.name)}</b> ${a.agent ? agentBadge(a.agent) + ' ' : ''}${esc(a.verb.replace(/ of$/, ''))}${a.extra ? ' ' + esc(a.extra) : ''}</span><time class="faint" style="font-size:11.5px">${ago(a.at)}</time></div>`).join('')}
           <div class="act-line"><span class="ico">${ic('plus', 13)}</span><span class="grow">Task created</span><time class="faint" style="font-size:11.5px">${ago(t.created)}</time></div></div>`
         }
       </div>`
@@ -171,7 +174,7 @@ export function drawerHtml(t) {
 export function commentHtml(c) {
   const m = mem(c.by);
   const mine = c.by === D().me;
-  return `<div class="cmt">${av(c.by, 'md', false)}<div class="body"><div class="who"><b>${esc(m?.name)}</b><time>${ago(c.at)}</time>${mine ? `<span class="sp"></span><button class="ibtn ibtn-xs" data-a="delComment" data-id="${c.id}" aria-label="Delete comment" data-tip="Delete">${ic('trash-2', 12)}</button>` : ''}</div><div class="txt">${fmtComment(c.text)}</div>
+  return `<div class="cmt">${av(c.by, 'md', false)}<div class="body"><div class="who"><b>${esc(m?.name)}</b>${c.agent ? agentBadge(c.agent) : ''}<time>${ago(c.at)}</time>${mine ? `<span class="sp"></span><button class="ibtn ibtn-xs" data-a="delComment" data-id="${c.id}" aria-label="Delete comment" data-tip="Delete">${ic('trash-2', 12)}</button>` : ''}</div><div class="txt">${fmtComment(c.text)}</div>
     <div class="reacts">${Object.entries(c.re || {})
       .filter(([, v]) => v.length)
       .map(

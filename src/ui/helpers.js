@@ -49,6 +49,10 @@ export const lbl = id => {
   const l = labelOf(id) || LB[id];
   return l ? `<span class="lbl" style="--c:${l.c}"><i></i>${esc(l.name)}</span>` : '';
 };
+export const agentBadge = agent =>
+  agent
+    ? `<span class="badge" style="gap:4px;font-family:var(--mono);font-size:10.5px;height:18px;padding:0 6px" title="Agent: ${esc(agent)}">${ic('bot', 11)}${esc(agent)}</span>`
+    : '';
 export const pIcon = (p, cls = '', s = 15) => `<span class="picon ${cls}" style="--c:${pColor(p)}">${ic(p.icon, s)}</span>`;
 export const pStatus = s => `<span class="pstatus" style="--c:${PSTAT[s].c}"><i></i>${PSTAT[s].name}</span>`;
 export function dueHtml(t, withIcon = true) {

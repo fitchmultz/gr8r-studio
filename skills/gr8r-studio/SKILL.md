@@ -44,6 +44,7 @@ All commands accept human keys (`PID`, `PID-201`, `me`, `none`) as well as inter
 gr8r projects
 gr8r project view PID
 gr8r tasks -p PID -s open
+gr8r tasks -p PID --ready
 gr8r task view PID-201
 gr8r search "UsageDoc"
 gr8r activity -p PID --limit 20
@@ -84,6 +85,13 @@ Valid vocabulary values (verify with `gr8r status` if unsure):
 ### Track progress, subtasks, and verification receipts
 
 ```bash
+# Atomically claim a specific ready task (or --next highest-priority ready slice) for this agent session
+gr8r task claim PID-201
+gr8r task claim --next -p PID
+
+# Release a claim (for example when pausing or handing off)
+gr8r task release PID-201 --status todo
+
 # Move a task to In Progress
 gr8r task start PID-201 -a me
 

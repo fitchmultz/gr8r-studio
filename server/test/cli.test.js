@@ -245,4 +245,19 @@ test('gr8r CLI guides user to GR8R_TOKEN when /api/config bootstrap is disabled,
     env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' },
   });
   assert.match(parentView.stdout, /--- Sub-issues \(0\/1\) ---\n- \[todo\] PID-203\s+Child slice/);
+
+  const claimNext = await invoke(['task', 'claim', '--next', '-p', 'PID', '--agent', 'pi:worker-a'], {
+    env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' },
+  });
+  assert.match(claimNext.stdout, /Claimed PID-202 \[pi:worker-a\] -> progress/);
+  await assert.rejects(
+    () => invoke(['task', 'claim', 'PID-202', '--agent', 'pi:worker-b'], { env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' } }),
+    /already claimed by pi:worker-a/,
+  );
+  const autoEnv = { ...baseEnv, GR8R_TOKEN: 'strict-secret', PI_SESSION_ID: 'abcdef12-3456-7890-abcd-ef1234567890' };
+  await invoke(['comment', 'add', 'PID-202', 'Progress note from Pi session'], { env: autoEnv });
+  const viewWithAgent = await invoke(['task', 'view', 'PID-202'], { env: autoEnv });
+  assert.match(viewWithAgent.stdout, /Claimed by: pi:worker-a/);
+  assert.match(viewWithAgent.stdout, /\[pi:abcdef12\]/);
+  await invoke(['task', 'release', 'PID-202', '--status', 'todo'], { env: autoEnv });
 });

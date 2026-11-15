@@ -8,6 +8,8 @@ import {
   applyTaskPatch,
   applyWorkspacePatch,
   childrenOfTask,
+  claimNextReadyTask,
+  claimTask,
   commentsOfTask,
   createDefaultState,
   createLabel,
@@ -25,8 +27,10 @@ import {
   formatProjectForApi,
   formatTaskForApi,
   isWorkspacePatchEmpty,
+  normalizeAgentName,
   promoteSubtask,
   queryTasks,
+  releaseTask,
   removeSubtask,
   requireProject,
   requireTask,
@@ -64,6 +68,18 @@ function enrichActivity(data, a) {
 function resolveActor(data, rawBy) {
   if (rawBy === undefined || rawBy === null || rawBy === '') return data.me;
   return resolveMember(data, rawBy) || data.me;
+}
+
+function resolveRequestAgent(req, body) {
+  if (body && body.agent !== undefined) return normalizeAgentName(body.agent);
+  const hdr = req.headers?.['x-gr8r-agent'];
+  const raw = Array.isArray(hdr) ? hdr[0] : hdr;
+  if (!raw) return null;
+  try {
+    return normalizeAgentName(decodeURIComponent(raw));
+  } catch {
+    return normalizeAgentName(raw);
+  }
 }
 
 function mapApiTaskInput(body) {
@@ -222,6 +238,7 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
       const draft = structuredClone(cur.state);
       const { changed, updatedTasks } = syncGitHubPullRequests(draft.data, rawList, {
         by: resolveActor(draft.data, body.by),
+        agent: resolveRequestAgent(req, body),
       });
       const rev = changed ? commitState(draft).rev : cur.rev;
       return send(res, 200, {
@@ -322,16 +339,49 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
       if (segments.length === 1 && method === 'POST') {
         const result = await mutate((data, body) => {
           const by = resolveActor(data, body.by);
+          const agent = resolveRequestAgent(req, body);
           if (Array.isArray(body.tasks)) {
             if (!body.tasks.length) throw new DomainError('tasks array cannot be empty');
-            const created = body.tasks.map(item => createTask(data, mapApiTaskInput({ ...(body.project ? { project: body.project } : {}), ...item }), { by }));
+            const created = body.tasks.map(item =>
+              createTask(data, mapApiTaskInput({ ...(body.project ? { project: body.project } : {}), ...item }), { by, agent }),
+            );
             return { tasks: created.map(t => formatTaskForApi(data, t)) };
           }
-          const t = createTask(data, mapApiTaskInput(body), { by });
+          const t = createTask(data, mapApiTaskInput(body), { by, agent });
           return { task: formatTaskForApi(data, t) };
         });
         if (result) send(res, 201, result);
         return;
+      }
+      if (segments.length === 2 && segments[1] === 'claim-next' && method === 'POST') {
+        const body = parseJsonBody(await readBody(req));
+        const cur = getStore();
+        if (body.ifRev !== undefined) {
+          if (!Number.isInteger(body.ifRev)) throw new DomainError('ifRev must be an integer', 400);
+          if (body.ifRev !== cur.rev) {
+            return send(res, 409, { error: 'conflict', rev: cur.rev });
+          }
+        }
+        const draft = cur.state ? structuredClone(cur.state) : createDefaultState();
+        const by = resolveActor(draft.data, body.by);
+        const agent = resolveRequestAgent(req, body);
+        const claimed = claimNextReadyTask(
+          draft.data,
+          {
+            project: body.project,
+            parent: body.parent,
+            label: body.label,
+            priority: body.priority,
+            assignee: body.assignee,
+            status: body.status,
+          },
+          { by, agent, status: body.claimStatus },
+        );
+        if (!claimed) {
+          return send(res, 200, { rev: cur.rev, task: null });
+        }
+        const committed = commitState(draft);
+        return send(res, 200, { rev: committed.rev, task: formatTaskForApi(draft.data, claimed) });
       }
       if (segments.length === 2) {
         const ref = segments[1];
@@ -349,7 +399,10 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
         }
         if (method === 'PATCH') {
           const result = await mutate((data, body) => {
-            const out = applyTaskPatch(data, ref, mapApiTaskInput(body), { by: resolveActor(data, body.by) });
+            const out = applyTaskPatch(data, ref, mapApiTaskInput(body), {
+              by: resolveActor(data, body.by),
+              agent: resolveRequestAgent(req, body),
+            });
             return {
               task: formatTaskForApi(data, out.task),
               spawned: out.spawned ? formatTaskForApi(data, out.spawned) : null,
@@ -368,13 +421,37 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
           return;
         }
       }
+      if (segments.length === 3 && (segments[2] === 'claim' || segments[2] === 'release') && method === 'POST') {
+        const taskRef = segments[1];
+        const isClaim = segments[2] === 'claim';
+        const result = await mutate((data, body) => {
+          const by = resolveActor(data, body.by);
+          const agent = resolveRequestAgent(req, body);
+          const t = isClaim
+            ? claimTask(data, taskRef, {
+                by,
+                agent,
+                force: !!body.force,
+                status: body.status,
+                assignee: body.assignee,
+              })
+            : releaseTask(data, taskRef, {
+                by,
+                agent,
+                status: body.status,
+              });
+          return { task: formatTaskForApi(data, t) };
+        });
+        if (result) send(res, 200, result);
+        return;
+      }
 
       // /api/tasks/:ref/subtasks[/:subId[/promote]]
       if (segments.length >= 3 && segments[2] === 'subtasks') {
         const taskRef = segments[1];
         if (segments.length === 3 && method === 'POST') {
           const result = await mutate((data, body) => {
-            const sub = addSubtask(data, taskRef, body, { by: resolveActor(data, body.by) });
+            const sub = addSubtask(data, taskRef, body, { by: resolveActor(data, body.by), agent: resolveRequestAgent(req, body) });
             const t = requireTask(data, taskRef);
             return { subtask: sub, task: formatTaskForApi(data, t) };
           });
@@ -385,7 +462,10 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
           const subRef = segments[3];
           if (method === 'PATCH') {
             const result = await mutate((data, body) => {
-              const sub = updateSubtask(data, taskRef, subRef, body, { by: resolveActor(data, body.by) });
+              const sub = updateSubtask(data, taskRef, subRef, body, {
+                by: resolveActor(data, body.by),
+                agent: resolveRequestAgent(req, body),
+              });
               const t = requireTask(data, taskRef);
               return { subtask: sub, task: formatTaskForApi(data, t) };
             });
@@ -405,7 +485,10 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
         if (segments.length === 5 && segments[4] === 'promote' && method === 'POST') {
           const subRef = segments[3];
           const result = await mutate((data, body) => {
-            const promoted = promoteSubtask(data, taskRef, subRef, { by: resolveActor(data, body.by) });
+            const promoted = promoteSubtask(data, taskRef, subRef, {
+              by: resolveActor(data, body.by),
+              agent: resolveRequestAgent(req, body),
+            });
             const parent = requireTask(data, taskRef);
             return {
               task: formatTaskForApi(data, promoted),
@@ -428,7 +511,10 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
         }
         if (segments.length === 3 && method === 'POST') {
           const result = await mutate((data, body) => {
-            const c = addComment(data, taskRef, body.text, { by: resolveActor(data, body.by) });
+            const c = addComment(data, taskRef, body.text, {
+              by: resolveActor(data, body.by),
+              agent: resolveRequestAgent(req, body),
+            });
             const t = requireTask(data, taskRef);
             return { comment: enrichComment(data, c), task: formatTaskForApi(data, t) };
           });

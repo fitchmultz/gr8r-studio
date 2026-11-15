@@ -54,6 +54,10 @@ export const allTasksOf = (data, actor = data.me) => data.tasks.filter(t => !t.a
 export const commentsOfTask = (data, tid) => data.comments.filter(c => c.task === tid);
 export const childrenOfTask = (data, tid) => data.tasks.filter(t => !t.archived && t.parent === tid);
 export const isTaskOverdue = (t, now = Date.now()) => !!(t.due && !isClosedStatus(t.status) && diffD(parse(t.due), todayDate(now)) < 0);
+export const openDepsOfTask = (data, t) => (t.deps || []).map(id => findTask(data, id)).filter(d => d && !d.archived && !isClosedStatus(d.status));
+export const isTaskBlocked = (data, t) => openDepsOfTask(data, t).length > 0;
+export const isTaskReady = (data, t) =>
+  !!t && !t.archived && !findProject(data, t.project)?.archived && (t.status === 'backlog' || t.status === 'todo') && !t.claimedBy && !isTaskBlocked(data, t);
 
 export function projectProgress(data, pid) {
   const active = tasksOfProject(data, pid).filter(t => t.status !== 'canceled');
@@ -388,20 +392,30 @@ function resolveDescInput(fields) {
   return undefined;
 }
 
+export function normalizeAgentName(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim().replace(/\s+/g, ' ');
+  if (!s || ['none', 'null', 'clear'].includes(s.toLowerCase())) return null;
+  return s.slice(0, 120);
+}
+
 /* ---------- activity ---------- */
 export function logActivity(data, verb, task = null, extra = '', opts = {}) {
   const now = opts.now ?? Date.now();
   const by = opts.by ?? data.me;
+  const agent = normalizeAgentName(opts.agent);
   const project = opts.projectId ?? task?.project ?? null;
-  data.activity.unshift({
+  const entry = {
     id: uid('a'),
     by,
+    ...(agent ? { agent } : {}),
     verb,
     task: task?.id || null,
     project,
     at: now,
     extra,
-  });
+  };
+  data.activity.unshift(entry);
   if (task) task.updated = now;
 }
 
@@ -560,6 +574,14 @@ export function updateProject(data, projectOrRef, patch = {}, opts = {}) {
   if (patch.archived !== undefined && !!patch.archived !== !!p.archived) {
     p.archived = !!patch.archived;
     p.archivedAt = p.archived ? now : null;
+    if (p.archived) {
+      for (const t of data.tasks) {
+        if (t.project === p.id && (t.claimedBy || t.claimedAt)) {
+          t.claimedBy = null;
+          t.claimedAt = null;
+        }
+      }
+    }
   }
   return p;
 }
@@ -693,6 +715,7 @@ export function normalizeTaskPrLink(raw) {
 export function createTask(data, fields = {}, opts = {}) {
   const now = opts.now ?? Date.now();
   const by = opts.by ?? data.me;
+  const agent = normalizeAgentName(opts.agent);
   const p = fields.project ? requireProject(data, fields.project) : visibleProjectsOf(data, by)[0] || data.projects[0];
   if (!p) throw new DomainError('No project available for new task');
   const rawTitle = fields.title === undefined && opts.allowUntitled ? 'Untitled' : String(fields.title ?? '').trim();
@@ -739,14 +762,20 @@ export function createTask(data, fields = {}, opts = {}) {
   if (fields.completedAt === null) t.completedAt = null;
   if (status === 'canceled') t.canceledAt = fields.canceledAt ?? now;
   if (fields.canceledAt === null) t.canceledAt = null;
+  const initClaim = normalizeAgentName(fields.claimedBy);
+  if (initClaim && !isClosedStatus(status)) {
+    t.claimedBy = initClaim;
+    t.claimedAt = fields.claimedAt ?? now;
+  }
   data.tasks.push(t);
-  logActivity(data, 'created', t, '', { by, now });
+  logActivity(data, 'created', t, '', { by, agent, now });
   return t;
 }
 
 export function duplicateTask(data, taskOrRef, opts = {}) {
   const now = opts.now ?? Date.now();
   const by = opts.by ?? data.me;
+  const agent = normalizeAgentName(opts.agent);
   const src = requireTask(data, taskOrRef);
   const targetProject = requireProject(data, opts.project ?? src.project);
   const status = opts.status ?? src.status;
@@ -771,10 +800,12 @@ export function duplicateTask(data, taskOrRef, opts = {}) {
       created: now,
       updated: now,
       fav: false,
+      claimedBy: null,
+      claimedAt: null,
       completedAt: status === 'done' ? now : null,
       canceledAt: status === 'canceled' ? now : null,
     },
-    { by, now },
+    { by, agent, now },
   );
   if (status !== 'done') {
     delete copy.completedAt;
@@ -783,12 +814,15 @@ export function duplicateTask(data, taskOrRef, opts = {}) {
     delete copy.canceledAt;
   }
   if (!isClosedStatus(status)) delete copy.prevStatus;
+  delete copy.claimedBy;
+  delete copy.claimedAt;
   return copy;
 }
 
 export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
   const now = opts.now ?? Date.now();
   const by = opts.by ?? data.me;
+  const agent = normalizeAgentName(opts.agent);
   const fmt = opts.fmtDate || (s => formatDateWith(s, 'MMM d', false, todayDate(now)));
   const t = requireTask(data, taskOrRef);
   const patch = {};
@@ -862,6 +896,15 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
   }
   if (rawPatch.archived !== undefined) patch.archived = !!rawPatch.archived;
   if (rawPatch.status !== undefined) patch.status = validateStatus(rawPatch.status);
+  if (rawPatch.claimedBy !== undefined) {
+    const nextClaim = normalizeAgentName(rawPatch.claimedBy);
+    const nextStatus = patch.status ?? t.status;
+    const nextArchived = patch.archived ?? !!t.archived;
+    if (nextClaim && (nextArchived || isClosedStatus(nextStatus) || findProject(data, patch.project ?? t.project)?.archived)) {
+      throw new DomainError(`Cannot claim closed or archived task ${t.key}`, 409);
+    }
+    patch.claimedBy = nextClaim;
+  }
 
   const messages = [];
   let completed = false;
@@ -875,21 +918,25 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
     changed = true;
     t[k] = nv;
     if (k === 'status') {
+      if ((isClosedStatus(nv) || nv === 'backlog' || nv === 'todo') && rawPatch.claimedBy === undefined) {
+        t.claimedBy = null;
+        t.claimedAt = null;
+      }
       if (nv === 'done') {
         t.completedAt = now;
         t.canceledAt = null;
         if (!isClosedStatus(old)) t.prevStatus = old;
         completed = true;
-        logActivity(data, 'completed', t, '', { by, now });
+        logActivity(data, 'completed', t, '', { by, agent, now });
       } else if (nv === 'canceled') {
         t.canceledAt = now;
         t.completedAt = null;
         if (!isClosedStatus(old)) t.prevStatus = old;
-        logActivity(data, 'canceled', t, '', { by, now });
+        logActivity(data, 'canceled', t, '', { by, agent, now });
       } else {
         if (old === 'done') t.completedAt = null;
         if (old === 'canceled') t.canceledAt = null;
-        logActivity(data, 'moved', t, `from ${ST[old].name} to ${ST[nv].name}`, { by, now });
+        logActivity(data, 'moved', t, `from ${ST[old].name} to ${ST[nv].name}`, { by, agent, now });
       }
       if (nv === 'done' && t.recur && t.due) {
         const nd = iso(addD(parse(t.due), RECUR_DAYS[t.recur] || 7));
@@ -913,18 +960,25 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
             })),
             completedAt: null,
             canceledAt: null,
+            claimedBy: null,
+            claimedAt: null,
             attachments: [],
             prs: [],
           },
-          { by, now },
+          { by, agent, now },
         );
         delete spawned.prevStatus;
+        delete spawned.claimedBy;
+        delete spawned.claimedAt;
         messages.push(`Next “${t.title}” scheduled for ${fmt(nd)}`);
       }
-    } else if (k === 'assignee') logActivity(data, 'assigned', t, nv ? `to ${findMember(data, nv)?.name}` : '(unassigned)', { by, now });
-    else if (k === 'priority') logActivity(data, 'changed priority of', t, `to ${PR[nv].name}`, { by, now });
-    else if (k === 'due') logActivity(data, 'changed due date of', t, nv ? `to ${fmt(nv)}` : '(cleared)', { by, now });
-    else if (k === 'start') logActivity(data, 'changed start date of', t, nv ? `to ${fmt(nv)}` : '(cleared)', { by, now });
+    } else if (k === 'claimedBy') {
+      t.claimedAt = nv ? now : null;
+      logActivity(data, nv ? 'claimed' : 'released', t, nv ? `(${nv})` : '', { by, agent: nv || agent, now });
+    } else if (k === 'assignee') logActivity(data, 'assigned', t, nv ? `to ${findMember(data, nv)?.name}` : '(unassigned)', { by, agent, now });
+    else if (k === 'priority') logActivity(data, 'changed priority of', t, `to ${PR[nv].name}`, { by, agent, now });
+    else if (k === 'due') logActivity(data, 'changed due date of', t, nv ? `to ${fmt(nv)}` : '(cleared)', { by, agent, now });
+    else if (k === 'start') logActivity(data, 'changed start date of', t, nv ? `to ${fmt(nv)}` : '(cleared)', { by, agent, now });
     else if (k === 'project') {
       const p = requireProject(data, nv);
       t.key = nextTaskKey(data, p);
@@ -936,17 +990,19 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
           if (other.parent === t.id) other.parent = null;
         }
       }
-      logActivity(data, 'moved', t, `to ${p.name}`, { by, now });
+      logActivity(data, 'moved', t, `to ${p.name}`, { by, agent, now });
     } else if (k === 'parent') {
-      logActivity(data, 'set parent of', t, nv ? `to ${findTask(data, nv)?.key}` : '(none)', { by, now });
-    } else if (k === 'labels') logActivity(data, 'updated labels on', t, '', { by, now });
-    else if (k === 'title') logActivity(data, 'renamed', t, `to “${nv}”`, { by, now });
-    else if (k === 'recur') logActivity(data, 'set repeat on', t, nv ? nv.toLowerCase() : 'off', { by, now });
-    else if (k === 'estimate') logActivity(data, 'estimated', t, nv || 'none', { by, now });
-    else if (k === 'deps') logActivity(data, 'updated dependencies of', t, '', { by, now });
+      logActivity(data, 'set parent of', t, nv ? `to ${findTask(data, nv)?.key}` : '(none)', { by, agent, now });
+    } else if (k === 'labels') logActivity(data, 'updated labels on', t, '', { by, agent, now });
+    else if (k === 'title') logActivity(data, 'renamed', t, `to “${nv}”`, { by, agent, now });
+    else if (k === 'recur') logActivity(data, 'set repeat on', t, nv ? nv.toLowerCase() : 'off', { by, agent, now });
+    else if (k === 'estimate') logActivity(data, 'estimated', t, nv || 'none', { by, agent, now });
+    else if (k === 'deps') logActivity(data, 'updated dependencies of', t, '', { by, agent, now });
     else if (k === 'archived') {
       t.archivedAt = nv ? now : null;
       if (nv) {
+        t.claimedBy = null;
+        t.claimedAt = null;
         for (const other of data.tasks) {
           if (other.id !== t.id) {
             if (other.deps?.includes(t.id)) other.deps = other.deps.filter(d => d !== t.id);
@@ -956,12 +1012,80 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
       } else if (t.parent) {
         t.parent = activeProjectParent(data, t.project, t.parent, t.id);
       }
-      logActivity(data, nv ? 'archived' : 'restored', t, '', { by, now });
+      logActivity(data, nv ? 'archived' : 'restored', t, '', { by, agent, now });
     }
     t.updated = now;
   }
 
   return { task: t, changed, completed, spawned, messages };
+}
+
+export function claimTask(data, taskOrRef, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const by = opts.by ?? data.me;
+  const agent = normalizeAgentName(opts.agent);
+  if (!agent) throw new DomainError('Agent identifier is required to claim a task');
+  const t = requireTask(data, taskOrRef);
+  if (t.archived || findProject(data, t.project)?.archived) throw new DomainError(`Cannot claim archived task ${t.key}`, 409);
+  if (opts.status !== undefined && isClosedStatus(validateStatus(opts.status))) {
+    throw new DomainError('Cannot claim a task into a closed status', 400);
+  }
+  if (isClosedStatus(t.status) && !opts.force) {
+    throw new DomainError(`Cannot claim closed task ${t.key} (${t.status})`, 409);
+  }
+  const openDeps = openDepsOfTask(data, t);
+  if (openDeps.length && !opts.force) {
+    throw new DomainError(`Task ${t.key} is blocked by ${openDeps.map(d => d.key).join(', ')}; pass --force to claim anyway`, 409);
+  }
+  if (t.claimedBy && t.claimedBy !== agent && !opts.force) {
+    throw new DomainError(`Task ${t.key} is already claimed by ${t.claimedBy}`, 409);
+  }
+  const prevClaim = t.claimedBy || null;
+  const patch = {};
+  if (opts.status !== undefined) {
+    patch.status = opts.status;
+  } else if (t.status === 'backlog' || t.status === 'todo' || (isClosedStatus(t.status) && opts.force)) {
+    patch.status = 'progress';
+  }
+  if (opts.assignee !== undefined) {
+    patch.assignee = opts.assignee;
+  } else if (!t.assignee) {
+    patch.assignee = validMemberId(data, by) || data.me;
+  }
+  if (Object.keys(patch).length) {
+    applyTaskPatch(data, t, patch, { by, agent, now });
+  }
+  t.claimedBy = agent;
+  t.claimedAt = now;
+  t.updated = now;
+  if (prevClaim !== agent) {
+    logActivity(data, prevClaim ? 'reclaimed' : 'claimed', t, prevClaim ? `from ${prevClaim}` : `(${agent})`, { by, agent, now });
+  }
+  return t;
+}
+
+export function releaseTask(data, taskOrRef, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const by = opts.by ?? data.me;
+  const agent = normalizeAgentName(opts.agent);
+  const t = requireTask(data, taskOrRef);
+  const prevClaim = t.claimedBy || null;
+  t.claimedBy = null;
+  t.claimedAt = null;
+  if (opts.status !== undefined) {
+    applyTaskPatch(data, t, { status: opts.status }, { by, agent, now });
+  }
+  if (prevClaim) {
+    t.updated = now;
+    logActivity(data, 'released', t, `(${prevClaim})`, { by, agent, now });
+  }
+  return t;
+}
+
+export function claimNextReadyTask(data, filters = {}, opts = {}) {
+  const ready = queryTasks(data, { ...filters, ready: true }, { now: opts.now, actor: opts.by ?? data.me });
+  if (!ready.length) return null;
+  return claimTask(data, ready[0], opts);
 }
 
 export function deleteTasks(data, idsOrRefs) {
@@ -984,16 +1108,18 @@ export function deleteTasks(data, idsOrRefs) {
 export function addSubtask(data, taskOrRef, fields, opts = {}) {
   const now = opts.now ?? Date.now();
   const by = opts.by ?? data.me;
+  const agent = normalizeAgentName(opts.agent);
   const t = requireTask(data, taskOrRef);
   const sub = normalizeSubtaskInput(data, typeof fields === 'string' ? { title: fields } : fields);
   t.subtasks.push(sub);
-  logActivity(data, 'added subtask to', t, `“${sub.title}”`, { by, now });
+  logActivity(data, 'added subtask to', t, `“${sub.title}”`, { by, agent, now });
   return sub;
 }
 
 export function updateSubtask(data, taskOrRef, subRef, patch = {}, opts = {}) {
   const now = opts.now ?? Date.now();
   const by = opts.by ?? data.me;
+  const agent = normalizeAgentName(opts.agent);
   const fmt = opts.fmtDate || (s => formatDateWith(s, 'MMM d', false, todayDate(now)));
   const t = requireTask(data, taskOrRef);
   const s = requireSubtask(t, subRef);
@@ -1007,7 +1133,7 @@ export function updateSubtask(data, taskOrRef, subRef, patch = {}, opts = {}) {
   }
   if (patch.done !== undefined && !!patch.done !== !!s.done) {
     s.done = !!patch.done;
-    logActivity(data, s.done ? 'completed subtask on' : 'reopened subtask on', t, `“${s.title}”`, { by, now });
+    logActivity(data, s.done ? 'completed subtask on' : 'reopened subtask on', t, `“${s.title}”`, { by, agent, now });
   }
   if (patch.assignee !== undefined) {
     const nv = resolveMember(data, patch.assignee);
@@ -1042,6 +1168,7 @@ export function removeSubtask(data, taskOrRef, subRef, opts = {}) {
 export function promoteSubtask(data, taskOrRef, subRef, opts = {}) {
   const now = opts.now ?? Date.now();
   const by = opts.by ?? data.me;
+  const agent = normalizeAgentName(opts.agent);
   const t = requireTask(data, taskOrRef);
   const s = requireSubtask(t, subRef);
   const promoted = createTask(
@@ -1057,10 +1184,10 @@ export function promoteSubtask(data, taskOrRef, subRef, opts = {}) {
       labels: [...t.labels],
       descMarkdown: s.note || '',
     },
-    { by, now },
+    { by, agent, now },
   );
   t.subtasks = t.subtasks.filter(x => x.id !== s.id);
-  logActivity(data, 'converted a subtask of', t, `into ${promoted.key}`, { by, now });
+  logActivity(data, 'converted a subtask of', t, `into ${promoted.key}`, { by, agent, now });
   return promoted;
 }
 
@@ -1068,12 +1195,13 @@ export function promoteSubtask(data, taskOrRef, subRef, opts = {}) {
 export function addComment(data, taskOrRef, text, opts = {}) {
   const now = opts.now ?? Date.now();
   const by = opts.by !== undefined ? resolveMember(data, opts.by) || data.me : data.me;
+  const agent = normalizeAgentName(opts.agent);
   const t = requireTask(data, taskOrRef);
   const txt = String(text ?? '').trim();
   if (!txt) throw new DomainError('Comment text cannot be empty');
-  const c = { id: uid('c'), task: t.id, by, at: now, text: txt, re: {} };
+  const c = { id: uid('c'), task: t.id, by, ...(agent ? { agent } : {}), at: now, text: txt, re: {} };
   data.comments.push(c);
-  logActivity(data, 'commented on', t, '', { by, now });
+  logActivity(data, 'commented on', t, '', { by, agent, now });
   return c;
 }
 
@@ -1099,6 +1227,7 @@ export function formatTaskForApi(data, t) {
   const parentTask = t.parent ? findTask(data, t.parent) : null;
   const children = childrenOfTask(data, t.id);
   const activeChildren = children.filter(c => c.status !== 'canceled');
+  const openDeps = openDepsOfTask(data, t);
   return {
     ...t,
     parent: t.parent || null,
@@ -1107,6 +1236,11 @@ export function formatTaskForApi(data, t) {
     childKeys: children.map(c => c.key),
     childCount: activeChildren.length,
     childDoneCount: activeChildren.filter(c => c.status === 'done').length,
+    claimedBy: t.claimedBy || null,
+    claimedAt: t.claimedAt || null,
+    blocked: openDeps.length > 0,
+    ready: isTaskReady(data, t),
+    openDepKeys: openDeps.map(d => d.key),
     projectKey: p?.key || null,
     projectName: p?.name || null,
     assigneeName: findMember(data, t.assignee)?.name || null,
@@ -1197,6 +1331,24 @@ export function queryTasks(data, filters = {}, opts = {}) {
       out = out.filter(t => t.parent === pid);
     }
   }
+  const readyFlag = filters.ready === true || (typeof filters.ready === 'string' && ['1', 'true', 'yes'].includes(filters.ready.trim().toLowerCase()));
+  if (readyFlag) {
+    out = out.filter(t => {
+      if (t.claimedBy || isTaskBlocked(data, t) || isClosedStatus(t.status)) return false;
+      return filters.status ? true : t.status === 'backlog' || t.status === 'todo';
+    });
+  }
+  if (filters.claimed !== undefined && filters.claimed !== '') {
+    const raw = String(filters.claimed).trim();
+    const lower = raw.toLowerCase();
+    if (['none', 'null', 'false', '0', 'unclaimed'].includes(lower)) {
+      out = out.filter(t => !t.claimedBy);
+    } else if (['true', '1', 'any', 'claimed'].includes(lower)) {
+      out = out.filter(t => !!t.claimedBy);
+    } else {
+      out = out.filter(t => (t.claimedBy || '').toLowerCase().includes(lower));
+    }
+  }
   if (filters.due) {
     const v = String(filters.due).trim().toLowerCase();
     out = out.filter(t => {
@@ -1226,11 +1378,12 @@ export function queryTasks(data, filters = {}, opts = {}) {
     }
   }
 
-  const sortField = filters.sort || 'manual';
+  const sortField = filters.sort || (readyFlag ? 'ready' : 'manual');
   const dir = filters.dir === 'desc' || filters.dir === -1 || filters.dir === '-1' ? -1 : 1;
   const keyFn =
     {
       manual: t => t.order ?? 0,
+      ready: t => `${9 - PR[t.priority || 'none'].w}:${t.due || '9999-99-99'}:${String(t.order ?? 0).padStart(9, '0')}`,
       title: t => t.title.toLowerCase(),
       due: t => t.due || '9999',
       start: t => t.start || '9999',
@@ -1845,6 +1998,13 @@ export function applyWorkspacePatch(targetState, patch) {
           rekeyed = true;
         }
       }
+    }
+  }
+  for (const t of d.tasks) {
+    if ((t.archived || isClosedStatus(t.status) || findProject(d, t.project)?.archived) && (t.claimedBy || t.claimedAt)) {
+      t.claimedBy = null;
+      t.claimedAt = null;
+      rekeyed = true;
     }
   }
 
