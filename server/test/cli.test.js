@@ -286,4 +286,16 @@ test('gr8r CLI guides user to GR8R_TOKEN when /api/config bootstrap is disabled,
   const docView = await invoke(['doc', 'view', 'service-runbook', '-p', 'PID'], { env: autoEnv });
   assert.match(docView.stdout, /# Service Runbook/);
   assert.match(docView.stdout, /Verified live blob upload\./);
+
+  const searchOut = await invoke(['search', 'Verified live blob'], { env: autoEnv });
+  assert.match(searchOut.stdout, /Docs \(1\):/);
+  assert.match(searchOut.stdout, /\[service-runbook\] Service Runbook/);
+
+  // Deleting an attachment removes its unreferenced blob from /api/blobs.
+  const delBlobId = filesJson.files[0].blobId;
+  await invoke(['file', 'delete', filesJson.files[0].id, '--yes'], { env: autoEnv });
+  const afterDel = await fetch(`${baseEnv.GR8R_URL}/api/blobs/${delBlobId}`, {
+    headers: { authorization: 'Bearer strict-secret' },
+  });
+  assert.equal(afterDel.status, 404);
 });

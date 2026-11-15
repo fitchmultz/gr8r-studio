@@ -162,6 +162,20 @@ function verifyGitHubSignature(rawBuf, sigHeader, secret) {
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
+function referencedBlobIds(data) {
+  const out = new Set();
+  if (!data || typeof data !== 'object') return out;
+  for (const f of data.files || []) {
+    if (f && typeof f.blobId === 'string' && /^[0-9a-f]{64}$/.test(f.blobId)) out.add(f.blobId);
+  }
+  for (const t of data.tasks || []) {
+    for (const a of t?.attachments || []) {
+      if (a && typeof a.blobId === 'string' && /^[0-9a-f]{64}$/.test(a.blobId)) out.add(a.blobId);
+    }
+  }
+  return out;
+}
+
 export function startServer({
   port = 0,
   host = '127.0.0.1',
@@ -210,9 +224,21 @@ export function startServer({
     }
   };
   const commitState = state => {
+    const prevBlobs = referencedBlobIds(store.state?.data);
     const next = { rev: store.rev + 1, state };
     writeStore(DATA, next);
     store = next;
+    const nextBlobs = referencedBlobIds(state?.data);
+    for (const bid of prevBlobs) {
+      if (!nextBlobs.has(bid)) {
+        try {
+          fs.rmSync(path.join(BLOBS_DIR, bid), { force: true });
+          fs.rmSync(path.join(BLOBS_DIR, `${bid}.json`), { force: true });
+        } catch {
+          /* best-effort unreferenced blob cleanup */
+        }
+      }
+    }
     broadcastRev(store.rev);
     return store;
   };
@@ -229,20 +255,46 @@ export function startServer({
   const readRawBody = (req, limit = MAX_BODY) =>
     new Promise((resolve, reject) => {
       let n = 0;
+      let overLimit = false;
+      let settled = false;
+      const hardCap = limit + 16 * 1024 * 1024;
       const chunks = [];
+      const failTooLarge = () => {
+        if (settled) return;
+        settled = true;
+        const err = new Error('body too large');
+        err.code = 'PAYLOAD_TOO_LARGE';
+        reject(err);
+      };
       req.on('data', c => {
         n += c.length;
         if (n > limit) {
-          const err = new Error('body too large');
-          err.code = 'PAYLOAD_TOO_LARGE';
-          reject(err);
-          req.destroy();
+          if (!overLimit) {
+            overLimit = true;
+            chunks.length = 0;
+          }
+          if (n > hardCap) {
+            req.pause();
+            failTooLarge();
+          }
           return;
         }
         chunks.push(c);
       });
-      req.on('end', () => resolve(Buffer.concat(chunks)));
-      req.on('error', reject);
+      req.on('end', () => {
+        if (settled) return;
+        if (overLimit) {
+          failTooLarge();
+          return;
+        }
+        settled = true;
+        resolve(Buffer.concat(chunks));
+      });
+      req.on('error', err => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+      });
     });
   const readBody = req => readRawBody(req).then(buf => buf.toString('utf8'));
   const setBlobCookieHeader = res => {
@@ -364,7 +416,12 @@ export function startServer({
       try {
         buf = await readRawBody(req, MAX_BLOB_BYTES);
       } catch (err) {
-        if (err?.code === 'PAYLOAD_TOO_LARGE') return send(res, 413, { error: 'Blob exceeds 50 MB limit' });
+        if (err?.code === 'PAYLOAD_TOO_LARGE') {
+          res.once('finish', () => {
+            if (!req.complete) req.destroy();
+          });
+          return send(res, 413, { error: 'Blob exceeds 50 MB limit' }, 'application/json', { connection: 'close' });
+        }
         throw err;
       }
       if (!buf.length) return send(res, 400, { error: 'Empty blob upload' });

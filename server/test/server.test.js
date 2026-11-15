@@ -732,4 +732,13 @@ test('/api/blobs enforces auth, cookie-backed <img> reads, CSP sandbox, and atta
 
   // Malformed percent-encoding returns 400 cleanly without throwing URIError.
   assert.equal((await fetch(base + '/api/blobs/%E0%A4%A', { headers: auth })).status, 400);
+
+  // Oversized >50 MB uploads return a clean 413 JSON error instead of ECONNRESET.
+  const tooBig = await fetch(base + '/api/blobs', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/octet-stream', 'x-file-name': 'oversized.bin' },
+    body: Buffer.alloc(50 * 1024 * 1024 + 4096, 0x61),
+  });
+  assert.equal(tooBig.status, 413);
+  assert.deepEqual(await tooBig.json(), { error: 'Blob exceeds 50 MB limit' });
 });

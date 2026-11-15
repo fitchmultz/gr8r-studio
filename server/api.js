@@ -276,7 +276,8 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
         tasks: r.tasks.map(t => formatTaskForApi(state.data, t)),
         projects: r.projects.map(p => formatProjectForApi(state.data, p)),
         people: r.people,
-        files: r.files,
+        files: (r.files || []).map(f => formatFileForApi(state.data, f)),
+        docs: (r.docs || []).map(doc => formatDocForApi(state.data, doc)),
         comments: r.comments.map(c => enrichComment(state.data, c)),
       });
     }
