@@ -1139,14 +1139,14 @@ export function updateSubtask(data, taskOrRef, subRef, patch = {}, opts = {}) {
     const nv = resolveMember(data, patch.assignee);
     if (nv !== (s.assignee || null)) {
       s.assignee = nv;
-      logActivity(data, 'assigned a subtask on', t, nv ? `to ${findMember(data, nv)?.name}` : '(unassigned)', { by, now });
+      logActivity(data, 'assigned a subtask on', t, nv ? `to ${findMember(data, nv)?.name}` : '(unassigned)', { by, agent, now });
     }
   }
   if (patch.due !== undefined) {
     const nv = validateOptionalDate(patch.due, 'due');
     if (nv !== (s.due || null)) {
       s.due = nv;
-      logActivity(data, 'set a subtask due date on', t, nv ? fmt(nv) : '(cleared)', { by, now });
+      logActivity(data, 'set a subtask due date on', t, nv ? fmt(nv) : '(cleared)', { by, agent, now });
     }
   }
   if (patch.note !== undefined) {

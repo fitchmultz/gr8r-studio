@@ -1430,4 +1430,9 @@ test('agent claims, --ready queue ordering, dependency unblocking, and claim cle
   applyWorkspacePatch(state, { tasks: { updated: { [midDrag.id]: { fields: { set: { status: 'todo' } } } } } });
   assert.equal(midDrag.claimedBy, null);
   assert.equal(isTaskReady(state.data, midDrag), true);
+
+  const sub = addSubtask(state.data, ordA, 'Wire subtask attribution', { agent: 'pi:worker-9', now: FIXED_NOW + 120 });
+  updateSubtask(state.data, ordA, sub.id, { assignee: 'me', due: '2026-12-01' }, { agent: 'pi:worker-9', now: FIXED_NOW + 121 });
+  assert.equal(state.data.activity[0].agent, 'pi:worker-9');
+  assert.equal(state.data.activity[1].agent, 'pi:worker-9');
 });
