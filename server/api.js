@@ -6,6 +6,7 @@ import {
   addComment,
   addSubtask,
   applyTaskPatch,
+  applyWorkspacePatch,
   commentsOfTask,
   createDefaultState,
   createProject,
@@ -19,6 +20,7 @@ import {
   findTask,
   formatProjectForApi,
   formatTaskForApi,
+  isWorkspacePatchEmpty,
   promoteSubtask,
   queryTasks,
   removeSubtask,
@@ -137,6 +139,31 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
           projectStatuses: Object.entries(PSTAT).map(([id, v]) => ({ id, name: v.name })),
         },
       });
+    }
+
+    // PATCH /api/workspace — atomic field-level merge for browser UI & offline edits
+    if (segments.length === 1 && segments[0] === 'workspace' && method === 'PATCH') {
+      const body = parseJsonBody(await readBody(req));
+      if (!body.patch || typeof body.patch !== 'object' || Array.isArray(body.patch)) {
+        throw new DomainError('patch object is required', 400);
+      }
+      const cur = getStore();
+      if (!cur.state) {
+        return send(res, 409, { error: 'uninitialized', rev: cur.rev, state: null });
+      }
+      if (body.baseRev !== undefined && !Number.isInteger(body.baseRev)) {
+        throw new DomainError('baseRev must be an integer', 400);
+      }
+      const baseRev = Number.isInteger(body.baseRev) ? body.baseRev : cur.rev;
+      if (isWorkspacePatchEmpty(body.patch)) {
+        const merged = baseRev !== cur.rev;
+        return send(res, 200, { rev: cur.rev, merged, ...(merged ? { state: cur.state } : {}) });
+      }
+      const draft = structuredClone(cur.state);
+      const { rekeyed } = applyWorkspacePatch(draft, body.patch);
+      const merged = baseRev !== cur.rev || rekeyed;
+      const committed = commitState(draft);
+      return send(res, 200, { rev: committed.rev, merged, ...(merged ? { state: committed.state } : {}) });
     }
 
     // GET /api/search?q=...

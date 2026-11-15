@@ -270,3 +270,64 @@ test('subtask lifecycle, promotion, and workspace queries share identical invari
     ['PID-202'],
   );
 });
+
+test('diffWorkspacePatch and applyWorkspacePatch merge concurrent field, subtask, reaction, and colliding key edits', async () => {
+  const { addComment, applyWorkspacePatch, diffWorkspacePatch } = await import('../../src/core/domain.js');
+  const base = createDefaultState(FIXED_NOW);
+  createProject(base.data, { name: 'Pi Durable', key: 'PID', status: 'active' }, { now: FIXED_NOW });
+  const shared = createTask(base.data, { project: 'PID', title: 'Shared task', priority: 'medium' }, { now: FIXED_NOW });
+  const s1 = addSubtask(base.data, shared.id, 'Subtask 1', { now: FIXED_NOW });
+  const s2 = addSubtask(base.data, shared.id, 'Subtask 2', { now: FIXED_NOW });
+  const c1 = addComment(base.data, shared.id, 'Looks good', { now: FIXED_NOW });
+  c1.re = { '👍': ['m1'] };
+
+  const serverState = structuredClone(base);
+  const browserState = structuredClone(base);
+
+  // Agent on server updates priority + completes s2 + creates PID-202 + creates project WEB.
+  applyTaskPatch(serverState.data, shared.id, { priority: 'urgent' }, { now: FIXED_NOW + 100 });
+  updateSubtask(serverState.data, shared.id, s2.id, { done: true }, { now: FIXED_NOW + 100 });
+  createTask(serverState.data, { project: 'PID', title: 'Agent slice' }, { now: FIXED_NOW + 100 });
+  createProject(serverState.data, { name: 'WebsiteServer', key: 'WEB' }, { now: FIXED_NOW + 100 });
+
+  // Browser concurrently updates status + completes s1 + adds s3 + creates colliding PID-202 + colliding WEB/WEB-201 + toggles reaction & prefs.
+  applyTaskPatch(browserState.data, shared.id, { status: 'progress' }, { now: FIXED_NOW + 200 });
+  updateSubtask(browserState.data, shared.id, s1.id, { done: true }, { now: FIXED_NOW + 200 });
+  addSubtask(browserState.data, shared.id, 'Subtask 3', { now: FIXED_NOW + 200 });
+  const browserTask = createTask(browserState.data, { project: 'PID', title: 'Browser slice' }, { now: FIXED_NOW + 200 });
+  assert.equal(browserTask.key, 'PID-202');
+  const browserProj = createProject(browserState.data, { name: 'WebsiteLocal', key: 'WEB' }, { now: FIXED_NOW + 200 });
+  const browserWebTask = createTask(browserState.data, { project: browserProj.id, title: 'Offline web task' }, { now: FIXED_NOW + 200 });
+  assert.equal(browserWebTask.key, 'WEB-201');
+  browserState.data.comments.find(c => c.id === c1.id).re['🎉'] = ['m1'];
+  browserState.prefs.theme = 'dark';
+  browserState.views = { p1: { layout: 'board' } };
+
+  const patch = diffWorkspacePatch(base, browserState);
+  const { rekeyed } = applyWorkspacePatch(serverState, patch);
+  assert.equal(rekeyed, true);
+
+  const mergedShared = serverState.data.tasks.find(t => t.id === shared.id);
+  assert.equal(mergedShared.priority, 'urgent');
+  assert.equal(mergedShared.status, 'progress');
+  assert.equal(mergedShared.subtasks.find(s => s.id === s1.id).done, true);
+  assert.equal(mergedShared.subtasks.find(s => s.id === s2.id).done, true);
+  assert.equal(mergedShared.subtasks.length, 3);
+
+  const pidTasks = serverState.data.tasks.filter(t => t.project === base.data.projects.find(p => p.key === 'PID').id);
+  assert.deepEqual(
+    pidTasks.map(t => `${t.key}:${t.title}`),
+    ['PID-201:Shared task', 'PID-202:Agent slice', 'PID-203:Browser slice'],
+  );
+
+  const mergedBrowserProj = serverState.data.projects.find(p => p.id === browserProj.id);
+  assert.equal(mergedBrowserProj.key, 'WEBX');
+  assert.equal(serverState.data.tasks.find(t => t.id === browserWebTask.id).key, 'WEBX-201');
+  assert.deepEqual(serverState.data.comments.find(c => c.id === c1.id).re, { '👍': ['m1'], '🎉': ['m1'] });
+  assert.equal(serverState.prefs.theme, 'dark');
+  assert.deepEqual(serverState.views, { p1: { layout: 'board' } });
+
+  // Prototype-pollution keys in untrusted JSON patches are ignored safely.
+  applyWorkspacePatch(serverState, JSON.parse('{"prefs":{"set":{"__proto__":{"polluted":true}}}}'));
+  assert.equal({}.polluted, undefined);
+});

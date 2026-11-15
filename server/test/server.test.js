@@ -482,3 +482,65 @@ test('gates /api/config token bootstrap to loopback and private Tailscale routes
   const strictCfg = await (await fetch(strict.base + '/api/config')).json();
   assert.deepEqual(strictCfg, { token: null, authRequired: true });
 });
+
+test('PATCH /api/workspace merges concurrent browser deltas with domain API writes and returns 409 when uninitialized', async t => {
+  const { createDefaultState, createProject, createTask, diffWorkspacePatch } = await import('../../src/core/domain.js');
+  const { base } = await withServer(t);
+
+  // Uninitialized server rejects PATCH /api/workspace with 409 so client falls back to full /api/sync seed.
+  const uninit = await fetch(base + '/api/workspace', {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ baseRev: 5, patch: { collapsed: true } }),
+  });
+  assert.equal(uninit.status, 409);
+  assert.deepEqual(await uninit.json(), { error: 'uninitialized', rev: 0, state: null });
+
+  // Seed initial state at rev 0 -> rev 1.
+  const initial = createDefaultState(1700000000000);
+  createProject(initial.data, { name: 'Pi Durable', key: 'PID', status: 'active' });
+  const t1 = createTask(initial.data, { project: 'PID', title: 'Initial slice', status: 'todo' });
+  const seedRes = await fetch(base + '/api/sync', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ baseRev: 0, state: initial }),
+  });
+  assert.equal(seedRes.status, 200);
+
+  // Fast-path PATCH at current baseRev=1 returns merged: false without echoing full state.
+  const browser1 = structuredClone(initial);
+  browser1.collapsed = true;
+  const fastRes = await (
+    await fetch(base + '/api/workspace', {
+      method: 'PATCH',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ baseRev: 1, patch: diffWorkspacePatch(initial, browser1) }),
+    })
+  ).json();
+  assert.deepEqual(fastRes, { rev: 2, merged: false });
+
+  // Agent creates PID-202 via POST /api/tasks (advancing rev 2 -> 3) while browser at baseRev=2 marks PID-201 done & creates colliding PID-202.
+  await fetch(base + '/api/tasks', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ project: 'PID', title: 'Agent concurrent task' }),
+  });
+
+  const browser2 = structuredClone(browser1);
+  browser2.data.tasks.find(x => x.id === t1.id).status = 'done';
+  createTask(browser2.data, { project: 'PID', title: 'Browser concurrent task' });
+
+  const mergeRes = await (
+    await fetch(base + '/api/workspace', {
+      method: 'PATCH',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ baseRev: 2, patch: diffWorkspacePatch(browser1, browser2) }),
+    })
+  ).json();
+  assert.equal(mergeRes.rev, 4);
+  assert.equal(mergeRes.merged, true);
+  const pidTasks = mergeRes.state.data.tasks.filter(x => x.key.startsWith('PID-'));
+  assert.equal(pidTasks.find(x => x.key === 'PID-201').status, 'done');
+  assert.equal(pidTasks.find(x => x.key === 'PID-202').title, 'Agent concurrent task');
+  assert.equal(pidTasks.find(x => x.key === 'PID-203').title, 'Browser concurrent task');
+});

@@ -1,5 +1,6 @@
 /* ---------- optional sync with a self-hosted server (README: Self-hosting) ---------- */
-import { S, getPendingSave, getRev, hydrate, setOnSave, stampRev } from './store.js';
+import { diffWorkspacePatch, isWorkspacePatchEmpty } from './domain.js';
+import { S, adoptSyncedState, clearSyncedBase, getPendingSave, getRev, getSyncedBase, rebasePendingSave, setOnSave, stampRev } from './store.js';
 import { openModal } from '../overlays/modals.js';
 import { render } from '../shell/render.js';
 import { toast } from '../ui/toast.js';
@@ -172,6 +173,57 @@ async function push() {
   try {
     while (getPendingSave()) {
       const blob = getPendingSave();
+      const base = getSyncedBase();
+      if (getRev() > 0 && base) {
+        const patch = diffWorkspacePatch(base, blob);
+        if (isWorkspacePatchEmpty(patch)) {
+          stampRev(getRev(), blob);
+          continue;
+        }
+        let r;
+        try {
+          r = await authedFetch(
+            '/workspace',
+            {
+              method: 'PATCH',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ baseRev: getRev(), patch }),
+            },
+            { fromUserSave: true },
+          );
+        } catch {
+          return;
+        }
+        if (!r) return;
+        if (r.status === 409) {
+          const j = await r.json();
+          if (!j.state) {
+            /* the server lost its data: fall back to full /sync at rev 0 to re-seed it */
+            clearSyncedBase();
+            continue;
+          }
+          adopt(j.rev, j.state);
+          return;
+        }
+        if (!r.ok) {
+          if (r.status === 401) warnAuth();
+          return;
+        }
+        authWarned = false;
+        const j = await r.json();
+        if (j.merged && j.state) {
+          if (getPendingSave() === blob) {
+            adopt(j.rev, j.state);
+          } else {
+            rebasePendingSave(j.rev, j.state, blob);
+            render();
+          }
+        } else {
+          stampRev(j.rev, blob);
+        }
+        continue;
+      }
+
       let r;
       try {
         r = await authedFetch(
@@ -195,7 +247,7 @@ async function push() {
         const j = await r.json();
         if (!j.state) {
           /* the server lost its data: retry this blob at revision 0 to re-seed it */
-          stampRev(j.rev);
+          clearSyncedBase();
           continue;
         }
         adopt(j.rev, j.state);
@@ -234,8 +286,7 @@ async function pull() {
 }
 
 function adopt(rev, state) {
-  hydrate(state);
-  stampRev(rev);
+  adoptSyncedState(rev, state);
   render();
 }
 

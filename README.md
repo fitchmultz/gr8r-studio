@@ -115,17 +115,20 @@ cd server && GR8R_TOKEN=<secret> npm start    # app + sync API on 127.0.0.1:4180
 - The server keeps the workspace blob and a revision in `server/data/state.json`.
   A push advances the revision only after the state file is written. An unreadable
   or invalid existing state file stops startup instead of starting an empty workspace.
-  `POST /api/sync` accepts a push whose `baseRev` matches the current revision
-  and answers `409` with the newer state otherwise; the client then adopts it.
+  `POST /api/sync` seeds the initial workspace at revision `0`; once synced,
+  browsers send field-level workspace deltas to `PATCH /api/workspace` against
+  their last synced snapshot.
 - Clients save locally on each change and debounce uploads. Pending uploads
   survive reloads and retry at boot, every 30 seconds, and on reconnection.
   Open tabs also subscribe to `GET /api/events` (SSE) so server-side updates
   from another device or API client appear immediately instead of waiting for
   the 30-second fallback poll.
   A response for an older upload cannot overwrite a newer local save.
-- When two devices edit the same revision, the server accepts the first push.
-  The other device loads that accepted version and discards its conflicting
-  local edits. Sync copies the whole workspace; it does not merge task edits.
+- When a browser and another device or CLI agent edit concurrently (or reconnect
+  after offline edits), `PATCH /api/workspace` merges project, task, subtask,
+  comment, reaction, activity, and preference changes atomically on the server
+  (reassigning colliding task or project keys automatically) instead of
+  discarding either device's edits.
 - Domain API routes (`/api/workspace`, `/api/projects`, `/api/tasks`,
   `/api/search`, `/api/activity`) apply single-entity mutations atomically on
   the server using the same domain invariants as the browser UI, advancing the

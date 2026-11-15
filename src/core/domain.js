@@ -982,3 +982,480 @@ export function searchWorkspace(data, query, opts = {}) {
     }),
   };
 }
+
+/* ---------- atomic field-level workspace diff & merge ---------- */
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const KEYED_DATA_LISTS = ['teams', 'workspaces', 'files', 'notifs', 'events', 'savedViews'];
+const KNOWN_DATA_KEYS = new Set([
+  'ws',
+  'notifPrefs',
+  'me',
+  'recentSearches',
+  'projOrder',
+  'projects',
+  'members',
+  'tasks',
+  'comments',
+  'activity',
+  ...KEYED_DATA_LISTS,
+]);
+
+function isPlainObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+function deepEqual(a, b) {
+  if (Object.is(a, b)) return true;
+  if (a == null || b == null || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a)) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!deepEqual(a[i], b[i])) return false;
+    return true;
+  }
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) {
+    if (!Object.prototype.hasOwnProperty.call(b, k) || !deepEqual(a[k], b[k])) return false;
+  }
+  return true;
+}
+
+function diffObjectMap(baseObj = {}, nextObj = {}) {
+  const b = isPlainObject(baseObj) ? baseObj : {};
+  const n = isPlainObject(nextObj) ? nextObj : {};
+  const set = {};
+  const deleted = [];
+  for (const k of Object.keys(b)) {
+    if (UNSAFE_KEYS.has(k)) continue;
+    if (!Object.prototype.hasOwnProperty.call(n, k) || n[k] === undefined) deleted.push(k);
+  }
+  for (const k of Object.keys(n)) {
+    if (UNSAFE_KEYS.has(k) || n[k] === undefined) continue;
+    if (!Object.prototype.hasOwnProperty.call(b, k) || !deepEqual(b[k], n[k])) {
+      set[k] = structuredClone(n[k]);
+    }
+  }
+  return Object.keys(set).length || deleted.length ? { set, deleted } : null;
+}
+
+function applyObjectMap(targetObj, diff) {
+  if (!diff) return targetObj;
+  if (!isPlainObject(diff)) throw new DomainError('Invalid map patch', 400);
+  const out = isPlainObject(targetObj) ? targetObj : {};
+  if (Array.isArray(diff.deleted)) {
+    for (const k of diff.deleted) {
+      if (typeof k === 'string' && !UNSAFE_KEYS.has(k)) delete out[k];
+    }
+  }
+  if (isPlainObject(diff.set)) {
+    for (const [k, v] of Object.entries(diff.set)) {
+      if (!UNSAFE_KEYS.has(k)) out[k] = structuredClone(v);
+    }
+  }
+  return out;
+}
+
+function diffPlainFields(baseItem, nextItem, skip = new Set()) {
+  const set = {};
+  const deleted = [];
+  for (const k of Object.keys(baseItem)) {
+    if (k === 'id' || skip.has(k) || UNSAFE_KEYS.has(k)) continue;
+    if (!Object.prototype.hasOwnProperty.call(nextItem, k) || nextItem[k] === undefined) deleted.push(k);
+  }
+  for (const k of Object.keys(nextItem)) {
+    if (k === 'id' || skip.has(k) || UNSAFE_KEYS.has(k) || nextItem[k] === undefined) continue;
+    if (!Object.prototype.hasOwnProperty.call(baseItem, k) || !deepEqual(baseItem[k], nextItem[k])) {
+      set[k] = structuredClone(nextItem[k]);
+    }
+  }
+  return Object.keys(set).length || deleted.length ? { set, deleted } : null;
+}
+
+function applyPlainFields(targetItem, fieldDiff, { monotonicKeys = [] } = {}) {
+  if (!fieldDiff) return;
+  if (!isPlainObject(fieldDiff)) throw new DomainError('Invalid field patch', 400);
+  const monotonic = new Set(monotonicKeys);
+  if (Array.isArray(fieldDiff.deleted)) {
+    for (const k of fieldDiff.deleted) {
+      if (typeof k === 'string' && k !== 'id' && !UNSAFE_KEYS.has(k)) delete targetItem[k];
+    }
+  }
+  if (isPlainObject(fieldDiff.set)) {
+    for (const [k, v] of Object.entries(fieldDiff.set)) {
+      if (k === 'id' || UNSAFE_KEYS.has(k)) continue;
+      if (monotonic.has(k) && typeof v === 'number' && typeof targetItem[k] === 'number') {
+        targetItem[k] = Math.max(targetItem[k], v);
+      } else {
+        targetItem[k] = structuredClone(v);
+      }
+    }
+  }
+}
+
+function diffKeyedList(baseArr = [], nextArr = [], diffItem = (a, b) => diffPlainFields(a, b)) {
+  const bArr = Array.isArray(baseArr) ? baseArr : [];
+  const nArr = Array.isArray(nextArr) ? nextArr : [];
+  const baseById = new Map(bArr.filter(x => x?.id).map(x => [x.id, x]));
+  const nextById = new Map(nArr.filter(x => x?.id).map(x => [x.id, x]));
+  const deleted = [];
+  for (const id of baseById.keys()) {
+    if (!nextById.has(id)) deleted.push(id);
+  }
+  const created = [];
+  const updated = {};
+  for (const item of nArr) {
+    if (!item?.id || UNSAFE_KEYS.has(item.id)) continue;
+    const prev = baseById.get(item.id);
+    if (!prev) {
+      created.push(structuredClone(item));
+    } else {
+      const d = diffItem(prev, item);
+      if (d) updated[item.id] = d;
+    }
+  }
+  const defaultOrder = [...bArr.filter(x => x?.id && nextById.has(x.id)).map(x => x.id), ...created.map(x => x.id)];
+  const actualOrder = nArr.filter(x => x?.id).map(x => x.id);
+  const order = defaultOrder.join('\0') !== actualOrder.join('\0') ? actualOrder : null;
+  if (!deleted.length && !created.length && !Object.keys(updated).length && !order) return null;
+  return {
+    ...(deleted.length ? { deleted } : {}),
+    ...(created.length ? { created } : {}),
+    ...(Object.keys(updated).length ? { updated } : {}),
+    ...(order ? { order } : {}),
+  };
+}
+
+function reorderByIds(list, orderIds) {
+  if (!Array.isArray(orderIds) || !orderIds.length) return list;
+  const byId = new Map(list.map(item => [item.id, item]));
+  const seen = new Set();
+  const out = [];
+  for (const id of orderIds) {
+    if (seen.has(id)) continue;
+    const item = byId.get(id);
+    if (item) {
+      out.push(item);
+      seen.add(id);
+    }
+  }
+  for (const item of list) {
+    if (!seen.has(item.id)) out.push(item);
+  }
+  return out;
+}
+
+function applyGenericKeyedList(targetArr, diff, { filterCreated } = {}) {
+  let list = Array.isArray(targetArr) ? targetArr : [];
+  if (!diff) return list;
+  if (!isPlainObject(diff)) throw new DomainError('Invalid list patch', 400);
+  if (Array.isArray(diff.deleted) && diff.deleted.length) {
+    const rm = new Set(diff.deleted);
+    list = list.filter(x => !rm.has(x.id));
+  }
+  if (isPlainObject(diff.updated)) {
+    const byId = new Map(list.map(x => [x.id, x]));
+    for (const [id, itemDiff] of Object.entries(diff.updated)) {
+      if (UNSAFE_KEYS.has(id)) continue;
+      const cur = byId.get(id);
+      if (cur) applyPlainFields(cur, itemDiff);
+    }
+  }
+  if (Array.isArray(diff.created)) {
+    const existing = new Set(list.map(x => x.id));
+    for (const raw of diff.created) {
+      if (!isPlainObject(raw) || typeof raw.id !== 'string' || !raw.id || existing.has(raw.id)) continue;
+      if (filterCreated && !filterCreated(raw)) continue;
+      list.push(structuredClone(raw));
+      existing.add(raw.id);
+    }
+  }
+  if (Array.isArray(diff.order)) list = reorderByIds(list, diff.order);
+  return list;
+}
+
+const SKIP_SUBTASKS = new Set(['subtasks']);
+const SKIP_REACTIONS = new Set(['re']);
+
+function diffTaskItem(baseTask, nextTask) {
+  const fields = diffPlainFields(baseTask, nextTask, SKIP_SUBTASKS);
+  const subtasks = diffKeyedList(baseTask.subtasks, nextTask.subtasks);
+  if (!fields && !subtasks) return null;
+  return { ...(fields ? { fields } : {}), ...(subtasks ? { subtasks } : {}) };
+}
+
+function diffCommentItem(baseComment, nextComment) {
+  const fields = diffPlainFields(baseComment, nextComment, SKIP_REACTIONS);
+  const re = diffObjectMap(baseComment.re, nextComment.re);
+  if (!fields && !re) return null;
+  return { ...(fields ? { fields } : {}), ...(re ? { re } : {}) };
+}
+
+export function diffWorkspacePatch(baseState, nextState) {
+  const b = baseState || {};
+  const n = nextState || {};
+  const bd = b.data || {};
+  const nd = n.data || {};
+  const patch = {};
+
+  const projects = diffKeyedList(bd.projects, nd.projects);
+  if (projects) patch.projects = projects;
+  const members = diffKeyedList(bd.members, nd.members);
+  if (members) patch.members = members;
+  const tasks = diffKeyedList(bd.tasks, nd.tasks, diffTaskItem);
+  if (tasks) patch.tasks = tasks;
+  const comments = diffKeyedList(bd.comments, nd.comments, diffCommentItem);
+  if (comments) patch.comments = comments;
+
+  for (const key of KEYED_DATA_LISTS) {
+    const listDiff = diffKeyedList(bd[key], nd[key]);
+    if (listDiff) patch[key] = listDiff;
+  }
+
+  const baseAct = Array.isArray(bd.activity) ? bd.activity : [];
+  const nextAct = Array.isArray(nd.activity) ? nd.activity : [];
+  if (baseAct.length > 0 && nextAct.length === 0) {
+    patch.activityCleared = true;
+  } else {
+    const seenAct = new Set(baseAct.map(a => a?.id).filter(Boolean));
+    const added = nextAct.filter(a => a?.id && !seenAct.has(a.id)).map(a => structuredClone(a));
+    if (added.length) patch.activityAdded = added;
+  }
+
+  const nextProjIds = new Set((nd.projects || []).map(p => p.id));
+  const createdProjIds = (projects?.created || []).map(p => p.id);
+  const expectedProjOrder = [...createdProjIds, ...(bd.projOrder || []).filter(id => nextProjIds.has(id) && !createdProjIds.includes(id))];
+  const actualProjOrder = (nd.projOrder || []).filter(id => nextProjIds.has(id));
+  if (expectedProjOrder.join('\0') !== actualProjOrder.join('\0')) {
+    patch.projOrder = [...actualProjOrder];
+  }
+
+  const ws = diffObjectMap(bd.ws, nd.ws);
+  if (ws) patch.ws = ws;
+  const notifPrefs = diffObjectMap(bd.notifPrefs, nd.notifPrefs);
+  if (notifPrefs) patch.notifPrefs = notifPrefs;
+  if (!deepEqual(bd.me, nd.me) && nd.me !== undefined) patch.me = nd.me;
+  if (!deepEqual(bd.recentSearches, nd.recentSearches) && nd.recentSearches !== undefined) {
+    patch.recentSearches = structuredClone(nd.recentSearches);
+  }
+
+  const extraData = {};
+  for (const k of Object.keys(nd)) {
+    if (KNOWN_DATA_KEYS.has(k) || UNSAFE_KEYS.has(k)) continue;
+    if (!deepEqual(bd[k], nd[k])) extraData[k] = structuredClone(nd[k]);
+  }
+  if (Object.keys(extraData).length) patch.extraData = extraData;
+
+  const prefs = diffObjectMap(b.prefs, n.prefs);
+  if (prefs) patch.prefs = prefs;
+  const views = diffObjectMap(b.views, n.views);
+  if (views) patch.views = views;
+  if (Boolean(b.collapsed) !== Boolean(n.collapsed)) patch.collapsed = Boolean(n.collapsed);
+
+  return patch;
+}
+
+export function isWorkspacePatchEmpty(patch) {
+  return !isPlainObject(patch) || Object.keys(patch).length === 0;
+}
+
+export function applyWorkspacePatch(targetState, patch) {
+  if (!isPlainObject(patch)) throw new DomainError('patch must be an object', 400);
+  if (!isPlainObject(targetState) || !isPlainObject(targetState.data)) {
+    throw new DomainError('Invalid target workspace state', 500);
+  }
+  const d = targetState.data;
+  let rekeyed = false;
+
+  // 1. Projects
+  if (patch.projects !== undefined) {
+    if (!isPlainObject(patch.projects)) throw new DomainError('Invalid projects patch', 400);
+    if (Array.isArray(patch.projects.deleted)) {
+      for (const pid of patch.projects.deleted) {
+        if (findProject(d, pid)) deleteProject(d, pid);
+      }
+    }
+    if (isPlainObject(patch.projects.updated)) {
+      for (const [pid, pDiff] of Object.entries(patch.projects.updated)) {
+        if (UNSAFE_KEYS.has(pid)) continue;
+        const p = findProject(d, pid);
+        if (!p) continue;
+        applyPlainFields(p, pDiff, { monotonicKeys: ['seq'] });
+        if (d.projects.some(other => other.id !== p.id && other.key?.toUpperCase() === String(p.key || '').toUpperCase())) {
+          p.key = makeProjectKey(d, p.name);
+          rekeyed = true;
+        }
+      }
+    }
+    if (Array.isArray(patch.projects.created)) {
+      for (const raw of patch.projects.created) {
+        if (!isPlainObject(raw) || typeof raw.id !== 'string' || !raw.id || findProject(d, raw.id)) continue;
+        const p = structuredClone(raw);
+        if (!p.key || d.projects.some(other => other.key?.toUpperCase() === String(p.key).toUpperCase())) {
+          p.key = makeProjectKey(d, p.name || 'Project');
+          p.seq = 200;
+          rekeyed = true;
+        }
+        d.projects.push(p);
+        d.projOrder = [p.id, ...(d.projOrder || []).filter(id => id !== p.id)];
+      }
+    }
+    if (Array.isArray(patch.projects.order)) d.projects = reorderByIds(d.projects, patch.projects.order);
+  }
+
+  // 2. Members
+  if (patch.members !== undefined) {
+    if (!isPlainObject(patch.members)) throw new DomainError('Invalid members patch', 400);
+    if (Array.isArray(patch.members.deleted)) {
+      for (const mid of patch.members.deleted) {
+        if (mid !== d.me && findMember(d, mid)) removeMember(d, mid);
+      }
+    }
+    d.members = applyGenericKeyedList(d.members, { ...patch.members, deleted: [] });
+  }
+
+  // 3. Tasks & nested subtasks
+  if (patch.tasks !== undefined) {
+    if (!isPlainObject(patch.tasks)) throw new DomainError('Invalid tasks patch', 400);
+    if (Array.isArray(patch.tasks.deleted) && patch.tasks.deleted.length) {
+      const existingIds = patch.tasks.deleted.filter(id => !!findTask(d, id));
+      if (existingIds.length) deleteTasks(d, existingIds);
+    }
+    if (isPlainObject(patch.tasks.updated)) {
+      for (const [tid, tDiff] of Object.entries(patch.tasks.updated)) {
+        if (UNSAFE_KEYS.has(tid) || !isPlainObject(tDiff)) continue;
+        const t = findTask(d, tid);
+        if (!t) continue;
+        if (tDiff.fields) {
+          if (!isPlainObject(tDiff.fields)) throw new DomainError('Invalid task fields patch', 400);
+          const nextProjId = tDiff.fields.set?.project;
+          if (nextProjId !== undefined && !findProject(d, nextProjId)) {
+            const clonedFields = structuredClone(tDiff.fields);
+            if (isPlainObject(clonedFields.set)) {
+              delete clonedFields.set.project;
+              delete clonedFields.set.key;
+            }
+            applyPlainFields(t, clonedFields, { monotonicKeys: ['updated'] });
+          } else {
+            applyPlainFields(t, tDiff.fields, { monotonicKeys: ['updated'] });
+          }
+          const p = findProject(d, t.project);
+          if (p && (!t.key || typeof t.key !== 'string' || !t.key.startsWith(p.key + '-') || d.tasks.some(other => other.id !== t.id && other.key === t.key))) {
+            t.key = nextTaskKey(d, p);
+            rekeyed = true;
+          } else if (p && typeof t.key === 'string' && t.key.startsWith(p.key + '-')) {
+            const num = Number(t.key.slice(p.key.length + 1));
+            if (Number.isInteger(num) && num > (p.seq || 200)) p.seq = num;
+          }
+        }
+        if (tDiff.subtasks) {
+          t.subtasks = applyGenericKeyedList(t.subtasks || [], tDiff.subtasks);
+        }
+        t.deps = activeProjectDeps(d, t.project, Array.isArray(t.deps) ? t.deps : [], t.id);
+      }
+    }
+    if (Array.isArray(patch.tasks.created)) {
+      for (const raw of patch.tasks.created) {
+        if (!isPlainObject(raw) || typeof raw.id !== 'string' || !raw.id || findTask(d, raw.id)) continue;
+        const p = findProject(d, raw.project);
+        if (!p) continue;
+        const t = structuredClone(raw);
+        t.subtasks = Array.isArray(t.subtasks) ? t.subtasks : [];
+        if (!t.key || typeof t.key !== 'string' || !t.key.startsWith(p.key + '-') || d.tasks.some(other => other.key === t.key)) {
+          t.key = nextTaskKey(d, p);
+          rekeyed = true;
+        } else if (typeof t.key === 'string' && t.key.startsWith(p.key + '-')) {
+          const num = Number(t.key.slice(p.key.length + 1));
+          if (Number.isInteger(num) && num > (p.seq || 200)) p.seq = num;
+        }
+        t.deps = activeProjectDeps(d, p.id, Array.isArray(t.deps) ? t.deps : [], t.id);
+        d.tasks.push(t);
+      }
+    }
+    if (Array.isArray(patch.tasks.order)) d.tasks = reorderByIds(d.tasks, patch.tasks.order);
+  }
+
+  // 4. Comments & emoji reactions
+  if (patch.comments !== undefined) {
+    if (!isPlainObject(patch.comments)) throw new DomainError('Invalid comments patch', 400);
+    if (Array.isArray(patch.comments.deleted)) {
+      for (const cid of patch.comments.deleted) deleteComment(d, cid);
+    }
+    if (isPlainObject(patch.comments.updated)) {
+      const byId = new Map((d.comments || []).map(c => [c.id, c]));
+      for (const [cid, cDiff] of Object.entries(patch.comments.updated)) {
+        if (UNSAFE_KEYS.has(cid) || !isPlainObject(cDiff)) continue;
+        const c = byId.get(cid);
+        if (!c) continue;
+        if (cDiff.fields) applyPlainFields(c, cDiff.fields);
+        if (cDiff.re) c.re = applyObjectMap(c.re || {}, cDiff.re);
+      }
+    }
+    if (Array.isArray(patch.comments.created)) {
+      const existing = new Set((d.comments || []).map(c => c.id));
+      for (const raw of patch.comments.created) {
+        if (!isPlainObject(raw) || typeof raw.id !== 'string' || !raw.id || existing.has(raw.id)) continue;
+        if (!findTask(d, raw.task)) continue;
+        d.comments.push(structuredClone(raw));
+        existing.add(raw.id);
+      }
+    }
+    if (Array.isArray(patch.comments.order)) d.comments = reorderByIds(d.comments, patch.comments.order);
+  }
+
+  // 5. Generic keyed lists
+  for (const key of KEYED_DATA_LISTS) {
+    if (patch[key] === undefined) continue;
+    d[key] = applyGenericKeyedList(d[key], patch[key], {
+      filterCreated: raw => (!raw.project || !!findProject(d, raw.project)) && (!raw.task || !!findTask(d, raw.task)),
+    });
+  }
+
+  // 6. Activity
+  if (patch.activityCleared) d.activity = [];
+  if (Array.isArray(patch.activityAdded) && patch.activityAdded.length) {
+    const existing = new Set((d.activity || []).map(a => a?.id).filter(Boolean));
+    const merged = [...(d.activity || [])];
+    for (const raw of patch.activityAdded) {
+      if (!isPlainObject(raw) || typeof raw.id !== 'string' || !raw.id || existing.has(raw.id)) continue;
+      merged.push(structuredClone(raw));
+      existing.add(raw.id);
+    }
+    merged.sort((a, b) => (b.at || 0) - (a.at || 0));
+    d.activity = merged.slice(0, 1000);
+  }
+
+  // 7. Project sidebar order
+  if (Array.isArray(patch.projOrder)) {
+    const valid = new Set(d.projects.map(p => p.id));
+    const seen = new Set();
+    const ordered = [];
+    for (const id of patch.projOrder) {
+      if (valid.has(id) && !seen.has(id)) {
+        ordered.push(id);
+        seen.add(id);
+      }
+    }
+    for (const p of d.projects) {
+      if (!seen.has(p.id)) ordered.push(p.id);
+    }
+    d.projOrder = ordered;
+  }
+
+  // 8. Maps & scalars
+  if (patch.ws) d.ws = applyObjectMap(d.ws, patch.ws);
+  if (patch.notifPrefs) d.notifPrefs = applyObjectMap(d.notifPrefs, patch.notifPrefs);
+  if (patch.me !== undefined && findMember(d, patch.me)) d.me = patch.me;
+  if (Array.isArray(patch.recentSearches)) d.recentSearches = structuredClone(patch.recentSearches);
+  if (isPlainObject(patch.extraData)) {
+    for (const [k, v] of Object.entries(patch.extraData)) {
+      if (!KNOWN_DATA_KEYS.has(k) && !UNSAFE_KEYS.has(k)) d[k] = structuredClone(v);
+    }
+  }
+  if (patch.prefs) targetState.prefs = applyObjectMap(targetState.prefs, patch.prefs);
+  if (patch.views) targetState.views = applyObjectMap(targetState.views, patch.views);
+  if (patch.collapsed !== undefined) targetState.collapsed = Boolean(patch.collapsed);
+
+  return { state: targetState, rekeyed };
+}
