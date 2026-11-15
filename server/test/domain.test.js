@@ -1380,7 +1380,7 @@ test('agent claims, --ready queue ordering, dependency unblocking, and claim cle
 
   // --ready orders urgent/high before medium and excludes blocked tasks.
   assert.deepEqual(
-    queryTasks(state.data, { project: p.id, ready: true }).map(t => t.key),
+    queryTasks(state.data, { project: p.id, ready: true, status: 'open' }).map(t => t.key),
     [urgentReady.key, blocker.key],
   );
 
@@ -1415,4 +1415,19 @@ test('agent claims, --ready queue ordering, dependency unblocking, and claim cle
   releaseTask(state.data, urgentReady, { status: 'todo', agent: 'pi:worker-2', now: FIXED_NOW + 100 });
   assert.equal(urgentReady.claimedBy, null);
   assert.equal(urgentReady.status, 'todo');
+
+  // Fractional drag-drop orders sort numerically in --ready, and concurrent todo patches scrub claims.
+  const pOrder = createProject(state.data, { name: 'Order Tie-Break', key: 'ORD' }, { now: FIXED_NOW });
+  const ordA = createTask(state.data, { project: pOrder.id, title: 'Ord 5', priority: 'medium', status: 'todo', order: 5 }, { now: FIXED_NOW });
+  const midDrag = createTask(state.data, { project: pOrder.id, title: 'Ord 5.001', priority: 'medium', status: 'todo', order: 5.001 }, { now: FIXED_NOW });
+  const lateInt = createTask(state.data, { project: pOrder.id, title: 'Ord 6', priority: 'medium', status: 'todo', order: 6 }, { now: FIXED_NOW });
+  createTask(state.data, { project: pOrder.id, title: 'In review', priority: 'urgent', status: 'review' }, { now: FIXED_NOW });
+  assert.deepEqual(
+    queryTasks(state.data, { project: pOrder.id, ready: true, status: 'open' }).map(t => t.key),
+    [ordA.key, midDrag.key, lateInt.key],
+  );
+  claimTask(state.data, midDrag, { agent: 'pi:worker-9', now: FIXED_NOW + 110 });
+  applyWorkspacePatch(state, { tasks: { updated: { [midDrag.id]: { fields: { set: { status: 'todo' } } } } } });
+  assert.equal(midDrag.claimedBy, null);
+  assert.equal(isTaskReady(state.data, midDrag), true);
 });

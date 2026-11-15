@@ -258,6 +258,6 @@ test('gr8r CLI guides user to GR8R_TOKEN when /api/config bootstrap is disabled,
   await invoke(['comment', 'add', 'PID-202', 'Progress note from Pi session'], { env: autoEnv });
   const viewWithAgent = await invoke(['task', 'view', 'PID-202'], { env: autoEnv });
   assert.match(viewWithAgent.stdout, /Claimed by: pi:worker-a/);
-  assert.match(viewWithAgent.stdout, /\[pi:abcdef12\]/);
+  assert.match(viewWithAgent.stdout, /\[pi:abcdef12-3456-7890-abcd-ef1234567890\]/);
   await invoke(['task', 'release', 'PID-202', '--status', 'todo'], { env: autoEnv });
 });

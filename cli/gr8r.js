@@ -130,9 +130,9 @@ function resolveDefaultAgent(explicitAgent, env = process.env) {
   if (explicitAgent !== undefined) return nullableOpt(explicitAgent);
   if (env.GR8R_AGENT !== undefined) return nullableOpt(env.GR8R_AGENT);
   const sessionName = String(env.PI_SESSION_NAME || '').trim();
-  if (sessionName) return `pi:${sessionName}`.slice(0, 120);
+  if (sessionName) return `pi:${sessionName}`;
   const sessionId = String(env.PI_SESSION_ID || '').trim();
-  if (sessionId) return `pi:${sessionId.slice(0, 8)}`;
+  if (sessionId) return `pi:${sessionId}`;
   return null;
 }
 

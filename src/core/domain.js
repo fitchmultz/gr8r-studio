@@ -396,7 +396,7 @@ export function normalizeAgentName(raw) {
   if (raw == null) return null;
   const s = String(raw).trim().replace(/\s+/g, ' ');
   if (!s || ['none', 'null', 'clear'].includes(s.toLowerCase())) return null;
-  return s.slice(0, 120);
+  return s;
 }
 
 /* ---------- activity ---------- */
@@ -1333,10 +1333,7 @@ export function queryTasks(data, filters = {}, opts = {}) {
   }
   const readyFlag = filters.ready === true || (typeof filters.ready === 'string' && ['1', 'true', 'yes'].includes(filters.ready.trim().toLowerCase()));
   if (readyFlag) {
-    out = out.filter(t => {
-      if (t.claimedBy || isTaskBlocked(data, t) || isClosedStatus(t.status)) return false;
-      return filters.status ? true : t.status === 'backlog' || t.status === 'todo';
-    });
+    out = out.filter(t => isTaskReady(data, t));
   }
   if (filters.claimed !== undefined && filters.claimed !== '') {
     const raw = String(filters.claimed).trim();
@@ -1383,7 +1380,6 @@ export function queryTasks(data, filters = {}, opts = {}) {
   const keyFn =
     {
       manual: t => t.order ?? 0,
-      ready: t => `${9 - PR[t.priority || 'none'].w}:${t.due || '9999-99-99'}:${String(t.order ?? 0).padStart(9, '0')}`,
       title: t => t.title.toLowerCase(),
       due: t => t.due || '9999',
       start: t => t.start || '9999',
@@ -1396,6 +1392,16 @@ export function queryTasks(data, filters = {}, opts = {}) {
     }[sortField] || (t => t.order ?? 0);
 
   out = [...out].sort((a, b) => {
+    if (sortField === 'ready') {
+      const pw = (PR[b.priority || 'none']?.w ?? 0) - (PR[a.priority || 'none']?.w ?? 0);
+      if (pw !== 0) return pw * dir;
+      const da = a.due || '9999-99-99';
+      const db = b.due || '9999-99-99';
+      if (da !== db) return (da > db ? 1 : -1) * dir;
+      const oa = a.order ?? 0;
+      const ob = b.order ?? 0;
+      return (oa > ob ? 1 : oa < ob ? -1 : 0) * dir;
+    }
     const ka = keyFn(a);
     const kb = keyFn(b);
     return (ka > kb ? 1 : ka < kb ? -1 : 0) * dir;
@@ -1852,6 +1858,12 @@ export function applyWorkspacePatch(targetState, patch) {
             applyPlainFields(t, clonedFields, { monotonicKeys: ['updated'] });
           } else {
             applyPlainFields(t, tDiff.fields, { monotonicKeys: ['updated'] });
+          }
+          const patchedStatus = tDiff.fields.set?.status;
+          if ((patchedStatus === 'todo' || patchedStatus === 'backlog') && tDiff.fields.set?.claimedBy === undefined && (t.claimedBy || t.claimedAt)) {
+            t.claimedBy = null;
+            t.claimedAt = null;
+            rekeyed = true;
           }
           const p = findProject(d, t.project);
           if (p && (!t.key || typeof t.key !== 'string' || !t.key.startsWith(p.key + '-') || d.tasks.some(other => other.id !== t.id && other.key === t.key))) {
