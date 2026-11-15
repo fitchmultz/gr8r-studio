@@ -774,10 +774,19 @@ export function attachFileRecord(data, fields = {}, opts = {}) {
   if (!name) throw new DomainError('Attachment file name is required');
   let taskObj = fields.task ? requireTask(data, fields.task) : null;
   let projObj = fields.project ? requireProject(data, fields.project) : null;
-  if (!taskObj && !projObj && fields.target) {
+  if (!taskObj && fields.target) {
     const targetStr = String(fields.target).trim();
     if (/^[A-Z][A-Z0-9]*-\d+$/i.test(targetStr) || findTask(data, targetStr)) {
       taskObj = requireTask(data, targetStr);
+    } else if (projObj) {
+      const targetProj = resolveProject(data, targetStr);
+      if (targetProj) {
+        if (targetProj.id !== projObj.id) {
+          throw new DomainError(`Project target "${targetStr}" conflicts with -p ${projObj.key}`, 400);
+        }
+      } else {
+        taskObj = requireTask(data, targetStr);
+      }
     } else {
       projObj = resolveProject(data, targetStr);
       if (!projObj) taskObj = resolveTask(data, targetStr);
@@ -916,13 +925,20 @@ export function resolveDoc(data, ref, projectRef = null) {
   if (typeof ref === 'object' && ref.id) return docs.find(d => d.id === ref.id) || null;
   const s = String(ref).trim();
   const projFilter = projectRef ? requireProject(data, projectRef).id : null;
-  const byId = docs.find(d => d.id === s && (!projFilter || d.project === projFilter));
+  const scoped = projFilter ? docs.filter(d => d.project === projFilter) : docs;
+  const byId = scoped.find(d => d.id === s);
   if (byId) return byId;
   const lower = s.toLowerCase();
-  const slugMatches = docs.filter(d => (!projFilter || d.project === projFilter) && (d.slug === lower || d.title.toLowerCase() === lower));
+  const slugMatches = scoped.filter(d => d.slug === lower);
   if (slugMatches.length === 1) return slugMatches[0];
   if (slugMatches.length > 1) {
     throw new DomainError(`Ambiguous doc reference "${ref}" across multiple projects; pass -p <project>`, 409);
+  }
+  const titleMatches = scoped.filter(d => d.title.toLowerCase() === lower);
+  if (titleMatches.length === 1) return titleMatches[0];
+  if (titleMatches.length > 1) {
+    const hint = projFilter ? 'use doc id or unique slug' : 'pass -p <project> or use doc id';
+    throw new DomainError(`Ambiguous doc title "${ref}"; ${hint}`, 409);
   }
   return null;
 }

@@ -1113,7 +1113,7 @@ export async function runCli(argv, io = {}) {
     if (opts.task) {
       attachBody = { task: opts.task, ...(opts.project ? { project: opts.project } : {}) };
     } else if (opts.project && targetRef) {
-      attachBody = { project: opts.project, task: targetRef };
+      attachBody = { project: opts.project, target: targetRef };
     } else if (opts.project) {
       attachBody = { project: opts.project };
     } else {

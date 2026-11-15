@@ -1578,4 +1578,15 @@ test('persisted attachment records and Markdown Project Docs round-trip, search,
 
   deleteDoc(state.data, doc.id, { now: FIXED_NOW + 50 });
   assert.equal(docsOfProject(state.data, p.id).length, 0);
+
+  // Renaming a doc title and creating a new doc with the old title keeps the original slug resolvable.
+  const d1 = createDoc(state.data, { project: p.id, title: 'Alpha' }, { now: FIXED_NOW + 60 });
+  updateDoc(state.data, d1.id, { title: 'Beta' }, { now: FIXED_NOW + 61 });
+  createDoc(state.data, { project: p.id, title: 'Alpha' }, { now: FIXED_NOW + 62 });
+  assert.equal(updateDoc(state.data, 'alpha', {}, { project: p.id }).id, d1.id);
+
+  // attachFileRecord supports { project, target: <project-ref> } without misclassifying project ref as task.
+  const projFile = attachFileRecord(state.data, { project: 'DCB', target: 'DCB', name: 'spec.pdf', blobId: sha }, { now: FIXED_NOW + 65 });
+  assert.equal(projFile.project, p.id);
+  assert.equal(projFile.task, null);
 });
