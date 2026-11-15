@@ -4,6 +4,9 @@
   "private": true,
   "description": "Self-hosted sync server for Gr8r Studio: serves the built app and the sync API.",
   "type": "module",
+  "engines": {
+    "node": ">=24.5.0"
+  },
   "scripts": {
     "start": "node server.js",
     "test": "node --test 'test/*.test.js'"
