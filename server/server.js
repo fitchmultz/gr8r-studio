@@ -19,6 +19,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MAX_BODY = 10 * 1024 * 1024;
 /* Binary attachments (screenshots, recordings, PDFs) are stored out-of-line on disk up to 50 MB. */
 const MAX_BLOB_BYTES = 50 * 1024 * 1024;
+const PENDING_BLOB_TTL_MS = 5 * 60 * 1000;
 const SAFE_INLINE_BLOB_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf', 'text/plain']);
 const EXT_BLOB_MIMES = {
   '.png': 'image/png',
@@ -162,18 +163,24 @@ function verifyGitHubSignature(rawBuf, sigHeader, secret) {
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
-function referencedBlobIds(data) {
-  const out = new Set();
-  if (!data || typeof data !== 'object') return out;
+function blobRefCounts(data) {
+  const counts = new Map();
+  if (!data || typeof data !== 'object') return counts;
+  const seenFileIds = new Set();
   for (const f of data.files || []) {
-    if (f && typeof f.blobId === 'string' && /^[0-9a-f]{64}$/.test(f.blobId)) out.add(f.blobId);
+    if (f && typeof f.blobId === 'string' && /^[0-9a-f]{64}$/.test(f.blobId)) {
+      if (f.id) seenFileIds.add(f.id);
+      counts.set(f.blobId, (counts.get(f.blobId) || 0) + 1);
+    }
   }
   for (const t of data.tasks || []) {
     for (const a of t?.attachments || []) {
-      if (a && typeof a.blobId === 'string' && /^[0-9a-f]{64}$/.test(a.blobId)) out.add(a.blobId);
+      if (a && (!a.id || !seenFileIds.has(a.id)) && typeof a.blobId === 'string' && /^[0-9a-f]{64}$/.test(a.blobId)) {
+        counts.set(a.blobId, (counts.get(a.blobId) || 0) + 1);
+      }
     }
   }
-  return out;
+  return counts;
 }
 
 export function startServer({
@@ -212,6 +219,27 @@ export function startServer({
   const DIST = distDir || path.join(HERE, '..', 'dist');
   let store = readStore(DATA);
   const subscribers = new Set();
+  const pendingBlobUploads = new Map();
+
+  const hasBlob = blobId => /^[0-9a-f]{64}$/.test(String(blobId || '')) && fs.existsSync(path.join(BLOBS_DIR, blobId));
+  const addBlobLease = blobId => {
+    const now = Date.now();
+    const list = (pendingBlobUploads.get(blobId) || []).filter(exp => exp > now);
+    list.push(now + PENDING_BLOB_TTL_MS);
+    pendingBlobUploads.set(blobId, list);
+  };
+  const hasActiveBlobLease = (blobId, now = Date.now()) => {
+    const list = (pendingBlobUploads.get(blobId) || []).filter(exp => exp > now);
+    if (list.length) pendingBlobUploads.set(blobId, list);
+    else pendingBlobUploads.delete(blobId);
+    return list.length > 0;
+  };
+  const consumeBlobLeases = (blobId, count, now = Date.now()) => {
+    const list = (pendingBlobUploads.get(blobId) || []).filter(exp => exp > now);
+    list.splice(0, count);
+    if (list.length) pendingBlobUploads.set(blobId, list);
+    else pendingBlobUploads.delete(blobId);
+  };
 
   const broadcastRev = rev => {
     const msg = `event: rev\ndata: ${JSON.stringify({ rev })}\n\n`;
@@ -224,13 +252,18 @@ export function startServer({
     }
   };
   const commitState = state => {
-    const prevBlobs = referencedBlobIds(store.state?.data);
+    const prevCounts = blobRefCounts(store.state?.data);
     const next = { rev: store.rev + 1, state };
     writeStore(DATA, next);
     store = next;
-    const nextBlobs = referencedBlobIds(state?.data);
-    for (const bid of prevBlobs) {
-      if (!nextBlobs.has(bid)) {
+    const now = Date.now();
+    const nextCounts = blobRefCounts(state?.data);
+    for (const [bid, nextCount] of nextCounts) {
+      const prevCount = prevCounts.get(bid) || 0;
+      if (nextCount > prevCount) consumeBlobLeases(bid, nextCount - prevCount, now);
+    }
+    for (const [bid] of prevCounts) {
+      if (!nextCounts.has(bid) && !hasActiveBlobLease(bid, now)) {
         try {
           fs.rmSync(path.join(BLOBS_DIR, bid), { force: true });
           fs.rmSync(path.join(BLOBS_DIR, `${bid}.json`), { force: true });
@@ -451,6 +484,7 @@ export function startServer({
         fs.writeFileSync(metaTmp, JSON.stringify({ name, mime, sizeBytes: buf.length }));
         fs.renameSync(metaTmp, dest + '.json');
       }
+      addBlobLease(blobId);
       const qp = new URLSearchParams({ name, mime });
       return send(res, 201, {
         blobId,
@@ -499,7 +533,7 @@ export function startServer({
       commitState(state);
       return send(res, 200, { rev: store.rev });
     }
-    return handleDomainApi({ req, res, url, getStore: () => store, commitState, readBody, send });
+    return handleDomainApi({ req, res, url, getStore: () => store, commitState, readBody, send, hasBlob });
   }
 
   function serveStatic(res, url) {

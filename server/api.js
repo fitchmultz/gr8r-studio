@@ -121,7 +121,7 @@ function parseJsonBody(raw) {
   }
 }
 
-export async function handleDomainApi({ req, res, url, getStore, commitState, readBody, send }) {
+export async function handleDomainApi({ req, res, url, getStore, commitState, readBody, send, hasBlob }) {
   let segments;
   try {
     segments = url.pathname
@@ -420,6 +420,12 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
       }
       if (segments.length === 1 && method === 'POST') {
         const result = await mutate((data, body) => {
+          if (body.blobId !== undefined && body.blobId !== null && body.blobId !== '') {
+            const bid = String(body.blobId).trim().toLowerCase();
+            if (/^[0-9a-f]{64}$/.test(bid) && hasBlob && !hasBlob(bid)) {
+              throw new DomainError('Blob not found on server; upload via POST /api/blobs first', 409);
+            }
+          }
           const by = resolveActor(data, body.by);
           const agent = resolveRequestAgent(req, body);
           const rec = attachFileRecord(data, body, { by, agent });

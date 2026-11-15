@@ -741,4 +741,44 @@ test('/api/blobs enforces auth, cookie-backed <img> reads, CSP sandbox, and atta
   });
   assert.equal(tooBig.status, 413);
   assert.deepEqual(await tooBig.json(), { error: 'Blob exceeds 50 MB limit' });
+
+  // Concurrent content-addressed re-upload + delete preserves the in-flight upload lease until attached, and rejects missing blobIds.
+  await fetch(base + '/api/projects', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Race Test', key: 'RCE' }),
+  });
+  const raceBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xaa, 0xbb, 0xcc]);
+  const upA = await (
+    await fetch(base + '/api/blobs', { method: 'POST', headers: { ...auth, 'content-type': 'image/png', 'x-file-name': 'a.png' }, body: raceBytes })
+  ).json();
+  const fileA = await (
+    await fetch(base + '/api/files', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ project: 'RCE', name: 'a.png', blobId: upA.blobId, sizeBytes: upA.sizeBytes, mime: upA.mime }),
+    })
+  ).json();
+  // Caller B re-uploads same bytes while A's attachment exists, then A deletes before B calls POST /api/files.
+  const upB = await (
+    await fetch(base + '/api/blobs', { method: 'POST', headers: { ...auth, 'content-type': 'image/png', 'x-file-name': 'b.png' }, body: raceBytes })
+  ).json();
+  await fetch(base + `/api/files/${fileA.file.id}`, { method: 'DELETE', headers: auth });
+  const attachB = await fetch(base + '/api/files', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ project: 'RCE', name: 'b.png', blobId: upB.blobId, sizeBytes: upB.sizeBytes, mime: upB.mime }),
+  });
+  assert.equal(attachB.status, 201);
+  const fileB = await attachB.json();
+  assert.equal((await fetch(base + `/api/blobs/${upB.blobId}`, { headers: auth })).status, 200);
+  // Once B also deletes (no remaining upload lease), the blob is GC'd and re-attaching without upload returns 409.
+  await fetch(base + `/api/files/${fileB.file.id}`, { method: 'DELETE', headers: auth });
+  assert.equal((await fetch(base + `/api/blobs/${upB.blobId}`, { headers: auth })).status, 404);
+  const missingBlobAttach = await fetch(base + '/api/files', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ project: 'RCE', name: 'ghost.png', blobId: upB.blobId }),
+  });
+  assert.equal(missingBlobAttach.status, 409);
 });
