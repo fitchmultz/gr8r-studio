@@ -4,7 +4,7 @@
 import { ago, esc, relDate } from '../core/utils.js';
 import { ic } from '../core/icons.js';
 import { PR, ST, isClosedStatus } from '../core/constants.js';
-import { D, S, commentsOf, isOver, mem, pColor, proj, task } from '../core/store.js';
+import { D, S, childrenOf, commentsOf, isOver, mem, pColor, proj, task } from '../core/store.js';
 import { av, dueHtml, empty, lbl, prIcon, prPill, stIcon, stPill } from '../ui/helpers.js';
 import { fxc } from '../shell/render.js';
 
@@ -44,6 +44,10 @@ export function taskRow(t, cols, tpl, opt = {}) {
   const open = S.ui.openTasks[t.id];
   const editing = S.ui.editCell && S.ui.editCell.id === t.id && S.ui.editCell.f === 'title';
   const cc = commentsOf(t.id).length;
+  const parentTask = t.parent ? task(t.parent) : null;
+  const kids = childrenOf(t.id);
+  const activeKids = kids.filter(c => c.status !== 'canceled');
+  const doneKids = activeKids.filter(c => c.status === 'done').length;
   const sd = t.subtasks.filter(s => s.done).length;
   return `<div class="trow ${isClosedStatus(t.status) ? 'done' : ''} ${sel ? 'sel' : ''}${fxc('done', t.id)}${fxc('added', t.id)}" style="--cols:${tpl}" data-task-row="${t.id}" data-group="${opt.group || ''}" data-lkey="${opt.key || ''}" data-ctx="task" data-id="${t.id}">
     <div class="handle" draggable="${opt.drag !== false}" data-drag-row="${t.id}" aria-hidden="true">${opt.drag !== false ? ic('grip-vertical', 14) : ''}</div>
@@ -55,8 +59,10 @@ export function taskRow(t, cols, tpl, opt = {}) {
     <div class="ttl" ${editing ? '' : `data-a="openTask" data-id="${t.id}"`} data-dbl="editTitle">
       ${t.subtasks.length ? `<span class="ibtn ibtn-xs" data-a="expandRow" data-id="${t.id}" aria-label="${open ? 'Hide' : 'Show'} subtasks" aria-expanded="${!!open}" style="margin-left:-4px">${ic(open ? 'chevron-down' : 'chevron-right', 13)}</span>` : '<span style="width:18px;flex-shrink:0"></span>'}
       <span class="key">${t.key}</span>
+      ${parentTask ? `<span class="meta-mini mono" data-tip="Sub-issue of ${esc(parentTask.key)}: ${esc(parentTask.title)}">↳ ${parentTask.key}</span>` : ''}
       ${editing ? `<input class="inline-in" id="edit-title" data-in="noop" data-blur="commitTitle" data-key-enter="commitTitle" data-id="${t.id}" value="${esc(t.title)}" aria-label="Task title">` : `<span class="tt">${esc(t.title)}</span>`}
       ${t.recur ? `<span class="meta-mini" data-tip="Repeats ${t.recur.toLowerCase()}">${ic('repeat', 11)}</span>` : ''}
+      ${kids.length ? `<span class="meta-mini" data-tip="Sub-issues">${ic('git-fork', 11)}${doneKids}/${activeKids.length}</span>` : ''}
       ${t.subtasks.length ? `<span class="meta-mini">${ic('list-checks', 11)}${sd}/${t.subtasks.length}</span>` : ''}
       ${cc ? `<span class="meta-mini">${ic('message-square', 11)}${cc}</span>` : ''}
     </div>

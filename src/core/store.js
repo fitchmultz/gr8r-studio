@@ -2,7 +2,16 @@
 import { TODAY, diffD, iso, parse } from './utils.js';
 import { PCOLORS, isClosedStatus } from './constants.js';
 import { seed } from '../data/seed.js';
-import { DEFAULT_PREFS, applyWorkspacePatch, diffWorkspacePatch, ensureTeams, isWorkspacePatchEmpty, logActivity } from './domain.js';
+import {
+  DEFAULT_PREFS,
+  applyWorkspacePatch,
+  childrenOfTask,
+  diffWorkspacePatch,
+  ensureLabels,
+  ensureTeams,
+  isWorkspacePatchEmpty,
+  logActivity,
+} from './domain.js';
 
 export const STORE_KEY = 'gr8r.v3';
 export { DEFAULT_PREFS };
@@ -173,6 +182,7 @@ export const tasksOf = pid => D().tasks.filter(t => t.project === pid && !t.arch
 export const allTasks = () => D().tasks.filter(t => !t.archived && canSee(proj(t.project)));
 export const isOver = t => t.due && !isClosedStatus(t.status) && diffD(parse(t.due), TODAY) < 0;
 export const commentsOf = tid => D().comments.filter(c => c.task === tid);
+export const childrenOf = tid => childrenOfTask(D(), tid);
 export function progressOf(pid) {
   const active = tasksOf(pid).filter(t => t.status !== 'canceled');
   if (!active.length) return 0;
@@ -199,3 +209,11 @@ export function team(id) {
   return teamsList().find(t => t.id === id) || null;
 }
 export const TM = new Proxy({}, { get: (_, k) => team(k) || NO_TEAM });
+
+/* ---------- workspace labels ---------- */
+export function labelsList() {
+  return ensureLabels(D());
+}
+export function labelOf(id) {
+  return labelsList().find(l => l.id === id) || null;
+}

@@ -1,8 +1,9 @@
 /* ---------------- POPOVERS ---------------- */
 import { $, MOD, MONL, TODAY, WD, addD, dOff, diffD, esc, fmtDate, iso, parse } from '../core/utils.js';
 import { ic, wsLogo } from '../core/icons.js';
-import { LABELS, PRIOS, PSTAT, STATUSES } from '../core/constants.js';
-import { D, S, allTasks, canSee, me, mem, pColor, proj, task, visibleProjects } from '../core/store.js';
+import { PRIOS, PSTAT, STATUSES } from '../core/constants.js';
+import { isDescendantTask } from '../core/domain.js';
+import { D, S, allTasks, canSee, labelsList, me, mem, pColor, proj, task, visibleProjects } from '../core/store.js';
 import { av, avStack, prIcon, stIcon } from '../ui/helpers.js';
 import { focusKey, render } from '../shell/render.js';
 import { FIELDS, viewOf } from '../shell/view-engine.js';
@@ -94,7 +95,7 @@ export function popHtml(p) {
   let inner = '',
     cls = '',
     style = '';
-  const t = ['status', 'priority', 'assignee', 'labels', 'date', 'project', 'deps', 'recur', 'estimate'].includes(p.type) ? tgt(p) : null;
+  const t = ['status', 'priority', 'assignee', 'labels', 'date', 'project', 'parent', 'deps', 'recur', 'estimate'].includes(p.type) ? tgt(p) : null;
   switch (p.type) {
     case 'create':
       inner = `<div class="mh">Create</div><button class="mi" data-a="newTask">${ic('circle-check', 15)}Task<span class="r"><kbd>N</kbd></span></button><button class="mi" data-a="newProject">${ic('folder-plus', 15)}Project<span class="r"><kbd>P</kbd></span></button><button class="mi" data-a="newTeam">${ic('users', 15)}Team</button>`;
@@ -132,18 +133,27 @@ export function popHtml(p) {
         { search: 'Assign to…' },
       );
       break;
-    case 'labels':
-      inner = popList(
-        LABELS.map(l => ({
-          id: l.id,
-          name: l.name,
-          html: `<span class="pdot" style="--c:${l.c}"></span>`,
-          on: t?.labels.includes(l.id),
-          act: 'popToggleLabel',
-        })),
-        { search: 'Filter labels…' },
-      );
+    case 'labels': {
+      const list = labelsList();
+      const rawQ = (S.ui.pop.q || '').trim();
+      const canCreate = rawQ && !list.some(l => l.name.toLowerCase() === rawQ.toLowerCase() || l.id.toLowerCase() === rawQ.toLowerCase());
+      inner =
+        popList(
+          list.map(l => ({
+            id: l.id,
+            name: l.name,
+            html: `<span class="pdot" style="--c:${l.c}"></span>`,
+            on: t?.labels.includes(l.id),
+            act: 'popToggleLabel',
+          })),
+          { search: 'Filter or create label…' },
+        ) +
+        (canCreate
+          ? `<div class="msep"></div><button class="mi" data-a="quickCreateLabel" data-name="${esc(rawQ)}">${ic('plus', 14)}<span class="trunc">Create label “${esc(rawQ)}”</span></button>`
+          : '') +
+        `<div class="msep"></div><button class="mi" data-a="go" data-r="settings" data-sec="labels">${ic('tags', 14)}Manage labels…</button>`;
       break;
+    }
     case 'project':
       inner = popList(
         visibleProjects()
@@ -169,6 +179,24 @@ export function popHtml(p) {
           .concat([{ id: '', name: 'Clear estimate', html: ic('x', 14) }]),
       );
       break;
+    case 'parent': {
+      if (!t) break;
+      const selfId = p.id === '__form' ? S.ui.modals[S.ui.modals.length - 1]?.edit || null : t?.id;
+      const cands = D().tasks.filter(x => x.project === t.project && !x.archived && (!selfId || !isDescendantTask(D(), x.id, selfId)));
+      inner = popList(
+        [
+          { id: '', name: 'No parent issue', html: ic('x', 14), on: !t?.parent },
+          ...cands.map(x => ({
+            id: x.id,
+            name: `${x.key}  ${x.title}`,
+            html: stIcon(x.status),
+            on: t?.parent === x.id,
+          })),
+        ],
+        { search: 'Set parent issue…' },
+      );
+      break;
+    }
     case 'deps': {
       const cands = D().tasks.filter(x => x.project === t.project && x.id !== t.id && !x.archived);
       inner = popList(

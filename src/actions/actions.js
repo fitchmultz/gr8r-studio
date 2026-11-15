@@ -4,15 +4,17 @@
 import { $, $$, TODAY, addD, dOff, esc, fmtDate, iso, parse, uid } from '../core/utils.js';
 import { PR, PSTAT, isClosedStatus } from '../core/constants.js';
 import { seed } from '../data/seed.js';
-import { D, DEFAULT_PREFS, S, allTasks, canSee, commentsOf, logAct, me, mem, proj, save, task, tasksOf, visibleProjects } from '../core/store.js';
+import { D, DEFAULT_PREFS, S, allTasks, canSee, commentsOf, labelOf, logAct, me, mem, proj, save, task, tasksOf, visibleProjects } from '../core/store.js';
 import {
   RECUR_DAYS,
   addComment as domainAddComment,
   addSubtask as domainAddSubtask,
   applyTaskPatch,
+  createLabel as domainCreateLabel,
   createProject as domainCreateProject,
   createTask as domainCreateTask,
   deleteComment as domainDeleteComment,
+  deleteLabel as domainDeleteLabel,
   deleteProject as domainDeleteProject,
   deleteTasks as domainDeleteTasks,
   duplicateProject as domainDuplicateProject,
@@ -22,6 +24,7 @@ import {
   removeMember as domainRemoveMember,
   removeSubtask as domainRemoveSubtask,
   toggleReaction as domainToggleReaction,
+  updateLabel as domainUpdateLabel,
   updateProject as domainUpdateProject,
   updateSubtask as domainUpdateSubtask,
 } from '../core/domain.js';
@@ -256,15 +259,25 @@ A.popPick = el => {
     toast(`${m.name} is now ${v === 'Admin' ? 'an' : 'a'} ${v}`);
     return;
   }
-  const field = { status: 'status', priority: 'priority', assignee: 'assignee', project: 'project', recur: 'recur', estimate: 'estimate', date: p.field }[
-    p.type
-  ];
+  const field = {
+    status: 'status',
+    priority: 'priority',
+    assignee: 'assignee',
+    project: 'project',
+    parent: 'parent',
+    recur: 'recur',
+    estimate: 'estimate',
+    date: p.field,
+  }[p.type];
   if (!field) return;
-  if (field === 'assignee' && !v) v = null;
+  if ((field === 'assignee' || field === 'parent') && !v) v = null;
   if (field === 'recur' && v === 'Does not repeat') v = null;
   if ((field === 'estimate' || field === 'due' || field === 'start') && !v) v = null;
   S.ui.pop = null;
   const patch = { [field]: v };
+  if (field === 'project' && p.id === '__form' && S.ui.form?.parent && task(S.ui.form.parent)?.project !== v) {
+    patch.parent = null;
+  }
   if (field === 'due' && v && p.id !== '__form') {
     const t = task(p.id);
     if (t.start && t.start > v) patch.start = v;
@@ -277,6 +290,103 @@ A.popToggleLabel = el => {
   const v = el.dataset.v;
   const labels = t.labels.includes(v) ? t.labels.filter(x => x !== v) : [...t.labels, v];
   updateTask(p.id, { labels });
+};
+A.quickCreateLabel = el => {
+  const p = S.ui.pop;
+  if (!p) return;
+  const name = (el.dataset.name || '').trim();
+  if (!name) return;
+  const t = tgt(p);
+  let created = null;
+  try {
+    if (
+      !mutate(() => {
+        created = domainCreateLabel(D(), { name });
+        if (p.id !== '__form' && t) {
+          applyPatch(t, { addLabels: [created.id] });
+        }
+      })
+    )
+      return;
+  } catch (err) {
+    toast(err.message, { kind: 'err' });
+    return;
+  }
+  if (p.id === '__form' && t && created && !t.labels.includes(created.id)) {
+    t.labels = [...t.labels, created.id];
+  }
+  S.ui.pop.q = '';
+  render();
+  toast(`Created label “${created.name}”`);
+};
+A.setNewLabelColor = el => {
+  S.ui.newLabelColor = el.dataset.v;
+  render();
+};
+A.createLabelSetting = () => {
+  const input = $('#set-lbl-name');
+  const name = (input?.value || '').trim();
+  if (!name) return;
+  let created = null;
+  try {
+    if (
+      mutate(() => {
+        created = domainCreateLabel(D(), { name, color: S.ui.newLabelColor });
+      })
+    ) {
+      S.ui.newLabelColor = null;
+      if (input) input.value = '';
+      toast(`Created label “${created.name}”`);
+    }
+  } catch (err) {
+    toast(err.message, { kind: 'err' });
+  }
+};
+A.recolorLabelSetting = el => {
+  const cur = labelOf(el.dataset.id);
+  if (!cur) return;
+  try {
+    mutate(() => domainUpdateLabel(D(), cur.id, { color: el.dataset.v }));
+  } catch (err) {
+    toast(err.message, { kind: 'err' });
+  }
+};
+A.renameLabelSetting = el => {
+  const cur = labelOf(el.dataset.id);
+  if (!cur) return;
+  openModal({
+    type: 'prompt',
+    title: 'Rename label',
+    label: 'Label name',
+    value: cur.name,
+    ok: 'Save',
+    run: val => {
+      const next = val.trim();
+      if (!next || next === cur.name) return;
+      try {
+        if (mutate(() => domainUpdateLabel(D(), cur.id, { name: next }))) toast(`Renamed label to “${next}”`);
+      } catch (err) {
+        toast(err.message, { kind: 'err' });
+      }
+    },
+  });
+};
+A.deleteLabelSetting = el => {
+  const cur = labelOf(el.dataset.id);
+  if (!cur) return;
+  const used = D().tasks.filter(t => !t.archived && (t.labels || []).includes(cur.id)).length;
+  confirmDlg({
+    title: `Delete label “${cur.name}”?`,
+    body: used ? `This label will be removed from <b>${used} task${used === 1 ? '' : 's'}</b>.` : 'This label is not currently used on any active tasks.',
+    ok: 'Delete label',
+    danger: true,
+    run: () => {
+      const snap = snapshot();
+      if (mutate(() => domainDeleteLabel(D(), cur.id))) {
+        toast(`Deleted label “${cur.name}”`, { action: 'Undo', onAction: () => restore(snap) });
+      }
+    },
+  });
 };
 A.popToggleDep = el => {
   const p = S.ui.pop;
@@ -464,6 +574,7 @@ A.editTask = el => {
     title: t.title,
     desc: htmlToMarkdown(t.desc),
     project: t.project,
+    parent: t.parent || null,
     status: t.status,
     assignee: mem(t.assignee)?.id || null,
     priority: t.priority,
@@ -490,6 +601,7 @@ A.newTask = el => {
     title: '',
     desc: '',
     project: canSee(proj(pid)) ? pid : 'p1',
+    parent: d.parent || null,
     status: 'todo',
     assignee: d.assignee || D().me,
     priority: 'medium',
@@ -550,6 +662,7 @@ A.submitTask = () => {
   const base = {
     title,
     project: f.project,
+    parent: f.parent || null,
     status: f.status,
     assignee: f.assignee,
     priority: f.priority,
@@ -699,6 +812,21 @@ KEY.addSub = el => {
     domainAddSubtask(D(), t, { id: nid, title: v, done: false }, { by: D().me });
   });
   setTimeout(() => $('#d-sub')?.focus(), 0);
+};
+KEY.addSubIssue = el => {
+  const t = task(el.dataset.id);
+  const v = el.value.trim();
+  if (!t || !v) return;
+  mutate(() => {
+    createTask({
+      title: v,
+      project: t.project,
+      parent: t.id,
+      assignee: t.assignee,
+      priority: t.priority,
+    });
+  });
+  setTimeout(() => $('#d-subissue')?.focus(), 0);
 };
 A.expandRow = el => {
   S.ui.openTasks[el.dataset.id] = !S.ui.openTasks[el.dataset.id];

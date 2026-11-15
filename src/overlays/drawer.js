@@ -4,8 +4,8 @@
 import { MOD, TODAY, ago, diffD, esc, fmtDate, parse, relDate } from '../core/utils.js';
 import { ic } from '../core/icons.js';
 import { isClosedStatus } from '../core/constants.js';
-import { D, S, commentsOf, isOver, mem, pColor, proj, task } from '../core/store.js';
-import { FT, av, filePrev, fileType, fmtComment, lbl, progBar } from '../ui/helpers.js';
+import { D, S, childrenOf, commentsOf, isOver, mem, pColor, proj, task } from '../core/store.js';
+import { FT, av, filePrev, fileType, fmtComment, lbl, progBar, stIcon } from '../ui/helpers.js';
 import { fxc } from '../shell/render.js';
 import { cellAssignee, cellDue, cellPrio, cellProject, cellStatus } from '../components/task-list.js';
 import { modalHtml } from './modals.js';
@@ -32,6 +32,10 @@ export function drawerHtml(t) {
   const p = proj(t.project);
   const u = S.ui;
   const cs = commentsOf(t.id);
+  const parentTask = t.parent ? task(t.parent) : null;
+  const kids = childrenOf(t.id);
+  const activeKids = kids.filter(c => c.status !== 'canceled');
+  const doneKids = activeKids.filter(c => c.status === 'done').length;
   const sd = t.subtasks.filter(s => s.done).length;
   const acts = D().activity.filter(a => a.task === t.id);
   const tab = u.drawerTab;
@@ -49,7 +53,7 @@ export function drawerHtml(t) {
   return `<aside class="drawer ${u.drawerFull ? 'full' : ''} ${u.fx.drawer ? 'enter' : ''} ${u.fx.tabs ? 'fx-tabs' : ''}" role="dialog" aria-modal="${u.drawerFull}" aria-labelledby="d-h" tabindex="-1">
     <h2 class="sr" id="d-h">${sub ? 'Subtask: ' + esc(sub.title) : 'Task: ' + esc(t.title)}</h2>
     <div class="drawer-h">
-      <button class="pillbtn" data-a="go" data-r="project" data-id="${p.id}" data-tab="board" style="font-size:12.5px"><span class="pdot" style="--c:${pColor(p)}"></span>${esc(p.name)}</button><span class="faint">/</span><span class="mono faint" style="font-size:11.5px;padding:0 6px">${t.key}</span>
+      <button class="pillbtn" data-a="go" data-r="project" data-id="${p.id}" data-tab="board" style="font-size:12.5px"><span class="pdot" style="--c:${pColor(p)}"></span>${esc(p.name)}</button>${parentTask ? `<span class="faint">/</span><button class="pillbtn mono" data-a="openTask" data-id="${parentTask.id}" title="${esc(parentTask.title)}" style="font-size:11.5px;padding:0 6px">${parentTask.key}</button>` : ''}<span class="faint">/</span><span class="mono faint" style="font-size:11.5px;padding:0 6px">${t.key}</span>
       <span class="sp"></span>
       <button class="btn btn-sm ${isClosedStatus(t.status) ? 'btn-secondary' : 'btn-ghost'}" data-a="toggleDone" data-id="${t.id}" style="${t.status === 'done' ? 'color:var(--green)' : t.status === 'canceled' ? 'color:var(--text-3)' : ''}">${ic(t.status === 'done' ? 'circle-check' : t.status === 'canceled' ? 'circle-slash' : 'circle', 14)}<span class="hide-m">${t.status === 'done' ? 'Completed' : t.status === 'canceled' ? 'Canceled' : 'Mark complete'}</span></button>
       <button class="ibtn ibtn-sm" data-a="toggleFavTask" data-id="${t.id}" data-tip="${t.fav ? 'Unfavorite' : 'Favorite'}" aria-pressed="${t.fav}" aria-label="Favorite" style="${t.fav ? 'color:var(--amber)' : ''}">${ic('star', 15)}</button>
@@ -71,6 +75,11 @@ export function drawerHtml(t) {
         ${prop('calendar', 'Due date', cellDue(t))}
         ${prop('calendar-arrow-up', 'Start date', `<button class="pillbtn ${t.start ? '' : 'empty'}" data-a="pop" data-pop="date" data-field="start" data-id="${t.id}">${ic('calendar', 13)}${t.start ? fmtDate(t.start) : 'Set date'}</button>`)}
         ${prop('folder', 'Project', cellProject(t))}
+        ${prop(
+          'corner-left-up',
+          'Parent issue',
+          `<button class="pillbtn ${parentTask ? '' : 'empty'}" data-a="pop" data-pop="parent" data-id="${t.id}" style="height:auto;min-height:26px;gap:6px">${parentTask ? `${stIcon(parentTask.status, 12)}<span class="mono" style="font-size:11.5px">${parentTask.key}</span><span class="trunc" style="max-width:160px">${esc(parentTask.title)}</span>` : ic('corner-left-up', 13) + 'None'}</button>`,
+        )}
         ${prop('tag', 'Labels', `<button class="pillbtn ${t.labels.length ? '' : 'empty'}" data-a="pop" data-pop="labels" data-id="${t.id}" style="flex-wrap:wrap;height:auto;min-height:26px;padding:3px 7px">${t.labels.length ? t.labels.map(lbl).join('') : ic('tag', 13) + 'Add labels'}</button>`)}
         ${prop('repeat', 'Repeat', `<button class="pillbtn ${t.recur ? '' : 'empty'}" data-a="pop" data-pop="recur" data-id="${t.id}">${ic('repeat', 13)}${t.recur || 'Does not repeat'}</button>`)}
         ${prop('timer', 'Estimate', `<button class="pillbtn ${t.estimate ? '' : 'empty'}" data-a="pop" data-pop="estimate" data-id="${t.id}">${ic('timer', 13)}${t.estimate ? esc(t.estimate) : 'Add estimate'}</button>`)}
@@ -114,6 +123,11 @@ export function drawerHtml(t) {
             .join('')}
         </div></div>
         <div class="rte"><div class="rte-body" id="d-desc" contenteditable="true" data-rte="${t.id}" data-ph="Add a description…" role="textbox" aria-multiline="true" aria-labelledby="d-desc-l">${t.desc}</div></div>
+      </div>
+
+      <div class="dsec"><div class="dsec-h"><h3>Sub-issues</h3><span class="cnt num">${kids.length ? `${doneKids}/${activeKids.length}` : '0'}</span>${activeKids.length ? `<span style="width:90px;display:flex">${progBar(Math.round((doneKids / activeKids.length) * 100), doneKids === activeKids.length ? 'green' : '')}</span>` : ''}</div>
+        ${kids.map(c => `<div class="subt ${isClosedStatus(c.status) ? 'done' : ''}${fxc('added', c.id)}${fxc('done', c.id)}">${stIcon(c.status, 13)}<span class="mono faint" style="font-size:11px">${c.key}</span><button class="s" data-a="openTask" data-id="${c.id}">${esc(c.title)}</button>${c.due ? `<span class="due ${!isClosedStatus(c.status) && diffD(parse(c.due), TODAY) < 0 ? 'over' : ''}">${ic('calendar', 12)}${relDate(c.due)}</span>` : ''}${c.assignee ? av(c.assignee, 'sm') : ''}<button class="ibtn ibtn-xs x" data-a="openTask" data-id="${c.id}" aria-label="Open sub-issue ${c.key}" tabindex="-1">${ic('chevron-right', 14)}</button></div>`).join('')}
+        <div class="subt" style="color:var(--text-3)">${ic('plus', 15)}<input class="inline-in" id="d-subissue" data-key-enter="addSubIssue" data-id="${t.id}" placeholder="Add sub-issue" aria-label="Add sub-issue" style="font-size:13.5px"></div>
       </div>
 
       <div class="dsec"><div class="dsec-h"><h3>Subtasks</h3><span class="cnt num">${sd}/${t.subtasks.length}</span>${t.subtasks.length ? `<span style="width:90px;display:flex">${progBar(Math.round((sd / t.subtasks.length) * 100), sd === t.subtasks.length ? 'green' : '')}</span>` : ''}</div>

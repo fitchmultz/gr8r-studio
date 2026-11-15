@@ -254,12 +254,13 @@ function formatTable(rows, columns) {
 }
 
 function formatTaskDetail(payload) {
-  const { rev, task: t, comments = [] } = payload;
+  const { rev, task: t, subIssues = [], comments = [] } = payload;
   const lines = [
     `${t.key}  ${t.title}`,
     `Status: ${t.status} | Priority: ${t.priority} | Project: ${t.projectKey || t.project} (${t.projectName || ''}) | Rev: ${rev}`,
     `Assignee: ${t.assigneeName || 'Unassigned'}${t.due ? ` | Due: ${t.due}` : ''}${t.start ? ` | Start: ${t.start}` : ''}${t.estimate ? ` | Est: ${t.estimate}` : ''}`,
   ];
+  if (t.parentKey) lines.push(`Parent: ${t.parentKey}${t.parentTitle ? ` (${t.parentTitle})` : ''}`);
   if (t.labels?.length) lines.push(`Labels: ${t.labels.join(', ')}`);
   if (t.depKeys?.length) lines.push(`Blocked by: ${t.depKeys.join(', ')}`);
   if (t.prs?.length) {
@@ -270,6 +271,12 @@ function formatTaskDetail(payload) {
     }
   }
   if (t.descMarkdown) lines.push('', '--- Description ---', t.descMarkdown);
+  if (subIssues.length) {
+    lines.push('', `--- Sub-issues (${t.childDoneCount ?? 0}/${t.childCount ?? subIssues.length}) ---`);
+    for (const c of subIssues) {
+      lines.push(`- [${c.status}] ${c.key}  ${c.title}${c.assigneeName ? ` (@${c.assigneeName})` : ''}`);
+    }
+  }
   if (t.subtasks?.length) {
     lines.push('', `--- Subtasks (${t.subtaskDoneCount}/${t.subtaskCount}) ---`);
     for (const s of t.subtasks) {
@@ -301,6 +308,11 @@ Commands:
   project create <name> [--key KEY] ...     Create a project
   project update <ref> [--status ...] ...   Update a project or its milestones
   project delete <ref> --yes                Permanently delete a project and its tasks
+
+  labels                                    List workspace labels
+  label create <name> [--id ID] [--color C] Create a custom workspace label
+  label update <ref> [--name N] [--color C] Rename or recolor a label
+  label delete <ref> --yes                  Delete a label and detach from tasks
 
   tasks [-p PROJECT] [-s STATUS] ...        List/filter tasks (status accepts 'open')
   task view <key-or-id>                     Inspect a task, Markdown description, subtasks, comments
@@ -347,6 +359,7 @@ export async function runCli(argv, io = {}) {
       'clear-token': { type: 'boolean' },
       'clear-proxy': { type: 'boolean' },
       project: { type: 'string', short: 'p' },
+      parent: { type: 'string' },
       task: { type: 'string', short: 't' },
       status: { type: 'string', short: 's' },
       priority: { type: 'string' },
@@ -378,6 +391,7 @@ export async function runCli(argv, io = {}) {
       merged: { type: 'boolean' },
       draft: { type: 'boolean' },
       comment: { type: 'string' },
+      id: { type: 'string' },
       title: { type: 'string' },
       name: { type: 'string' },
       key: { type: 'string' },
@@ -612,9 +626,58 @@ export async function runCli(argv, io = {}) {
     throw new Error(`Unknown project subcommand: ${sub}`);
   }
 
+  if (cmd === 'labels') {
+    const res = await client.request('GET', '/labels');
+    if (opts.json) return outJson(res);
+    stdout(
+      formatTable(res.labels, [
+        ['ID', l => l.id],
+        ['NAME', l => l.name],
+        ['COLOR', l => l.c],
+      ]),
+    );
+    return 0;
+  }
+
+  if (cmd === 'label') {
+    if (sub === 'create' || sub === 'add') {
+      const name = opts.name ?? pos[2];
+      if (!name) throw new Error('Usage: gr8r label create <name> [--id ID] [--color COLOR]');
+      const body = { name };
+      if (opts.id) body.id = opts.id;
+      if (opts.color) body.color = opts.color;
+      const res = await client.request('POST', '/labels', body);
+      if (opts.json) return outJson(res);
+      stdout(`Created label ${res.label.id} (${res.label.name}, ${res.label.c}) [rev ${res.rev}]`);
+      return 0;
+    }
+    if (sub === 'update') {
+      const ref = pos[2];
+      if (!ref) throw new Error('Usage: gr8r label update <id-or-name> [--name NAME] [--color COLOR]');
+      const body = {};
+      if (opts.name !== undefined) body.name = opts.name;
+      if (opts.color !== undefined) body.color = opts.color;
+      const res = await client.request('PATCH', `/labels/${encodeURIComponent(ref)}`, body);
+      if (opts.json) return outJson(res);
+      stdout(`Updated label ${res.label.id} (${res.label.name}, ${res.label.c}) [rev ${res.rev}]`);
+      return 0;
+    }
+    if (sub === 'delete' || sub === 'remove') {
+      const ref = pos[2];
+      if (!ref) throw new Error('Usage: gr8r label delete <id-or-name> --yes');
+      if (!opts.yes) throw new Error('Pass --yes to delete a workspace label and remove it from tasks.');
+      const res = await client.request('DELETE', `/labels/${encodeURIComponent(ref)}`);
+      if (opts.json) return outJson(res);
+      stdout(`Deleted label ${res.deleted} [rev ${res.rev}]`);
+      return 0;
+    }
+    throw new Error(`Unknown label subcommand: ${sub}`);
+  }
+
   if (cmd === 'tasks') {
     const params = new URLSearchParams();
     if (opts.project) params.set('project', opts.project);
+    if (opts.parent !== undefined) params.set('parent', opts.parent);
     if (opts.status) params.set('status', opts.status);
     if (opts.priority) params.set('priority', opts.priority);
     if (opts.assignee) params.set('assignee', opts.assignee);
@@ -657,6 +720,7 @@ export async function runCli(argv, io = {}) {
       if (!title) throw new Error('Usage: gr8r task create <title> -p <project> [flags]');
       const body = { title };
       if (opts.project) body.project = opts.project;
+      if (opts.parent !== undefined) body.parent = nullableOpt(opts.parent);
       if (opts.status) body.status = opts.status;
       if (opts.priority) body.priority = opts.priority;
       if (opts.assignee !== undefined) body.assignee = nullableOpt(opts.assignee);
@@ -696,6 +760,7 @@ export async function runCli(argv, io = {}) {
       if (opts.priority !== undefined) body.priority = opts.priority;
       if (opts.assignee !== undefined) body.assignee = nullableOpt(opts.assignee);
       if (opts.project !== undefined) body.project = opts.project;
+      if (opts.parent !== undefined) body.parent = nullableOpt(opts.parent);
       if (opts.due !== undefined) body.due = nullableOpt(opts.due);
       if (opts.start !== undefined) body.start = nullableOpt(opts.start);
       if (opts.estimate !== undefined) body.estimate = nullableOpt(opts.estimate);

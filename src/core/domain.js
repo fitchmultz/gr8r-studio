@@ -1,5 +1,5 @@
 /* Pure DOM-free workspace domain rules shared by browser actions and server API. */
-import { LB, PCOLORS, PICONS, PR, PSTAT, ST, STATUSES, TEAMS_SEED, isClosedStatus } from './constants.js';
+import { LABELS, PCOLORS, PICONS, PR, PSTAT, ST, STATUSES, TEAMS_SEED, isClosedStatus } from './constants.js';
 import { addD, dOff, diffD, formatDateWith, isIsoDate, iso, parse, todayDate, uid } from './dates.js';
 import { htmlToMarkdown, markdownToHtml, stripHtml } from './markdown.js';
 import { seed } from '../data/seed.js';
@@ -52,6 +52,7 @@ export const visibleProjectsOf = (data, actor = data.me) =>
 export const tasksOfProject = (data, pid) => data.tasks.filter(t => t.project === pid && !t.archived);
 export const allTasksOf = (data, actor = data.me) => data.tasks.filter(t => !t.archived && canSeeProject(data, findProject(data, t.project), actor));
 export const commentsOfTask = (data, tid) => data.comments.filter(c => c.task === tid);
+export const childrenOfTask = (data, tid) => data.tasks.filter(t => !t.archived && t.parent === tid);
 export const isTaskOverdue = (t, now = Date.now()) => !!(t.due && !isClosedStatus(t.status) && diffD(parse(t.due), todayDate(now)) < 0);
 
 export function projectProgress(data, pid) {
@@ -63,6 +64,93 @@ export function projectProgress(data, pid) {
 export function ensureTeams(data) {
   if (!data.teams) data.teams = TEAMS_SEED.map(t => ({ ...t }));
   return data.teams;
+}
+
+export function ensureLabels(data) {
+  if (!Array.isArray(data.labels)) data.labels = LABELS.map(l => ({ ...l }));
+  return data.labels;
+}
+
+const RESERVED_LABEL_IDS = new Set(['none', 'null', 'clear', 'all']);
+
+export function slugifyLabelId(raw) {
+  return String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function resolveLabelColor(raw, index = 0) {
+  const palette = Object.values(PCOLORS);
+  if (raw == null || String(raw).trim() === '') return palette[index % palette.length];
+  const s = String(raw).trim();
+  const byName = PCOLORS[s.toLowerCase()];
+  if (byName) return byName;
+  if (/^#[0-9a-f]{6}$/i.test(s)) return s.toUpperCase();
+  throw new DomainError(`Invalid label color "${raw}". Expected a #RRGGBB hex code or one of: ${Object.keys(PCOLORS).join(', ')}`);
+}
+
+export function resolveLabel(data, ref) {
+  if (!ref) return null;
+  if (typeof ref === 'object' && ref.id) return ensureLabels(data).find(l => l.id === ref.id) || null;
+  const q = String(ref).trim().toLowerCase();
+  if (!q) return null;
+  const list = ensureLabels(data);
+  return list.find(l => l.id.toLowerCase() === q) || list.find(l => l.name.toLowerCase() === q) || null;
+}
+
+export function requireLabel(data, ref) {
+  const lbl = resolveLabel(data, ref);
+  if (!lbl) throw new DomainError(`Label not found: ${ref}`, 404);
+  return lbl;
+}
+
+export function createLabel(data, fields = {}) {
+  const list = ensureLabels(data);
+  const name = String(fields.name ?? '').trim();
+  if (!name) throw new DomainError('Label name is required');
+  const id = slugifyLabelId(fields.id ?? name);
+  if (!id || RESERVED_LABEL_IDS.has(id)) throw new DomainError(`Invalid label id "${fields.id ?? name}"`);
+  if (list.some(l => l.id.toLowerCase() === id)) throw new DomainError(`Label "${id}" already exists`, 409);
+  if (list.some(l => l.name.toLowerCase() === name.toLowerCase())) throw new DomainError(`Label "${name}" already exists`, 409);
+  const c = resolveLabelColor(fields.color ?? fields.c, list.length);
+  const created = { id, name, c };
+  list.push(created);
+  return created;
+}
+
+export function updateLabel(data, ref, patch = {}) {
+  const list = ensureLabels(data);
+  const lbl = requireLabel(data, ref);
+  if (patch.name !== undefined) {
+    const name = String(patch.name).trim();
+    if (!name) throw new DomainError('Label name cannot be empty');
+    if (list.some(l => l.id !== lbl.id && l.name.toLowerCase() === name.toLowerCase())) {
+      throw new DomainError(`Label "${name}" already exists`, 409);
+    }
+    lbl.name = name;
+  }
+  if (patch.color !== undefined || patch.c !== undefined) {
+    lbl.c = resolveLabelColor(patch.color ?? patch.c);
+  }
+  return lbl;
+}
+
+export function deleteLabel(data, ref) {
+  const lbl = requireLabel(data, ref);
+  data.labels = ensureLabels(data).filter(l => l.id !== lbl.id);
+  for (const t of data.tasks || []) {
+    if (Array.isArray(t.labels) && t.labels.includes(lbl.id)) {
+      t.labels = t.labels.filter(id => id !== lbl.id);
+    }
+  }
+  for (const v of data.savedViews || []) {
+    for (const f of v.filters || []) {
+      if (f.f === 'labels' && Array.isArray(f.v)) f.v = f.v.filter(id => id !== lbl.id);
+    }
+  }
+  return lbl;
 }
 
 export function resolveProject(data, ref, { includeArchived = true } = {}) {
@@ -164,13 +252,16 @@ function validatePriority(priority) {
   if (!PR[priority]) throw new DomainError(`Invalid priority "${priority}". Expected one of: ${Object.keys(PR).join(', ')}`);
   return priority;
 }
-function validateLabels(labels) {
+function validateLabels(data, labels) {
   if (!Array.isArray(labels)) throw new DomainError('labels must be an array');
+  const list = ensureLabels(data);
   const out = [];
   for (const raw of labels) {
-    const id = String(raw).trim().toLowerCase();
-    if (!LB[id]) throw new DomainError(`Invalid label "${raw}". Expected one of: ${Object.keys(LB).join(', ')}`);
-    if (!out.includes(id)) out.push(id);
+    const found = resolveLabel(data, raw);
+    if (!found) {
+      throw new DomainError(`Invalid label "${raw}". Expected one of: ${list.map(l => l.id).join(', ')}`);
+    }
+    if (!out.includes(found.id)) out.push(found.id);
   }
   return out;
 }
@@ -212,6 +303,43 @@ function activeProjectDeps(data, projectId, deps = [], selfId = null) {
   }
   return out;
 }
+
+export function isDescendantTask(data, candidateId, ancestorId) {
+  if (!candidateId || !ancestorId) return false;
+  if (candidateId === ancestorId) return true;
+  const seen = new Set([ancestorId]);
+  let cur = findTask(data, candidateId);
+  while (cur && cur.parent) {
+    if (cur.parent === ancestorId) return true;
+    if (seen.has(cur.id)) break;
+    seen.add(cur.id);
+    cur = findTask(data, cur.parent);
+  }
+  return false;
+}
+
+function resolveParentId(data, projectId, selfId, rawParent) {
+  if (rawParent == null) return null;
+  const s = typeof rawParent === 'string' ? rawParent.trim() : '';
+  if (typeof rawParent === 'string' && (!s || ['none', 'null', 'clear'].includes(s.toLowerCase()))) return null;
+  const pTask = requireTask(data, rawParent, { includeArchived: false });
+  if (projectId && pTask.project !== projectId) {
+    throw new DomainError(`Parent task ${pTask.key} belongs to a different project`);
+  }
+  if (selfId && isDescendantTask(data, pTask.id, selfId)) {
+    throw new DomainError('Cannot set parent: a task cannot be its own parent or descendant');
+  }
+  return pTask.id;
+}
+
+function activeProjectParent(data, projectId, rawParentId, selfId = null) {
+  if (!rawParentId) return null;
+  const pTask = findTask(data, rawParentId);
+  if (!pTask || pTask.archived || (projectId && pTask.project !== projectId)) return null;
+  if (selfId && isDescendantTask(data, pTask.id, selfId)) return null;
+  return pTask.id;
+}
+
 function resolveDescInput(fields) {
   if (fields.descHtml !== undefined) return String(fields.descHtml ?? '');
   if (fields.descMarkdown !== undefined) return markdownToHtml(fields.descMarkdown);
@@ -437,6 +565,7 @@ export function duplicateProject(data, projectOrRef, opts = {}) {
       title: src.title,
       status: 'todo',
       deps: [],
+      parent: null,
       by,
       now,
     });
@@ -445,6 +574,7 @@ export function duplicateProject(data, projectOrRef, opts = {}) {
   for (const src of srcTasks) {
     const dup = idMap.get(src.id);
     dup.deps = (src.deps || []).map(d => idMap.get(d)?.id).filter(Boolean);
+    dup.parent = src.parent ? idMap.get(src.parent)?.id || null : null;
   }
   return copy;
 }
@@ -531,17 +661,19 @@ export function createTask(data, fields = {}, opts = {}) {
   const due = validateOptionalDate(fields.due, 'due');
   let start = validateOptionalDate(fields.start, 'start');
   if (start && due && start > due) start = due;
-  const labels = fields.labels ? validateLabels(fields.labels) : [];
+  const labels = fields.labels ? validateLabels(data, fields.labels) : [];
   const recur = validateRecur(fields.recur);
   const subtasks = Array.isArray(fields.subtasks) ? fields.subtasks.map(s => normalizeSubtaskInput(data, s)) : [];
   const prs = Array.isArray(fields.prs) ? fields.prs.map(normalizeTaskPrLink).filter(Boolean) : [];
   const deps = fields.deps ? resolveDepIds(data, p.id, fields.id, fields.deps) : [];
+  const parent = fields.parent !== undefined ? resolveParentId(data, p.id, fields.id, fields.parent) : null;
   const desc = resolveDescInput(fields) ?? '';
   const maxO = Math.max(0, ...data.tasks.map(t => t.order || 0));
   const t = {
     id: fields.id || uid('t'),
     key: fields.key || nextTaskKey(data, p),
     project: p.id,
+    parent,
     title: rawTitle,
     status,
     assignee,
@@ -593,6 +725,7 @@ export function duplicateTask(data, taskOrRef, opts = {}) {
       })),
       prs: [],
       deps: opts.deps !== undefined ? opts.deps : activeProjectDeps(data, targetProject.id, src.deps, src.id),
+      parent: opts.parent !== undefined ? opts.parent : targetProject.id === src.project ? activeProjectParent(data, targetProject.id, src.parent, null) : null,
       created: now,
       updated: now,
       fav: false,
@@ -637,17 +770,22 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
     patch.start = start && effDue && start > effDue ? effDue : start;
   }
   if (rawPatch.labels !== undefined || rawPatch.addLabels !== undefined || rawPatch.removeLabels !== undefined) {
-    let next = rawPatch.labels !== undefined ? validateLabels(rawPatch.labels) : [...t.labels];
+    let next = rawPatch.labels !== undefined ? validateLabels(data, rawPatch.labels) : [...t.labels];
     if (rawPatch.addLabels !== undefined) {
-      for (const l of validateLabels(rawPatch.addLabels)) if (!next.includes(l)) next.push(l);
+      for (const l of validateLabels(data, rawPatch.addLabels)) if (!next.includes(l)) next.push(l);
     }
     if (rawPatch.removeLabels !== undefined) {
-      const rm = new Set(validateLabels(rawPatch.removeLabels));
+      const rm = new Set(validateLabels(data, rawPatch.removeLabels));
       next = next.filter(l => !rm.has(l));
     }
     patch.labels = next;
   }
   const targetProject = patch.project ?? t.project;
+  if (rawPatch.parent !== undefined) {
+    patch.parent = resolveParentId(data, targetProject, t.id, rawPatch.parent);
+  } else if (patch.project !== undefined && t.parent) {
+    patch.parent = activeProjectParent(data, targetProject, t.parent, t.id);
+  }
   if (rawPatch.deps !== undefined || rawPatch.addDeps !== undefined || rawPatch.removeDeps !== undefined) {
     let next = rawPatch.deps !== undefined ? resolveDepIds(data, targetProject, t.id, rawPatch.deps) : activeProjectDeps(data, targetProject, t.deps, t.id);
     if (rawPatch.addDeps !== undefined) {
@@ -724,6 +862,7 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
             due: nd,
             start: nd,
             deps: activeProjectDeps(data, t.project, t.deps, t.id),
+            parent: activeProjectParent(data, t.project, t.parent, null),
             subtasks: t.subtasks.map(s => ({
               ...structuredClone(s),
               id: uid('s'),
@@ -748,12 +887,16 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
       const p = requireProject(data, nv);
       t.key = nextTaskKey(data, p);
       t.deps = activeProjectDeps(data, p.id, t.deps, t.id);
+      t.parent = activeProjectParent(data, p.id, t.parent, t.id);
       for (const other of data.tasks) {
-        if (other.id !== t.id && other.project !== p.id && other.deps?.includes(t.id)) {
-          other.deps = other.deps.filter(d => d !== t.id);
+        if (other.id !== t.id && other.project !== p.id) {
+          if (other.deps?.includes(t.id)) other.deps = other.deps.filter(d => d !== t.id);
+          if (other.parent === t.id) other.parent = null;
         }
       }
       logActivity(data, 'moved', t, `to ${p.name}`, { by, now });
+    } else if (k === 'parent') {
+      logActivity(data, 'set parent of', t, nv ? `to ${findTask(data, nv)?.key}` : '(none)', { by, now });
     } else if (k === 'labels') logActivity(data, 'updated labels on', t, '', { by, now });
     else if (k === 'title') logActivity(data, 'renamed', t, `to “${nv}”`, { by, now });
     else if (k === 'recur') logActivity(data, 'set repeat on', t, nv ? nv.toLowerCase() : 'off', { by, now });
@@ -763,10 +906,13 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
       t.archivedAt = nv ? now : null;
       if (nv) {
         for (const other of data.tasks) {
-          if (other.id !== t.id && other.deps?.includes(t.id)) {
-            other.deps = other.deps.filter(d => d !== t.id);
+          if (other.id !== t.id) {
+            if (other.deps?.includes(t.id)) other.deps = other.deps.filter(d => d !== t.id);
+            if (other.parent === t.id) other.parent = null;
           }
         }
+      } else if (t.parent) {
+        t.parent = activeProjectParent(data, t.project, t.parent, t.id);
       }
       logActivity(data, nv ? 'archived' : 'restored', t, '', { by, now });
     }
@@ -783,6 +929,7 @@ export function deleteTasks(data, idsOrRefs) {
   data.tasks = data.tasks.filter(t => !set.has(t.id));
   data.tasks.forEach(t => {
     t.deps = (t.deps || []).filter(d => !set.has(d));
+    if (t.parent && set.has(t.parent)) t.parent = null;
   });
   data.comments = data.comments.filter(c => !set.has(c.task));
   if (data.files) {
@@ -860,6 +1007,7 @@ export function promoteSubtask(data, taskOrRef, subRef, opts = {}) {
     {
       title: s.title,
       project: t.project,
+      parent: t.id,
       status: s.done ? 'done' : 'todo',
       assignee: validMemberId(data, s.assignee || t.assignee),
       priority: t.priority,
@@ -906,8 +1054,17 @@ export function toggleReaction(data, commentId, emoji, actor = data.me) {
 /* ---------- queries & search ---------- */
 export function formatTaskForApi(data, t) {
   const p = findProject(data, t.project);
+  const parentTask = t.parent ? findTask(data, t.parent) : null;
+  const children = childrenOfTask(data, t.id);
+  const activeChildren = children.filter(c => c.status !== 'canceled');
   return {
     ...t,
+    parent: t.parent || null,
+    parentKey: parentTask?.key || null,
+    parentTitle: parentTask?.title || null,
+    childKeys: children.map(c => c.key),
+    childCount: activeChildren.length,
+    childDoneCount: activeChildren.filter(c => c.status === 'done').length,
     projectKey: p?.key || null,
     projectName: p?.name || null,
     assigneeName: findMember(data, t.assignee)?.name || null,
@@ -984,9 +1141,19 @@ export function queryTasks(data, filters = {}, opts = {}) {
   if (filters.label) {
     const vals = String(filters.label)
       .split(',')
-      .map(s => s.trim().toLowerCase())
-      .filter(Boolean);
+      .map(s => s.trim())
+      .filter(Boolean)
+      .map(s => resolveLabel(data, s)?.id || s.toLowerCase());
     out = out.filter(t => vals.some(v => (t.labels || []).includes(v)));
+  }
+  if (filters.parent !== undefined && filters.parent !== '') {
+    const raw = String(filters.parent).trim();
+    if (['none', 'null', 'root', 'top'].includes(raw.toLowerCase())) {
+      out = out.filter(t => !t.parent);
+    } else {
+      const pid = requireTask(data, raw).id;
+      out = out.filter(t => t.parent === pid);
+    }
   }
   if (filters.due) {
     const v = String(filters.due).trim().toLowerCase();
@@ -1073,7 +1240,7 @@ export function searchWorkspace(data, query, opts = {}) {
 
 /* ---------- atomic field-level workspace diff & merge ---------- */
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const KEYED_DATA_LISTS = ['teams', 'workspaces', 'files', 'notifs', 'events', 'savedViews'];
+const KEYED_DATA_LISTS = ['teams', 'labels', 'workspaces', 'files', 'notifs', 'events', 'savedViews'];
 const KNOWN_DATA_KEYS = new Set([
   'ws',
   'notifPrefs',
@@ -1302,7 +1469,9 @@ export function diffWorkspacePatch(baseState, nextState) {
   if (comments) patch.comments = comments;
 
   for (const key of KEYED_DATA_LISTS) {
-    const listDiff = diffKeyedList(bd[key], nd[key]);
+    const baseList = key === 'labels' ? (bd.labels ?? LABELS) : key === 'teams' ? (bd.teams ?? TEAMS_SEED) : bd[key];
+    const nextList = key === 'labels' ? (nd.labels ?? LABELS) : key === 'teams' ? (nd.teams ?? TEAMS_SEED) : nd[key];
+    const listDiff = diffKeyedList(baseList, nextList);
     if (listDiff) patch[key] = listDiff;
   }
 
@@ -1533,6 +1702,10 @@ export function applyWorkspacePatch(targetState, patch) {
       const nextDeps = activeProjectDeps(d, t.project, rawDeps, t.id);
       if (!deepEqual(rawDeps, nextDeps)) rekeyed = true;
       t.deps = nextDeps;
+      const rawParent = t.parent || null;
+      const nextParent = activeProjectParent(d, t.project, rawParent, t.id);
+      if (rawParent !== nextParent) rekeyed = true;
+      t.parent = nextParent;
     }
   }
 
@@ -1602,12 +1775,26 @@ export function applyWorkspacePatch(targetState, patch) {
   // 5. Generic keyed lists
   for (const key of KEYED_DATA_LISTS) {
     if (patch[key] === undefined) continue;
+    if (key === 'labels') ensureLabels(d);
+    if (key === 'teams') ensureTeams(d);
     d[key] = applyGenericKeyedList(d[key], patch[key], {
       filterCreated: raw => (!raw.project || !!findProject(d, raw.project)) && (!raw.task || !!findTask(d, raw.task)),
       onAdjust: () => {
         rekeyed = true;
       },
     });
+  }
+  if (Array.isArray(d.labels)) {
+    const validLabelIds = new Set(d.labels.map(l => l.id));
+    for (const t of d.tasks) {
+      if (Array.isArray(t.labels)) {
+        const clean = t.labels.filter(id => validLabelIds.has(id));
+        if (clean.length !== t.labels.length) {
+          t.labels = clean;
+          rekeyed = true;
+        }
+      }
+    }
   }
 
   // 6. Activity

@@ -3,8 +3,9 @@
    ===================================================================== */
 import { dOff, esc, fmtDate } from '../core/utils.js';
 import { ic, wsLogo } from '../core/icons.js';
-import { D, S, me } from '../core/store.js';
-import { av, pIcon } from '../ui/helpers.js';
+import { PCOLORS } from '../core/constants.js';
+import { D, S, labelsList, me } from '../core/store.js';
+import { av, lbl, pIcon } from '../ui/helpers.js';
 import { permsTable, teamsGrid } from './members.js';
 import { page404 } from './errors.js';
 import { SHORTCUTS } from '../overlays/modals.js';
@@ -24,6 +25,7 @@ export const SET_NAV = [
     [
       ['members', 'Members', 'users'],
       ['teams', 'Teams', 'users-round'],
+      ['labels', 'Labels', 'tags'],
       ['projects', 'Projects', 'folder-kanban'],
       ['permissions', 'Permissions', 'shield'],
     ],
@@ -199,6 +201,48 @@ export function settingsBody(sec, title) {
       );
     case 'teams':
       return H('Teams group people and projects.') + teamsGrid();
+    case 'labels': {
+      const list = labelsList();
+      const newColor = S.ui.newLabelColor || Object.values(PCOLORS)[list.length % Object.values(PCOLORS).length];
+      return (
+        H('Create, recolor, and manage workspace labels used across tasks and agent workflows.') +
+        `<form class="panel" data-submit="createLabelSetting" style="padding:12px;margin-bottom:14px">
+          <div class="row" style="gap:10px;flex-wrap:wrap">
+            <input class="input grow" id="set-lbl-name" placeholder="New label name (e.g. Infra, Agent, Security)" aria-label="New label name" style="min-width:200px">
+            <div class="swatches" role="radiogroup" aria-label="Label color">${Object.entries(PCOLORS)
+              .map(
+                ([k, v]) =>
+                  `<button type="button" role="radio" aria-checked="${newColor === v}" class="sw ${newColor === v ? 'on' : ''}" style="--c:${v};width:20px;height:20px" data-a="setNewLabelColor" data-v="${v}" aria-label="${k}">${newColor === v ? ic('check', 11) : ''}</button>`,
+              )
+              .join('')}</div>
+            <button class="btn btn-primary btn-sm" type="submit" data-a="createLabelSetting">${ic('plus', 14)}Add label</button>
+          </div>
+        </form>
+        <div class="panel" style="overflow:hidden">${
+          list.length
+            ? list
+                .map(l => {
+                  const used = d.tasks.filter(t => !t.archived && (t.labels || []).includes(l.id)).length;
+                  return `<div class="mini" style="min-height:46px;gap:12px;cursor:default">
+                    ${lbl(l.id)}
+                    <span class="mono faint" style="font-size:11.5px">${esc(l.id)}</span>
+                    <span class="sp"></span>
+                    <div class="swatches" role="group" aria-label="Color for ${esc(l.name)}">${Object.entries(PCOLORS)
+                      .map(
+                        ([k, v]) =>
+                          `<button type="button" class="sw ${l.c.toUpperCase() === v.toUpperCase() ? 'on' : ''}" style="--c:${v};width:16px;height:16px" data-a="recolorLabelSetting" data-id="${esc(l.id)}" data-v="${v}" aria-label="${k}"></button>`,
+                      )
+                      .join('')}</div>
+                    <span class="faint num" style="font-size:12px">${used} task${used === 1 ? '' : 's'}</span>
+                    <button class="btn btn-ghost btn-sm" data-a="renameLabelSetting" data-id="${esc(l.id)}">${ic('pencil', 13)}Rename</button>
+                    <button class="ibtn ibtn-sm" data-a="deleteLabelSetting" data-id="${esc(l.id)}" aria-label="Delete label ${esc(l.name)}" style="color:var(--red)">${ic('trash-2', 14)}</button>
+                  </div>`;
+                })
+                .join('')
+            : '<p class="faint" style="padding:14px">No labels configured.</p>'
+        }</div>`
+      );
+    }
     case 'projects': {
       const arch = d.projects.filter(p => p.archived);
       return (

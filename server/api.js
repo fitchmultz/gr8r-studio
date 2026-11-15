@@ -1,19 +1,23 @@
 /* Domain REST API for Gr8r Studio: atomic project, task, subtask, comment,
    activity, and search operations backed by src/core/domain.js. */
-import { LABELS, PRIOS, PSTAT, STATUSES } from '../src/core/constants.js';
+import { PRIOS, PSTAT, STATUSES } from '../src/core/constants.js';
 import {
   DomainError,
   addComment,
   addSubtask,
   applyTaskPatch,
   applyWorkspacePatch,
+  childrenOfTask,
   commentsOfTask,
   createDefaultState,
+  createLabel,
   createProject,
   createTask,
   deleteComment,
+  deleteLabel,
   deleteProject,
   deleteTasks,
+  ensureLabels,
   ensureTeams,
   findMember,
   findProject,
@@ -31,6 +35,7 @@ import {
   resolveTask,
   searchWorkspace,
   syncGitHubPullRequests,
+  updateLabel,
   updateProject,
   updateSubtask,
 } from '../src/core/domain.js';
@@ -136,10 +141,45 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
         vocab: {
           statuses: STATUSES,
           priorities: PRIOS,
-          labels: LABELS.map(l => ({ id: l.id, name: l.name })),
+          labels: ensureLabels(d).map(l => ({ id: l.id, name: l.name, color: l.c })),
           projectStatuses: Object.entries(PSTAT).map(([id, v]) => ({ id, name: v.name })),
         },
       });
+    }
+
+    // /api/labels
+    if (segments[0] === 'labels') {
+      if (segments.length === 1 && method === 'GET') {
+        const { rev, state } = readView();
+        return send(res, 200, { rev, labels: ensureLabels(state.data) });
+      }
+      if (segments.length === 1 && method === 'POST') {
+        const result = await mutate((data, body) => {
+          const label = createLabel(data, body);
+          return { label, labels: ensureLabels(data) };
+        });
+        if (result) send(res, 201, result);
+        return;
+      }
+      if (segments.length === 2) {
+        const ref = segments[1];
+        if (method === 'PATCH') {
+          const result = await mutate((data, body) => {
+            const label = updateLabel(data, ref, body);
+            return { label, labels: ensureLabels(data) };
+          });
+          if (result) send(res, 200, result);
+          return;
+        }
+        if (method === 'DELETE') {
+          const result = await mutate(data => {
+            const label = deleteLabel(data, ref);
+            return { deleted: label.id, labels: ensureLabels(data) };
+          });
+          if (result) send(res, 200, result);
+          return;
+        }
+      }
     }
 
     // PATCH /api/workspace — atomic field-level merge for browser UI & offline edits
@@ -299,12 +339,13 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
           const { rev, state } = readView();
           const d = state.data;
           const t = requireTask(d, ref);
+          const subIssues = childrenOfTask(d, t.id).map(c => formatTaskForApi(d, c));
           const comments = commentsOfTask(d, t.id).map(c => enrichComment(d, c));
           const activity = d.activity
             .filter(a => a.task === t.id)
             .slice(0, 50)
             .map(a => enrichActivity(d, a));
-          return send(res, 200, { rev, task: formatTaskForApi(d, t), comments, activity });
+          return send(res, 200, { rev, task: formatTaskForApi(d, t), subIssues, comments, activity });
         }
         if (method === 'PATCH') {
           const result = await mutate((data, body) => {

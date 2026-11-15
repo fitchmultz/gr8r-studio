@@ -71,6 +71,7 @@ export function taskModal(m, H) {
     <div class="field"><label class="sr" for="f-desc">Description</label><textarea class="textarea" id="f-desc" data-in="form" data-f="desc" placeholder="Add a description… (optional)" rows="3">${esc(f.desc)}</textarea></div>
     <div class="row" style="flex-wrap:wrap;gap:6px">
       ${formChip('project', `<span class="pdot" style="--c:${pColor(p)}"></span>${esc(p?.name || 'Project')}`, 'Project')}
+      ${formChip('parent', f.parent && task(f.parent) ? `${ic('corner-left-up', 13)}<span class="mono">${task(f.parent).key}</span>` : `${ic('corner-left-up', 13)}Parent`, 'Parent')}
       ${formChip('status', stPill(f.status), 'Status')}
       ${formChip('assignee', `${av(f.assignee, 'sm', false)}${esc(mem(f.assignee)?.name || 'Assignee')}`, 'Assignee')}
       ${formChip('priority', prPill(f.priority), 'Priority')}
