@@ -16,7 +16,7 @@ export default [
     languageOptions: { ecmaVersion: 'latest', sourceType: 'module', globals: { ...globals['shared-node-browser'] } },
   },
   {
-    files: ['vite.config.js', 'eslint.config.js', 'server/**/*.js'],
+    files: ['vite.config.js', 'eslint.config.js', 'server/**/*.js', 'cli/**/*.js'],
     languageOptions: { globals: { ...globals.node } },
   },
 ];

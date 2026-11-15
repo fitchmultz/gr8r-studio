@@ -4,6 +4,14 @@
   "private": true,
   "description": "Gr8r Studio: a calm, structured project management workspace.",
   "type": "module",
+  "bin": {
+    "gr8r": "./cli/gr8r.js"
+  },
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -14,7 +22,7 @@
     "test": "node --test 'server/test/*.test.js'"
   },
   "engines": {
-    "node": "^20.19.0 || >=22.12.0"
+    "node": ">=22.21.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
