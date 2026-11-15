@@ -410,9 +410,7 @@ export function mentionsWorkspaceOwner(data, rawText) {
   if (np.push_mention === false) return false;
   if (np.mention_all === false && !np.mention_ws && np.mention_team === false) return false;
   const stripped = stripCodeAndComments(String(rawText ?? ''));
-  const tokens = [...stripped.matchAll(/(?:^|[^\w])@([a-z0-9._-]+)/gi)]
-    .map(m => m[1].replace(/[._-]+$/, '').toLowerCase())
-    .filter(Boolean);
+  const tokens = [...stripped.matchAll(/(?:^|[^\w])@([a-z0-9._-]+)/gi)].map(m => m[1].replace(/[._-]+$/, '').toLowerCase()).filter(Boolean);
   if (!tokens.length) return false;
   const owner = findMember(data, data.me);
   const ownerTokens = new Set(['me', 'owner']);
@@ -1143,14 +1141,7 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
       logActivity(data, nv ? 'claimed' : 'released', t, nv ? `(${nv})` : '', { by, agent: nv || agent, now });
     } else if (k === 'assignee') {
       logActivity(data, 'assigned', t, nv ? `to ${findMember(data, nv)?.name}` : '(unassigned)', { by, agent, now });
-      if (
-        isExternalActor &&
-        nv &&
-        nv === data.me &&
-        data.notifPrefs?.assign_self !== false &&
-        data.notifPrefs?.push_assign !== false &&
-        !opts.needsOwner
-      ) {
+      if (isExternalActor && nv && nv === data.me && data.notifPrefs?.assign_self !== false && data.notifPrefs?.push_assign !== false && !opts.needsOwner) {
         pushNotif(data, { type: 'assign', by, agent, task: t, text: 'assigned you', snippet: t.title }, { now });
       }
     } else if (k === 'desc') {
