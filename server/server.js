@@ -29,78 +29,43 @@ const MIME = {
   '.woff2': 'font/woff2',
 };
 
-const DIRECT_SOCKET_ALLOWLIST = new net.BlockList();
-DIRECT_SOCKET_ALLOWLIST.addSubnet('127.0.0.0', 8, 'ipv4');
-DIRECT_SOCKET_ALLOWLIST.addAddress('::1', 'ipv6');
-DIRECT_SOCKET_ALLOWLIST.addSubnet('100.64.0.0', 10, 'ipv4');
-DIRECT_SOCKET_ALLOWLIST.addSubnet('fd7a:115c:a1e0::', 48, 'ipv6');
-/* Docker's local bridge gateway when the host publishes 127.0.0.1:4180:4180. */
-DIRECT_SOCKET_ALLOWLIST.addSubnet('172.16.0.0', 12, 'ipv4');
+const TAILNET_IPS = new net.BlockList();
+TAILNET_IPS.addSubnet('100.64.0.0', 10, 'ipv4');
+TAILNET_IPS.addSubnet('fd7a:115c:a1e0::', 48, 'ipv6');
 
-const FORWARDED_CLIENT_ALLOWLIST = new net.BlockList();
-FORWARDED_CLIENT_ALLOWLIST.addSubnet('127.0.0.0', 8, 'ipv4');
-FORWARDED_CLIENT_ALLOWLIST.addAddress('::1', 'ipv6');
-FORWARDED_CLIENT_ALLOWLIST.addSubnet('100.64.0.0', 10, 'ipv4');
-FORWARDED_CLIENT_ALLOWLIST.addSubnet('fd7a:115c:a1e0::', 48, 'ipv6');
-
-const PUBLIC_TUNNEL_HEADERS = [
-  'tailscale-funnel-request',
-  'cf-connecting-ip',
-  'cf-ray',
-  'true-client-ip',
-  'fly-client-ip',
-  'x-vercel-forwarded-for',
-  'fastly-client-ip',
-];
-
-function normalizeIp(raw) {
-  let s = String(raw || '')
+function stripV4Mapped(raw) {
+  const s = String(raw || '')
     .trim()
-    .replace(/^"(.*)"$/, '$1');
-  if (!s) return null;
-  if (s.startsWith('[')) {
-    const end = s.indexOf(']');
-    if (end === -1) return null;
-    s = s.slice(1, end);
-  } else if (s.includes('.') && /^[^:]+:\d+$/.test(s)) {
-    s = s.slice(0, s.lastIndexOf(':'));
+    .replace(/%[^%]+$/, '');
+  return /^::ffff:/i.test(s) && s.includes('.') ? s.slice(7) : s;
+}
+
+function isTailnetIp(raw) {
+  const ip = stripV4Mapped(raw);
+  const ver = net.isIP(ip);
+  return !!ver && TAILNET_IPS.check(ip, ver === 6 ? 'ipv6' : 'ipv4');
+}
+
+function readLinuxDefaultGateway() {
+  try {
+    for (const line of fs.readFileSync('/proc/net/route', 'utf8').split('\n').slice(1)) {
+      const cols = line.trim().split(/\s+/);
+      if (cols[1] === '00000000' && /^[0-9A-Fa-f]{8}$/.test(cols[2])) {
+        const n = Number.parseInt(cols[2], 16);
+        return `${n & 255}.${(n >>> 8) & 255}.${(n >>> 16) & 255}.${(n >>> 24) & 255}`;
+      }
+    }
+  } catch {
+    /* non-Linux host */
   }
-  const zone = s.indexOf('%');
-  if (zone !== -1) s = s.slice(0, zone);
-  if (/^::ffff:/i.test(s) && s.includes('.')) s = s.slice(7);
-  const ver = net.isIP(s);
-  if (!ver) return null;
-  return { ip: s, family: ver === 6 ? 'ipv6' : 'ipv4' };
+  return null;
 }
 
-function checkIp(blockList, raw) {
-  const parsed = normalizeIp(raw);
-  return !!parsed && blockList.check(parsed.ip, parsed.family);
-}
+const DOCKER_LOOPBACK_GW = process.env.GR8R_DOCKER_LOOPBACK === '1' ? readLinuxDefaultGateway() : null;
 
-function isTrustedHostname(rawHost) {
-  const s = String(rawHost || '').trim();
-  if (!s) return false;
-  let host = s;
-  if (s.startsWith('[')) {
-    const end = s.indexOf(']');
-    if (end === -1) return false;
-    host = s.slice(1, end);
-  } else {
-    const colon = s.indexOf(':');
-    if (colon !== -1 && s.indexOf(':', colon + 1) === -1) host = s.slice(0, colon);
-  }
-  host = host.toLowerCase().replace(/\.$/, '');
-  return host === 'localhost' || host.endsWith('.ts.net') || checkIp(FORWARDED_CLIENT_ALLOWLIST, host);
-}
-
-function headerList(val) {
-  if (val === undefined) return null;
-  const raw = Array.isArray(val) ? val.join(',') : String(val);
-  return raw
-    .split(',')
-    .map(part => part.trim())
-    .filter(Boolean);
+function isLocalOrTailnetSocket(raw) {
+  const ip = stripV4Mapped(raw);
+  return ip === '127.0.0.1' || ip === '::1' || (DOCKER_LOOPBACK_GW !== null && ip === DOCKER_LOOPBACK_GW) || isTailnetIp(ip);
 }
 
 export function normalizeTrustBootstrap(val = 'tailnet') {
@@ -113,50 +78,34 @@ export function normalizeTrustBootstrap(val = 'tailnet') {
   throw new Error(`Invalid trustBootstrap "${val}". Expected tailnet, none, or always.`);
 }
 
+/* Direct loopback / direct tailnet sockets bootstrap without extra headers.
+   Proxied requests only bootstrap when Tailscale Serve injects Tailscale-User-Login
+   (which Serve strips from incoming traffic and never sets on Funnel) over a single
+   tailnet X-Forwarded-For hop. */
 export function isTrustedPrivateRequest(req) {
-  if (!checkIp(DIRECT_SOCKET_ALLOWLIST, req.socket?.remoteAddress)) return false;
-  for (const h of PUBLIC_TUNNEL_HEADERS) {
-    const v = req.headers[h];
-    if (v !== undefined && String(v).trim() !== '') return false;
+  if (!isLocalOrTailnetSocket(req.socket?.remoteAddress)) return false;
+  const forwarded = Boolean(
+    req.headers['x-forwarded-for'] ||
+    req.headers['x-forwarded-proto'] ||
+    req.headers['x-forwarded-host'] ||
+    req.headers['x-real-ip'] ||
+    req.headers.forwarded ||
+    req.headers['tailscale-funnel-request'] ||
+    req.headers['cf-connecting-ip'],
+  );
+  if (!forwarded) {
+    const rawHost = String(req.headers.host || '')
+      .trim()
+      .toLowerCase();
+    const host = rawHost.startsWith('[') ? rawHost.slice(1, rawHost.indexOf(']')) : rawHost.replace(/:\d+$/, '');
+    return host === '127.0.0.1' || host === 'localhost' || host === '::1' || isTailnetIp(host);
   }
-  const hosts = headerList(req.headers.host);
-  if (!hosts?.length || !hosts.every(isTrustedHostname)) return false;
-  if (req.headers['x-forwarded-host'] !== undefined) {
-    const fwdHosts = headerList(req.headers['x-forwarded-host']);
-    if (!fwdHosts?.length || !fwdHosts.every(isTrustedHostname)) return false;
-  }
-  if (req.headers['x-forwarded-for'] !== undefined) {
-    const hops = headerList(req.headers['x-forwarded-for']);
-    if (!hops?.length || !hops.every(ip => checkIp(FORWARDED_CLIENT_ALLOWLIST, ip))) return false;
-  }
-  if (req.headers['x-real-ip'] !== undefined) {
-    const ips = headerList(req.headers['x-real-ip']);
-    if (!ips?.length || !ips.every(ip => checkIp(FORWARDED_CLIENT_ALLOWLIST, ip))) return false;
-  }
-  if (req.headers.forwarded !== undefined) {
-    const elems = headerList(req.headers.forwarded);
-    if (!elems?.length) return false;
-    let sawFor = false;
-    for (const elem of elems) {
-      for (const param of elem.split(';')) {
-        const eq = param.indexOf('=');
-        if (eq === -1) continue;
-        const k = param.slice(0, eq).trim().toLowerCase();
-        const v = param
-          .slice(eq + 1)
-          .trim()
-          .replace(/^"(.*)"$/, '$1');
-        if (k === 'for') {
-          sawFor = true;
-          if (!checkIp(FORWARDED_CLIENT_ALLOWLIST, v)) return false;
-        } else if (k === 'host' && !isTrustedHostname(v)) {
-          return false;
-        }
-      }
-    }
-    if (!sawFor) return false;
-  }
-  return true;
+  if (!String(req.headers['tailscale-user-login'] || '').trim() || req.headers['tailscale-funnel-request']) return false;
+  const hops = String(req.headers['x-forwarded-for'] || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  return hops.length === 1 && isTailnetIp(hops[0]);
 }
 
 function readStore(file) {
@@ -241,7 +190,7 @@ export function startServer({ port = 0, host = '127.0.0.1', token, dataFile, dis
       const canBootstrap = authorized(req) || trustMode === 'always' || (trustMode === 'tailnet' && isTrustedPrivateRequest(req));
       return send(res, 200, { token: canBootstrap ? token : null, authRequired: !canBootstrap }, 'application/json', {
         'cache-control': 'no-store',
-        vary: 'Authorization, Host, X-Forwarded-For, X-Forwarded-Host, Tailscale-Funnel-Request',
+        vary: 'Authorization, Host, Tailscale-User-Login, X-Forwarded-For',
       });
     }
     if (url.pathname === '/api/auth') {

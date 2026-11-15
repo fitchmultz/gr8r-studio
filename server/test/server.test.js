@@ -415,9 +415,10 @@ function rawGet(port, pathname, headers = {}) {
 test('gates /api/config token bootstrap to loopback and private Tailscale routes, and verifies tokens via /api/auth', async t => {
   const { port, base } = await withServer(t);
 
-  // Private Tailscale Serve route (tailnet CGNAT IP + .ts.net host) receives bootstrap token.
+  // Private Tailscale Serve route (Tailscale-User-Login + tailnet CGNAT IP) receives bootstrap token.
   const tsServe = await rawGet(port, '/api/config', {
     host: 'alienarchy.tail854973.ts.net:8443',
+    'tailscale-user-login': 'mitchfultz@gmail.com',
     'x-forwarded-for': '100.101.102.103',
     'x-forwarded-host': 'alienarchy.tail854973.ts.net:8443',
   });
@@ -426,13 +427,18 @@ test('gates /api/config token bootstrap to loopback and private Tailscale routes
   // Tailscale IPv6 ULA route also receives bootstrap token.
   const tsV6 = await rawGet(port, '/api/config', {
     host: 'alienarchy.tail854973.ts.net:8443',
+    'tailscale-user-login': 'mitchfultz@gmail.com',
     'x-forwarded-for': 'fd7a:115c:a1e0::1234',
   });
   assert.deepEqual(tsV6.json, { token: 'secret', authRequired: false });
 
   // Public exposure vectors withhold the token unless authenticated.
   for (const headers of [
+    // Proxied .ts.net without Tailscale-User-Login (e.g. Funnel or unauthenticated proxy) is rejected.
+    { host: 'alienarchy.tail854973.ts.net:8443', 'x-forwarded-for': '100.101.102.103' },
     { host: 'alienarchy.tail854973.ts.net', 'tailscale-funnel-request': '?1', 'x-forwarded-for': '203.0.113.9' },
+    // Spoofed Tailscale-User-Login through a public reverse proxy (public X-Forwarded-For) is rejected.
+    { host: 'gr8r.example.com', 'tailscale-user-login': 'spoof@example.com', 'x-forwarded-for': '203.0.113.9' },
     { host: 'gr8r.example.com', 'cf-connecting-ip': '203.0.113.9' },
     { host: '127.0.0.1:' + port, 'x-forwarded-for': '203.0.113.9' },
     { host: '127.0.0.1:' + port, 'x-real-ip': '198.51.100.4' },

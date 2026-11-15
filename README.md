@@ -91,14 +91,16 @@ browser keeps its own standalone copy (no sync).
 Run the bundled server to keep one workspace in sync across devices:
 
 Keep the server behind a private network or an authenticated reverse proxy. By
-default (`GR8R_TRUST_BOOTSTRAP=tailnet`), `GET /api/config` only bootstraps
-`GR8R_TOKEN` automatically on direct loopback and private Tailscale Serve
-(`*.ts.net` / `100.64.0.0/10`) routes. Requests arriving through Tailscale
-Funnel, Cloudflare Tunnel, or any public reverse proxy receive
+default (`GR8R_TRUST_BOOTSTRAP=tailnet`), `GET /api/config` bootstraps
+`GR8R_TOKEN` only for direct loopback clients and Tailscale Serve requests
+carrying `Tailscale-User-Login`. Requests arriving through Tailscale Funnel,
+Cloudflare Tunnel, or forwarding reverse proxies receive
 `{ token: null, authRequired: true }` and must authenticate explicitly with
 `GR8R_TOKEN` (`POST /api/auth` in the browser or `Authorization: Bearer` in API
-clients). Set `GR8R_TRUST_BOOTSTRAP=none` to require an explicit token on every
-route.
+clients). If you place a non-Tailscale reverse proxy on loopback (especially one
+such as default nginx that omits `X-Forwarded-*` headers and rewrites `Host` to
+`127.0.0.1`), set `GR8R_TRUST_BOOTSTRAP=none` so every caller must supply
+`GR8R_TOKEN`.
 
 ```bash
 VITE_SYNC_URL=/api npm run build

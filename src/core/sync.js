@@ -118,12 +118,17 @@ function queuePush() {
 }
 
 async function loadConfig() {
+  if (!TOKEN) {
+    const saved = readSavedToken();
+    if (saved) setToken(saved);
+  }
+  const sentToken = TOKEN;
   try {
     const r = await fetch(BASE + '/config', { headers: auth });
     if (!r.ok) return false;
     const j = await r.json();
     if (j.authRequired && !j.token) {
-      if (readSavedToken()) writeSavedToken('');
+      if (sentToken && readSavedToken() === sentToken) writeSavedToken('');
       setToken('');
       requestTokenIfNeeded();
       return false;
@@ -275,7 +280,17 @@ export function initSync() {
     pull();
     connectEvents();
   });
-  addEventListener('storage', pull);
+  addEventListener('storage', e => {
+    if (e.key === TOKEN_KEY) {
+      setToken(e.newValue || '');
+      if (TOKEN) {
+        authWarned = false;
+        promptShown = false;
+        connectEvents();
+      }
+    }
+    pull();
+  });
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
       pull();
