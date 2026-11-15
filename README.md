@@ -110,10 +110,17 @@ cd server && GR8R_TOKEN=<secret> npm start    # app + sync API on 127.0.0.1:4180
   and answers `409` with the newer state otherwise; the client then adopts it.
 - Clients save locally on each change and debounce uploads. Pending uploads
   survive reloads and retry at boot, every 30 seconds, and on reconnection.
+  Open tabs also subscribe to `GET /api/events` (SSE) so server-side updates
+  from another device or API client appear immediately instead of waiting for
+  the 30-second fallback poll.
   A response for an older upload cannot overwrite a newer local save.
 - When two devices edit the same revision, the server accepts the first push.
   The other device loads that accepted version and discards its conflicting
   local edits. Sync copies the whole workspace; it does not merge task edits.
+- Domain API routes (`/api/workspace`, `/api/projects`, `/api/tasks`,
+  `/api/search`, `/api/activity`) apply single-entity mutations atomically on
+  the server using the same domain invariants as the browser UI, advancing the
+  workspace revision and notifying connected SSE clients.
 
 ### Docker
 

@@ -13,6 +13,9 @@ RUN VITE_SYNC_URL=$VITE_SYNC_URL npm run build
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production PORT=4180 HOST=0.0.0.0
+COPY package.json ./
+COPY src/core/ src/core/
+COPY src/data/ src/data/
 COPY server/ server/
 COPY --from=build /app/dist dist/
 RUN mkdir -p server/data && chown -R node:node /app
