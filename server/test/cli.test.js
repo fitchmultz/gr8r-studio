@@ -97,6 +97,9 @@ test('gr8r CLI manages config, projects, tasks, Markdown stdin, subtasks, commen
   r = await invoke(['project', 'update', 'PID', '--add-milestone', 'GA@2026-11-30', '--json'], { env });
   assert.deepEqual(JSON.parse(r.stdout).project.milestones, [{ name: 'GA', date: '2026-11-30' }]);
 
+  r = await invoke(['project', 'update', 'PID', '--remove-milestone', 'GA@2026-11-30', '--json'], { env });
+  assert.deepEqual(JSON.parse(r.stdout).project.milestones, []);
+
   const md = '#### Goal\n\nWire **UsageDoc** in `chat-projection.ts`.\n\n- Root turns\n- Child runs';
   r = await invoke(
     [

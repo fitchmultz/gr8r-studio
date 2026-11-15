@@ -536,7 +536,15 @@ export async function runCli(argv, io = {}) {
       if (opts['no-fav']) body.fav = false;
       if (opts.archive) body.archived = true;
       if (opts.restore) body.archived = false;
-      if (opts['remove-milestone']) body.removeMilestones = opts['remove-milestone'].map(s => s.trim()).filter(Boolean);
+      if (opts['remove-milestone']) {
+        body.removeMilestones = opts['remove-milestone']
+          .map(raw => {
+            const s = raw.trim();
+            const at = s.lastIndexOf('@');
+            return at > 0 && /^\d{4}-\d{2}-\d{2}$/.test(s.slice(at + 1).trim()) ? s.slice(0, at).trim() : s;
+          })
+          .filter(Boolean);
+      }
       if (opts['add-milestone']) {
         body.addMilestones = opts['add-milestone'].map(raw => {
           const at = raw.lastIndexOf('@');
