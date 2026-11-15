@@ -698,6 +698,7 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
             })),
             completedAt: null,
             attachments: [],
+            prs: [],
           },
           { by, now },
         );
@@ -1725,7 +1726,8 @@ function isIncompleteStackMerge(taskPrs, mergedLink) {
   return !taskPrs.some(other => {
     if (other.state !== 'merged' || !other.closing) return false;
     const otherPart = parseStackPart(other.title);
-    if (!otherPart) return true;
+    if (!otherPart) return false;
+    if (mergedLink.createdAt && other.updatedAt && other.updatedAt < mergedLink.createdAt) return false;
     return otherPart.total === part.total && otherPart.index >= part.total;
   });
 }

@@ -579,4 +579,55 @@ test('syncGitHubPullRequests handles draft/ready/merge, stacked (1/n) PRs, Refs 
 
   const dup = duplicateTask(state.data, t1.id, { now: FIXED_NOW + 600 });
   assert.deepEqual(dup.prs, []);
+
+  // 5. Prior non-stacked merged PR does not prematurely complete a later follow-up (1/2) stack;
+  //    and completing a recurring task via PR merge spawns the next occurrence with prs: [].
+  const tRecur = createTask(state.data, { project: pid.id, title: 'Weekly audit', status: 'todo', recur: 'Weekly', due: '2026-11-18' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 201,
+      title: `Initial audit (${tRecur.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T01:20:00Z',
+    },
+    { now: FIXED_NOW + 700 },
+  );
+  assert.equal(tRecur.status, 'done');
+  const nextOcc = state.data.tasks.find(x => x.id !== tRecur.id && x.title === 'Weekly audit');
+  assert.ok(nextOcc);
+  assert.deepEqual(nextOcc.prs, []);
+
+  // Follow-up stacked PR (1/2) created after completion reopens tRecur -> review, and merging (1/2) alone keeps it in review.
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 202,
+      title: `Audit follow-up (1/2) (${tRecur.key})`,
+      state: 'open',
+      draft: false,
+      createdAt: '2026-11-15T02:00:00Z',
+      updatedAt: '2026-11-15T02:00:00Z',
+    },
+    { now: FIXED_NOW + 800 },
+  );
+  assert.equal(tRecur.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 202,
+      title: `Audit follow-up (1/2) (${tRecur.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T02:00:00Z',
+      updatedAt: '2026-11-15T02:10:00Z',
+    },
+    { now: FIXED_NOW + 900 },
+  );
+  assert.equal(tRecur.status, 'review');
 });
