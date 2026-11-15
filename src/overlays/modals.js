@@ -21,9 +21,10 @@ export function openModal(m) {
   }, 30);
 }
 export function closeModal() {
-  S.ui.modals.pop();
+  const closed = S.ui.modals.pop();
   S.ui.pop = null;
   render();
+  closed?.onCancel?.();
 }
 export function modalHtml(m) {
   const H = (title, sub = '') =>

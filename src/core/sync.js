@@ -34,13 +34,20 @@ const syncOn = !!BASE;
 let authWarned = false;
 let promptShown = false;
 
+const isTokenModalOpen = () => S.ui.modals.some(m => m.id === 'sync-auth');
+
 function setToken(tok) {
   TOKEN = tok || '';
   auth = TOKEN ? { authorization: 'Bearer ' + TOKEN } : {};
 }
 
+function notifySignInNeeded(msg = 'Sync is paused until you sign in.') {
+  if (isTokenModalOpen()) return;
+  toast(msg, { kind: 'info', action: 'Sign in', onAction: openTokenModal, ms: 10000 });
+}
+
 const warnAuth = () => {
-  if (authWarned || promptShown) return;
+  if (authWarned || isTokenModalOpen()) return;
   authWarned = true;
   toast("Sync is off — the server rejected this device's token.", {
     kind: 'err',
@@ -78,7 +85,9 @@ async function submitToken(raw) {
 }
 
 function openTokenModal() {
+  if (isTokenModalOpen()) return;
   openModal({
+    id: 'sync-auth',
     type: 'prompt',
     title: 'Sign in to workspace sync',
     sub: 'This route requires your GR8R_TOKEN access token.',
@@ -87,21 +96,22 @@ function openTokenModal() {
     autocomplete: 'current-password',
     ok: 'Connect',
     run: submitToken,
+    onCancel: () => {
+      if (!TOKEN) notifySignInNeeded();
+    },
   });
 }
 
-function requestTokenIfNeeded() {
-  if (promptShown) return;
-  promptShown = true;
-  if (S.ui.modals.length === 0) {
+function requestTokenIfNeeded({ fromUserSave = false } = {}) {
+  if (isTokenModalOpen()) return;
+  if (!promptShown && S.ui.modals.length === 0) {
+    promptShown = true;
     openTokenModal();
-  } else {
-    toast('Sign in with GR8R_TOKEN to sync this workspace.', {
-      kind: 'info',
-      action: 'Sign in',
-      onAction: openTokenModal,
-      ms: 8000,
-    });
+    return;
+  }
+  if (!promptShown || fromUserSave) {
+    promptShown = true;
+    notifySignInNeeded('Sign in with GR8R_TOKEN to sync your changes.');
   }
 }
 
@@ -117,7 +127,7 @@ function queuePush() {
   pushT = setTimeout(push, 300);
 }
 
-async function loadConfig() {
+async function loadConfig({ fromUserSave = false } = {}) {
   if (!TOKEN) {
     const saved = readSavedToken();
     if (saved) setToken(saved);
@@ -130,7 +140,7 @@ async function loadConfig() {
     if (j.authRequired && !j.token) {
       if (sentToken && readSavedToken() === sentToken) writeSavedToken('');
       setToken('');
-      requestTokenIfNeeded();
+      requestTokenIfNeeded({ fromUserSave });
       return false;
     }
     const t = j.token;
@@ -145,10 +155,10 @@ async function loadConfig() {
 
 /* Authenticated request: pick up the token if we never got one; on a 401,
    the server may have rotated its token, so refresh it once and try again. */
-async function authedFetch(path, opts = {}) {
-  if (!TOKEN && !(await loadConfig())) return null;
+async function authedFetch(path, opts = {}, { fromUserSave = false } = {}) {
+  if (!TOKEN && !(await loadConfig({ fromUserSave }))) return null;
   let r = await fetch(BASE + path, { ...opts, headers: { ...auth, ...(opts.headers || {}) } });
-  if (r.status === 401 && (await loadConfig())) r = await fetch(BASE + path, { ...opts, headers: { ...auth, ...(opts.headers || {}) } });
+  if (r.status === 401 && (await loadConfig({ fromUserSave }))) r = await fetch(BASE + path, { ...opts, headers: { ...auth, ...(opts.headers || {}) } });
   return r;
 }
 
@@ -160,11 +170,15 @@ async function push() {
       const blob = getPendingSave();
       let r;
       try {
-        r = await authedFetch('/sync', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ baseRev: getRev(), state: { data: blob.data, prefs: blob.prefs, views: blob.views, collapsed: blob.collapsed } }),
-        });
+        r = await authedFetch(
+          '/sync',
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ baseRev: getRev(), state: { data: blob.data, prefs: blob.prefs, views: blob.views, collapsed: blob.collapsed } }),
+          },
+          { fromUserSave: true },
+        );
       } catch {
         /* The store retains the pending snapshot, including across reloads. */
         return;
