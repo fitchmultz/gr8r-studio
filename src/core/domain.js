@@ -72,6 +72,7 @@ export function ensureLabels(data) {
 }
 
 const RESERVED_LABEL_IDS = new Set(['none', 'null', 'clear', 'all']);
+const UNSAFE_OBJECT_IDS = new Set(['__proto__', 'constructor', 'prototype']);
 
 export function slugifyLabelId(raw) {
   return String(raw ?? '')
@@ -110,8 +111,9 @@ export function createLabel(data, fields = {}) {
   const list = ensureLabels(data);
   const name = String(fields.name ?? '').trim();
   if (!name) throw new DomainError('Label name is required');
-  const id = slugifyLabelId(fields.id ?? name);
-  if (!id || RESERVED_LABEL_IDS.has(id)) throw new DomainError(`Invalid label id "${fields.id ?? name}"`);
+  const rawSlug = slugifyLabelId(fields.id ?? name);
+  const id = fields.id === undefined && UNSAFE_OBJECT_IDS.has(rawSlug) ? `label-${rawSlug}` : rawSlug;
+  if (!id || RESERVED_LABEL_IDS.has(id) || UNSAFE_OBJECT_IDS.has(id)) throw new DomainError(`Invalid label id "${fields.id ?? name}"`);
   if (list.some(l => l.id.toLowerCase() === id)) throw new DomainError(`Label "${id}" already exists`, 409);
   if (list.some(l => l.name.toLowerCase() === name.toLowerCase())) throw new DomainError(`Label "${name}" already exists`, 409);
   const c = resolveLabelColor(fields.color ?? fields.c, list.length);

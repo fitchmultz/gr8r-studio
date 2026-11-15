@@ -27,6 +27,7 @@ import {
   queryTasks,
   removeMember,
   removeSubtask,
+  resolveLabel,
   searchWorkspace,
   syncGitHubPullRequests,
   updateLabel,
@@ -1269,8 +1270,17 @@ test('custom workspace labels and parent/child sub-issues enforce cycle, cascade
   assert.equal(infra.id, 'infra');
   assert.throws(() => createLabel(state.data, { name: 'infra' }), DomainError);
   assert.throws(() => createLabel(state.data, { name: 'Poison', color: 'constructor' }), DomainError);
+  assert.throws(() => createLabel(state.data, { id: 'prototype', name: 'Bad Explicit Id' }), DomainError);
   updateLabel(state.data, 'Infra', { name: 'Infrastructure', color: '#2288dd' });
   assert.equal(infra.c, '#2288DD');
+
+  // Ordinary label names like "Prototype" get a safe non-colliding id and survive diff/applyWorkspacePatch.
+  const protoSnap = structuredClone(state);
+  const protoLbl = createLabel(state.data, { name: 'Prototype', color: 'teal' });
+  assert.equal(protoLbl.id, 'label-prototype');
+  const protoSynced = structuredClone(protoSnap);
+  applyWorkspacePatch(protoSynced, diffWorkspacePatch(protoSnap, state));
+  assert.equal(resolveLabel(protoSynced.data, 'Prototype')?.id, 'label-prototype');
 
   const p = createProject(state.data, { name: 'Agent Hierarchy', key: 'AGH' }, { now: FIXED_NOW });
   const pOther = createProject(state.data, { name: 'Other Project', key: 'OTH' }, { now: FIXED_NOW });

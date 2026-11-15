@@ -383,8 +383,15 @@ A.deleteLabelSetting = el => {
     danger: true,
     run: () => {
       const snap = snapshot();
+      const snapViews = structuredClone(S.views);
       if (mutate(() => domainDeleteLabel(D(), cur.id, { views: S.views }))) {
-        toast(`Deleted label “${cur.name}”`, { action: 'Undo', onAction: () => restore(snap) });
+        toast(`Deleted label “${cur.name}”`, {
+          action: 'Undo',
+          onAction: () => {
+            S.views = snapViews;
+            restore(snap);
+          },
+        });
       }
     },
   });
