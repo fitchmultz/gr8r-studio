@@ -1,13 +1,14 @@
 /* =====================================================================
    ACTIONS · SUBTASKS: open, navigate, rename, notes, promote
    ===================================================================== */
-import { $, esc } from '../core/utils.js';
-import { S, logAct, save, task } from '../core/store.js';
+import { $ } from '../core/utils.js';
+import { D, S, save, task } from '../core/store.js';
+import { promoteSubtask as domainPromoteSubtask, resolveSubtask, updateSubtask as domainUpdateSubtask } from '../core/domain.js';
 import { mutate, toast } from '../ui/toast.js';
-import { render } from '../shell/render.js';
-import { A, BLUR, IN, createTask } from './actions.js';
+import { fxSet, render } from '../shell/render.js';
+import { A, BLUR, IN } from './actions.js';
 
-export const subOf = (t, sid) => t && t.subtasks.find(s => s.id === sid);
+export const subOf = (t, sid) => resolveSubtask(t, sid);
 A.openSub = el => {
   S.ui.subOpen = { tid: el.dataset.id, sid: el.dataset.sid };
   S.ui.pop = null;
@@ -40,15 +41,14 @@ BLUR.commitSubTitle = el => {
   const v = el.value.trim();
   if (s && v && v !== s.title)
     mutate(() => {
-      s.title = v;
-      t.updated = Date.now();
+      domainUpdateSubtask(D(), t, s.id, { title: v }, { by: D().me });
     });
 };
 IN.subNote = el => {
   const t = task(el.dataset.id);
   const s = subOf(t, el.dataset.sid);
   if (s) {
-    s.note = el.value;
+    domainUpdateSubtask(D(), t, s.id, { note: el.value }, { by: D().me });
     save();
   }
 };
@@ -59,18 +59,8 @@ A.promoteSub = el => {
   let n;
   if (
     !mutate(() => {
-      n = createTask({
-        title: s.title,
-        project: t.project,
-        status: s.done ? 'done' : 'todo',
-        assignee: s.assignee || t.assignee,
-        priority: t.priority,
-        due: s.due || null,
-        labels: [...t.labels],
-        desc: s.note ? `<p>${esc(s.note)}</p>` : '',
-      });
-      t.subtasks = t.subtasks.filter(x => x !== s);
-      logAct('converted a subtask of', t, `into ${n.key}`);
+      n = domainPromoteSubtask(D(), t, s.id, { by: D().me });
+      fxSet({ added: n.id });
     })
   )
     return;

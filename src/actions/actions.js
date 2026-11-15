@@ -2,9 +2,30 @@
    ACTIONS · INPUT HANDLERS · DRAG & DROP · KEYBOARD · INIT
    ===================================================================== */
 import { $, $$, TODAY, addD, dOff, esc, fmtDate, iso, parse, uid } from '../core/utils.js';
-import { PR, PSTAT, ST } from '../core/constants.js';
+import { PR, PSTAT } from '../core/constants.js';
 import { seed } from '../data/seed.js';
 import { D, DEFAULT_PREFS, S, allTasks, canSee, commentsOf, logAct, me, mem, proj, save, task, tasksOf, visibleProjects } from '../core/store.js';
+import {
+  RECUR_DAYS,
+  addComment as domainAddComment,
+  addSubtask as domainAddSubtask,
+  applyTaskPatch,
+  createProject as domainCreateProject,
+  createTask as domainCreateTask,
+  deleteComment as domainDeleteComment,
+  deleteProject as domainDeleteProject,
+  deleteTasks as domainDeleteTasks,
+  duplicateProject as domainDuplicateProject,
+  duplicateTask as domainDuplicateTask,
+  makeProjectKey,
+  nextTaskKey,
+  removeMember as domainRemoveMember,
+  removeSubtask as domainRemoveSubtask,
+  toggleReaction as domainToggleReaction,
+  updateProject as domainUpdateProject,
+  updateSubtask as domainUpdateSubtask,
+} from '../core/domain.js';
+import { htmlToMarkdown, markdownToHtml } from '../core/markdown.js';
 import { fileType, fsize } from '../ui/helpers.js';
 import { effectiveDark } from '../core/theme.js';
 import { mutate, toast } from '../ui/toast.js';
@@ -19,92 +40,22 @@ export const A = {},
   DBL = {},
   BLUR = {};
 
+export { RECUR_DAYS };
+
 /* ---------- task mutations ---------- */
 export function nextKey(p) {
-  p.seq = (p.seq || 200) + 1;
-  return p.key + '-' + p.seq;
+  return nextTaskKey(D(), p);
 }
 export function createTask(f) {
-  const p = proj(f.project) || visibleProjects().find(canSee);
-  const maxO = Math.max(0, ...D().tasks.map(t => t.order));
-  const t = Object.assign(
-    {
-      project: p.id,
-      title: 'Untitled',
-      status: 'todo',
-      assignee: null,
-      priority: 'none',
-      due: null,
-      start: null,
-      labels: [],
-      subtasks: [],
-      attachments: [],
-      deps: [],
-      desc: '',
-      estimate: null,
-      created: Date.now(),
-      updated: Date.now(),
-      order: maxO + 1,
-      fav: false,
-      recur: null,
-    },
-    f,
-    { project: p.id },
-  );
-  t.id = f.id || uid('t');
-  t.key = f.key || nextKey(p);
-  D().tasks.push(t);
+  const t = domainCreateTask(D(), f, { by: D().me, allowUntitled: true });
   fxSet({ added: t.id });
-  logAct('created', t);
   return t;
 }
-export const RECUR_DAYS = { Daily: 1, Weekly: 7, 'Every 2 weeks': 14, Monthly: 30 };
 export function applyPatch(t, patch) {
-  const msgs = [];
-  for (const k of Object.keys(patch)) {
-    const old = t[k],
-      nv = patch[k];
-    if (JSON.stringify(old) === JSON.stringify(nv)) continue;
-    t[k] = nv;
-    if (k === 'status') {
-      if (nv === 'done') {
-        t.completedAt = Date.now();
-        t.prevStatus = old;
-        logAct('completed', t);
-        fxSet({ done: t.id });
-      } else logAct('moved', t, `from ${ST[old].name} to ${ST[nv].name}`);
-      if (nv === 'done' && t.recur && t.due) {
-        const nd = iso(addD(parse(t.due), RECUR_DAYS[t.recur] || 7));
-        const n = createTask({
-          ...JSON.parse(JSON.stringify(t)),
-          id: undefined,
-          key: undefined,
-          status: 'todo',
-          due: nd,
-          start: nd,
-          subtasks: t.subtasks.map(s => ({ ...s, done: false })),
-          completedAt: null,
-          attachments: [],
-        });
-        delete n.prevStatus;
-        msgs.push(`Next “${t.title}” scheduled for ${fmtDate(nd)}`);
-      }
-    } else if (k === 'assignee') logAct('assigned', t, nv ? `to ${mem(nv)?.name}` : '(unassigned)');
-    else if (k === 'priority') logAct('changed priority of', t, `to ${PR[nv].name}`);
-    else if (k === 'due') logAct('changed due date of', t, nv ? `to ${fmtDate(nv)}` : '(cleared)');
-    else if (k === 'start') logAct('changed start date of', t, nv ? `to ${fmtDate(nv)}` : '(cleared)');
-    else if (k === 'project') {
-      const p = proj(nv);
-      t.key = nextKey(p);
-      logAct('moved', t, `to ${p.name}`);
-    } else if (k === 'labels') logAct('updated labels on', t);
-    else if (k === 'title') logAct('renamed', t, `to “${nv}”`);
-    else if (k === 'recur') logAct('set repeat on', t, nv ? nv.toLowerCase() : 'off');
-    else if (k === 'estimate') logAct('estimated', t, nv || 'none');
-    else if (k === 'deps') logAct('updated dependencies of', t);
-    t.updated = Date.now();
-  }
-  return msgs;
+  const res = applyTaskPatch(D(), t, patch, { by: D().me, fmtDate });
+  if (res.completed) fxSet({ done: t.id });
+  if (res.spawned) fxSet({ added: res.spawned.id });
+  return res.messages;
 }
 export function updateTask(id, patch) {
   if (id === '__form') {
@@ -281,28 +232,14 @@ A.popPick = el => {
     v = v || null;
     S.ui.pop = null;
     mutate(() => {
-      sb[k] = v;
-      logAct(
-        k === 'assignee' ? 'assigned a subtask on' : 'set a subtask due date on',
-        t,
-        k === 'assignee' ? (v ? `to ${mem(v).name}` : '(unassigned)') : v ? fmtDate(v) : '(cleared)',
-      );
+      domainUpdateSubtask(D(), t, sb.id, { [k]: v }, { by: D().me, fmtDate });
     });
     return;
   }
   if (p.type === 'pstatus') {
     const pr = proj(p.id);
     mutate(() => {
-      pr.status = v;
-      D().activity.unshift({
-        id: uid('a'),
-        by: D().me,
-        verb: 'changed status of project',
-        task: null,
-        project: pr.id,
-        at: Date.now(),
-        extra: 'to ' + PSTAT[v].name,
-      });
+      domainUpdateProject(D(), pr, { status: v }, { by: D().me });
     });
     S.ui.pop = null;
     render();
@@ -345,7 +282,7 @@ A.popToggleDep = el => {
   const p = S.ui.pop;
   const t = task(p.id);
   const v = el.dataset.v;
-  updateTask(p.id, { deps: t.deps.includes(v) ? t.deps.filter(x => x !== v) : [...t.deps, v] });
+  updateTask(p.id, t.deps.includes(v) ? { removeDeps: [v] } : { addDeps: [v] });
 };
 A.popMonth = el => {
   const p = S.ui.pop;
@@ -474,8 +411,8 @@ A.dupTask = el => {
   S.ui.pop = null;
   let n;
   mutate(() => {
-    n = createTask({ ...JSON.parse(JSON.stringify(t)), id: uid('t'), key: undefined, title: t.title + ' (copy)', created: Date.now(), fav: false });
-    n.key = nextKey(proj(n.project));
+    n = domainDuplicateTask(D(), t, { by: D().me });
+    fxSet({ added: n.id });
   });
   toast('Task duplicated', { action: 'Open', onAction: () => A.openTask({ dataset: { id: n.id } }) });
 };
@@ -485,17 +422,13 @@ A.archiveTask = el => {
   S.ui.pop = null;
   if (S.ui.drawer === t.id) S.ui.drawer = null;
   mutate(() => {
-    t.archived = true;
-    t.archivedAt = Date.now();
-    logAct('archived', t);
+    applyTaskPatch(D(), t, { archived: true }, { by: D().me });
   });
   toast(`Archived “${t.title}”`, { action: 'Undo', onAction: () => restore(snap) });
 };
 export function deleteTasks(ids) {
   const set = new Set(ids);
-  D().tasks = D().tasks.filter(t => !set.has(t.id));
-  D().tasks.forEach(t => (t.deps = t.deps.filter(d => !set.has(d))));
-  D().comments = D().comments.filter(c => !set.has(c.task));
+  domainDeleteTasks(D(), ids);
   if (set.has(S.ui.drawer)) S.ui.drawer = null;
   ids.forEach(i => S.ui.sel.delete(i));
 }
@@ -521,18 +454,15 @@ A.editTask = el => {
   if (!t) return;
   S.ui.form = {
     title: t.title,
-    desc: (t.desc || '')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim(),
+    desc: htmlToMarkdown(t.desc),
     project: t.project,
     status: t.status,
-    assignee: t.assignee,
+    assignee: mem(t.assignee)?.id || null,
     priority: t.priority,
     due: t.due,
     start: t.start,
     labels: [...t.labels],
-    subtasks: t.subtasks.map(s => ({ ...s })),
+    subtasks: t.subtasks.map(s => ({ ...s, assignee: mem(s.assignee)?.id || null })),
     files: [],
     recur: t.recur,
     more: false,
@@ -626,14 +556,7 @@ A.submitTask = () => {
     if (
       !mutate(() => {
         applyPatch(t, base);
-        if (
-          f.desc !==
-          (t.desc || '')
-            .replace(/<[^>]+>/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim()
-        )
-          t.desc = f.desc ? `<p>${esc(f.desc)}</p>` : '';
+        if (f.desc !== htmlToMarkdown(t.desc)) t.desc = markdownToHtml(f.desc);
         t.attachments.push(...files);
       })
     )
@@ -646,7 +569,7 @@ A.submitTask = () => {
   let t;
   if (
     !mutate(() => {
-      t = createTask({ ...base, desc: f.desc ? `<p>${esc(f.desc)}</p>` : '', attachments: files });
+      t = createTask({ ...base, descHtml: markdownToHtml(f.desc), attachments: files });
       files.forEach(x => D().files.unshift({ ...x, project: t.project, task: t.id }));
     })
   )
@@ -749,14 +672,13 @@ A.toggleSub = el => {
   const s = t.subtasks.find(x => x.id === el.dataset.sid);
   if (!s.done) fxSet({ done: s.id });
   mutate(() => {
-    s.done = !s.done;
-    logAct(s.done ? 'completed subtask on' : 'reopened subtask on', t, `“${s.title}”`);
+    domainUpdateSubtask(D(), t, s.id, { done: !s.done }, { by: D().me, fmtDate });
   });
 };
 A.rmSub = el => {
   const t = task(el.dataset.id);
   mutate(() => {
-    t.subtasks = t.subtasks.filter(x => x.id !== el.dataset.sid);
+    domainRemoveSubtask(D(), t, el.dataset.sid);
   });
 };
 KEY.addSub = el => {
@@ -766,8 +688,7 @@ KEY.addSub = el => {
   const nid = uid('s');
   fxSet({ added: nid });
   mutate(() => {
-    t.subtasks.push({ id: nid, title: v, done: false });
-    logAct('added subtask to', t, `“${v}”`);
+    domainAddSubtask(D(), t, { id: nid, title: v, done: false }, { by: D().me });
   });
   setTimeout(() => $('#d-sub')?.focus(), 0);
 };
@@ -881,8 +802,7 @@ A.postComment = el => {
   const t = task(id);
   if (
     mutate(() => {
-      D().comments.push({ id: uid('c'), task: id, by: D().me, at: Date.now(), text: txt, re: {} });
-      logAct('commented on', t);
+      domainAddComment(D(), t, txt, { by: D().me });
       S.ui.drafts[id] = '';
       S.ui.mention = null;
       S.ui.drawerTab = 'comments';
@@ -892,21 +812,17 @@ A.postComment = el => {
   }
 };
 A.delComment = el => {
-  const c = D().comments.find(x => x.id === el.dataset.id);
   const snap = snapshot();
   mutate(() => {
-    D().comments = D().comments.filter(x => x !== c);
+    domainDeleteComment(D(), el.dataset.id);
   });
   toast('Comment deleted', { action: 'Undo', onAction: () => restore(snap) });
 };
 A.react = el => {
-  const c = D().comments.find(x => x.id === el.dataset.id);
   const e = el.dataset.e;
   S.ui.pop = null;
   mutate(() => {
-    c.re = c.re || {};
-    const l = c.re[e] || [];
-    c.re[e] = l.includes(D().me) ? l.filter(x => x !== D().me) : [...l, D().me];
+    domainToggleReaction(D(), el.dataset.id, e, D().me);
   });
 };
 
@@ -1218,7 +1134,16 @@ A.newProject = () => {
 A.editProject = el => {
   const p = proj(el.dataset.id);
   S.ui.pop = null;
-  S.ui.pform = { name: p.name, desc: p.desc, icon: p.icon, color: p.color, team: p.team, lead: p.lead, due: p.due, tmpl: 'blank' };
+  S.ui.pform = {
+    name: p.name,
+    desc: p.desc,
+    icon: p.icon,
+    color: p.color,
+    team: p.team,
+    lead: mem(p.lead)?.id || D().me,
+    due: p.due,
+    tmpl: 'blank',
+  };
   S.ui.errors = {};
   openModal({ type: 'project', edit: p.id });
 };
@@ -1238,56 +1163,11 @@ A.pformSet = el => {
   render();
 };
 export function makeKey(name) {
-  let k = name
-    .split(/\s+/)
-    .map(w => w[0] || '')
-    .join('')
-    .toUpperCase()
-    .replace(/[^A-Z]/g, '')
-    .slice(0, 3);
-  if (k.length < 2)
-    k =
-      name
-        .replace(/[^A-Za-z]/g, '')
-        .slice(0, 3)
-        .toUpperCase() || 'PRJ';
-  while (D().projects.some(p => p.key === k)) k += 'X';
-  return k;
+  return makeProjectKey(D(), name);
 }
 export function createProject(f, tmplId) {
-  const p = {
-    id: uid('p'),
-    key: makeKey(f.name),
-    name: f.name,
-    icon: f.icon,
-    color: f.color,
-    status: 'planning',
-    team: f.team,
-    lead: f.lead,
-    due: f.due || dOff(30),
-    start: dOff(0),
-    fav: false,
-    members: [...new Set([D().me, f.lead])],
-    desc: f.desc || 'No description yet.',
-    milestones: [],
-    last: 0,
-  };
-  D().projects.push(p);
-  D().projOrder.unshift(p.id);
-  D().activity.unshift({ id: uid('a'), by: D().me, verb: 'created project', task: null, project: p.id, at: Date.now(), extra: '' });
   const tm = TEMPLATES.find(t => t.id === tmplId);
-  (tm?.tasks || []).forEach((title, i) =>
-    createTask({
-      project: p.id,
-      title,
-      status: i === 0 ? 'todo' : 'backlog',
-      assignee: i === 0 ? D().me : null,
-      priority: i === 0 ? 'high' : 'medium',
-      due: dOff(5 + i * 5),
-      start: dOff(i * 5),
-    }),
-  );
-  return p;
+  return domainCreateProject(D(), f, { by: D().me, starterTasks: tm?.tasks || [] });
 }
 A.submitProject = () => {
   const m = S.ui.modals[S.ui.modals.length - 1];
@@ -1304,16 +1184,20 @@ A.submitProject = () => {
     const p = proj(m.edit);
     if (
       mutate(() =>
-        Object.assign(p, {
-          name: f.name,
-          desc: f.desc,
-          icon: f.icon,
-          color: f.color,
-          team: f.team,
-          lead: f.lead,
-          due: f.due,
-          members: [...new Set([...p.members, f.lead])],
-        }),
+        domainUpdateProject(
+          D(),
+          p,
+          {
+            name: f.name,
+            desc: f.desc,
+            icon: f.icon,
+            color: f.color,
+            team: f.team,
+            lead: f.lead,
+            due: f.due,
+          },
+          { by: D().me },
+        ),
       )
     ) {
       S.ui.modals.pop();
@@ -1338,8 +1222,7 @@ A.dupProject = el => {
   S.ui.pop = null;
   let n;
   mutate(() => {
-    n = createProject({ ...p, name: p.name + ' copy' }, 'blank');
-    tasksOf(p.id).forEach(t => createTask({ ...JSON.parse(JSON.stringify(t)), id: uid('t'), key: undefined, project: n.id, status: 'todo' }));
+    n = domainDuplicateProject(D(), p, { by: D().me });
   });
   toast(`Duplicated ${p.name}`, { action: 'Open', onAction: () => go('project', { id: n.id }) });
 };
@@ -1355,8 +1238,7 @@ A.archiveProject = el => {
       const snap = snapshot();
       if (
         mutate(() => {
-          p.archived = true;
-          p.archivedAt = Date.now();
+          domainUpdateProject(D(), p, { archived: true }, { by: D().me });
         })
       ) {
         if (S.ui.route === 'project' && S.ui.params.id === p.id) go('projects');
@@ -1368,8 +1250,7 @@ A.archiveProject = el => {
 A.restoreProject = el => {
   const p = proj(el.dataset.id);
   mutate(() => {
-    p.archived = false;
-    p.archivedAt = null;
+    domainUpdateProject(D(), p, { archived: false }, { by: D().me });
   });
   toast(`Restored ${p.name}`);
 };
@@ -1387,14 +1268,11 @@ A.delProject = el => {
       const snap = snapshot();
       if (
         mutate(() => {
-          const ids = tasksOf(p.id).map(t => t.id);
-          D()
+          const ids = D()
             .tasks.filter(t => t.project === p.id)
-            .forEach(t => ids.push(t.id));
+            .map(t => t.id);
           deleteTasks(ids);
-          D().projects = D().projects.filter(x => x !== p);
-          D().projOrder = D().projOrder.filter(x => x !== p.id);
-          D().files = D().files.filter(f => f.project !== p.id);
+          domainDeleteProject(D(), p);
         })
       ) {
         if (S.ui.route === 'project' && S.ui.params.id === p.id) go('projects');
@@ -1512,11 +1390,7 @@ A.removeMember = el => {
       const snap = snapshot();
       if (
         mutate(() => {
-          D().members = D().members.filter(x => x !== m);
-          D().tasks.forEach(t => {
-            if (t.assignee === m.id) t.assignee = null;
-          });
-          D().projects.forEach(p => (p.members = p.members.filter(x => x !== m.id)));
+          domainRemoveMember(D(), m);
         })
       ) {
         if (S.ui.route === 'member') go('members');

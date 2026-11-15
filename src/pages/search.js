@@ -1,22 +1,12 @@
 /* ---------- SEARCH RESULTS ---------- */
 import { ago, esc } from '../core/utils.js';
 import { ic } from '../core/icons.js';
-import { D, S, allTasks, canSee, mem, pColor, proj, task, visibleProjects } from '../core/store.js';
+import { D, S, mem, pColor, proj, task } from '../core/store.js';
+import { searchWorkspace } from '../core/domain.js';
 import { FT, av, empty, hl, pIcon, pStatus, stIcon } from '../ui/helpers.js';
 
 export function searchAll(q) {
-  q = (q || '').trim().toLowerCase();
-  if (!q) return { tasks: [], projects: [], people: [], files: [], comments: [] };
-  const has = s => (s || '').toLowerCase().includes(q);
-  return {
-    tasks: allTasks()
-      .filter(t => has(t.title) || has(t.key) || has(t.desc.replace(/<[^>]+>/g, '')))
-      .slice(0, 30),
-    projects: visibleProjects().filter(p => has(p.name) || has(p.desc)),
-    people: D().members.filter(m => has(m.name) || has(m.email) || has(m.title)),
-    files: D().files.filter(f => has(f.name) && canSee(proj(f.project))),
-    comments: D().comments.filter(c => has(c.text) && task(c.task) && canSee(proj(task(c.task).project))),
-  };
+  return searchWorkspace(D(), q, { actor: D().me });
 }
 export function pageSearch() {
   const q = S.ui.searchQ;
