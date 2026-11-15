@@ -398,4 +398,32 @@ test('diffWorkspacePatch and applyWorkspacePatch merge concurrent field, subtask
   const singleRes = applyWorkspacePatch(singleServer, diffWorkspacePatch(singleBase, singleBrowser));
   assert.equal(singleRes.rekeyed, false);
   assert.deepEqual(singleServer.data.tasks.find(t => t.id === taskC.id).deps, [taskB.id]);
+
+  // Same-patch move task T (with comment + file) out of project P into newly created project Q, then delete P:
+  // T, its comment, and its file survive in Q without being cascade-deleted by deleteProject(P).
+  const rescueBase = createDefaultState(FIXED_NOW);
+  const pOld = createProject(rescueBase.data, { name: 'Old Project', key: 'OLD' }, { now: FIXED_NOW });
+  const rescuedTask = createTask(rescueBase.data, { project: pOld.id, title: 'Rescue me' }, { now: FIXED_NOW });
+  const rescuedComment = addComment(rescueBase.data, rescuedTask.id, 'Keep this comment', { now: FIXED_NOW });
+  rescueBase.data.files.push({ id: 'f_rescue', name: 'spec.md', project: pOld.id, task: rescuedTask.id });
+
+  const rescueServer = structuredClone(rescueBase);
+  const rescueBrowser = structuredClone(rescueBase);
+  const pDest = createProject(rescueBrowser.data, { name: 'Fresh Home', key: 'OLD_NEXT' }, { now: FIXED_NOW + 50 });
+  applyTaskPatch(rescueBrowser.data, rescuedTask.id, { project: pDest.id }, { now: FIXED_NOW + 100 });
+  rescueBrowser.data.files.find(f => f.id === 'f_rescue').project = pDest.id;
+  deleteProject(rescueBrowser.data, pOld.id);
+
+  const rescueOut = applyWorkspacePatch(rescueServer, diffWorkspacePatch(rescueBase, rescueBrowser));
+  assert.equal(rescueOut.rekeyed, false);
+  assert.equal(
+    rescueServer.data.projects.some(p => p.id === pOld.id),
+    false,
+  );
+  assert.equal(rescueServer.data.tasks.find(t => t.id === rescuedTask.id)?.project, pDest.id);
+  assert.equal(
+    rescueServer.data.comments.some(c => c.id === rescuedComment.id),
+    true,
+  );
+  assert.equal(rescueServer.data.files.find(f => f.id === 'f_rescue')?.project, pDest.id);
 });

@@ -1268,6 +1268,46 @@ export function applyWorkspacePatch(targetState, patch) {
   const d = targetState.data;
   let rekeyed = false;
 
+  const deletedProjIds = new Set(Array.isArray(patch.projects?.deleted) ? patch.projects.deleted : []);
+  const deletedTaskIds = new Set(Array.isArray(patch.tasks?.deleted) ? patch.tasks.deleted : []);
+  const createdProjIds = new Set(Array.isArray(patch.projects?.created) ? patch.projects.created.map(p => p?.id).filter(Boolean) : []);
+  const willHaveProject = pid => typeof pid === 'string' && !!pid && !deletedProjIds.has(pid) && (!!findProject(d, pid) || createdProjIds.has(pid));
+
+  // Pre-rescue tasks, files, and savedViews moved out of a project before deleteProject cascades.
+  if (deletedProjIds.size) {
+    if (isPlainObject(patch.tasks?.updated)) {
+      for (const [tid, tDiff] of Object.entries(patch.tasks.updated)) {
+        if (UNSAFE_KEYS.has(tid) || deletedTaskIds.has(tid)) continue;
+        const nextPid = tDiff?.fields?.set?.project;
+        const t = findTask(d, tid);
+        if (t && deletedProjIds.has(t.project) && willHaveProject(nextPid)) {
+          t.project = nextPid;
+        }
+      }
+    }
+    for (const key of ['files', 'savedViews']) {
+      const upd = patch[key]?.updated;
+      if (!isPlainObject(upd) || !Array.isArray(d[key])) continue;
+      for (const item of d[key]) {
+        const nextPid = upd[item?.id]?.set?.project;
+        if (item && deletedProjIds.has(item.project) && willHaveProject(nextPid)) {
+          item.project = nextPid;
+        }
+      }
+    }
+    // Also rescue files attached to a task that itself moved out of a deleted project.
+    if (Array.isArray(d.files)) {
+      for (const f of d.files) {
+        if (f?.task && deletedProjIds.has(f.project)) {
+          const parentTask = findTask(d, f.task);
+          if (parentTask && !deletedProjIds.has(parentTask.project)) {
+            f.project = parentTask.project;
+          }
+        }
+      }
+    }
+  }
+
   // 1. Projects
   if (patch.projects !== undefined) {
     if (!isPlainObject(patch.projects)) throw new DomainError('Invalid projects patch', 400);
@@ -1280,7 +1320,10 @@ export function applyWorkspacePatch(targetState, patch) {
       for (const [pid, pDiff] of Object.entries(patch.projects.updated)) {
         if (UNSAFE_KEYS.has(pid)) continue;
         const p = findProject(d, pid);
-        if (!p) continue;
+        if (!p) {
+          rekeyed = true;
+          continue;
+        }
         applyPlainFields(p, pDiff, { monotonicKeys: ['seq'] });
         if (d.projects.some(other => other.id !== p.id && other.key?.toUpperCase() === String(p.key || '').toUpperCase())) {
           p.key = makeProjectKey(d, p.name);
@@ -1326,7 +1369,10 @@ export function applyWorkspacePatch(targetState, patch) {
       for (const [tid, tDiff] of Object.entries(patch.tasks.updated)) {
         if (UNSAFE_KEYS.has(tid) || !isPlainObject(tDiff)) continue;
         const t = findTask(d, tid);
-        if (!t) continue;
+        if (!t) {
+          rekeyed = true;
+          continue;
+        }
         if (tDiff.fields) {
           if (!isPlainObject(tDiff.fields)) throw new DomainError('Invalid task fields patch', 400);
           const nextProjId = tDiff.fields.set?.project;
@@ -1381,6 +1427,34 @@ export function applyWorkspacePatch(targetState, patch) {
       const nextDeps = activeProjectDeps(d, t.project, rawDeps, t.id);
       if (!deepEqual(rawDeps, nextDeps)) rekeyed = true;
       t.deps = nextDeps;
+    }
+  }
+
+  // Ensure member references across surviving tasks/projects remain valid if a member was concurrently removed.
+  for (const t of d.tasks) {
+    if (t.assignee && !findMember(d, t.assignee)) {
+      t.assignee = null;
+      rekeyed = true;
+    }
+    for (const s of t.subtasks || []) {
+      if (s.assignee && !findMember(d, s.assignee)) {
+        s.assignee = null;
+        rekeyed = true;
+      }
+    }
+  }
+  for (const p of d.projects) {
+    if (Array.isArray(p.members)) {
+      const cleanMembers = p.members.filter(id => !!findMember(d, id));
+      if (cleanMembers.length !== p.members.length) {
+        p.members = cleanMembers;
+        rekeyed = true;
+      }
+    }
+    if (p.lead && !findMember(d, p.lead)) {
+      p.lead = d.me;
+      if (d.me && Array.isArray(p.members) && !p.members.includes(d.me)) p.members.push(d.me);
+      rekeyed = true;
     }
   }
 
