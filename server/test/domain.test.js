@@ -383,4 +383,19 @@ test('diffWorkspacePatch and applyWorkspacePatch merge concurrent field, subtask
 
   applyWorkspacePatch(depServer, diffWorkspacePatch(depBase, depBrowser));
   assert.deepEqual(depServer.data.tasks.find(t => t.id === tDependent.id).deps, []);
+
+  // Single-patch order independence: when dependent C precedes target B in data.tasks and one patch
+  // moves B into C's project and links C -> B, C.deps retains [B] without premature per-entry stripping.
+  const singleBase = createDefaultState(FIXED_NOW);
+  const sAlp = createProject(singleBase.data, { name: 'Alpha', key: 'ALP' }, { now: FIXED_NOW });
+  const sBet = createProject(singleBase.data, { name: 'Beta', key: 'BET' }, { now: FIXED_NOW });
+  const taskC = createTask(singleBase.data, { project: sAlp.id, title: 'Created first (dependent)' }, { now: FIXED_NOW });
+  const taskB = createTask(singleBase.data, { project: sBet.id, title: 'Created second (target)' }, { now: FIXED_NOW + 10 });
+  const singleServer = structuredClone(singleBase);
+  const singleBrowser = structuredClone(singleBase);
+  applyTaskPatch(singleBrowser.data, taskB.id, { project: sAlp.id }, { now: FIXED_NOW + 100 });
+  applyTaskPatch(singleBrowser.data, taskC.id, { addDeps: [taskB.id] }, { now: FIXED_NOW + 200 });
+  const singleRes = applyWorkspacePatch(singleServer, diffWorkspacePatch(singleBase, singleBrowser));
+  assert.equal(singleRes.rekeyed, false);
+  assert.deepEqual(singleServer.data.tasks.find(t => t.id === taskC.id).deps, [taskB.id]);
 });

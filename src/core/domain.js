@@ -1331,6 +1331,7 @@ export function applyWorkspacePatch(targetState, patch) {
           if (!isPlainObject(tDiff.fields)) throw new DomainError('Invalid task fields patch', 400);
           const nextProjId = tDiff.fields.set?.project;
           if (nextProjId !== undefined && !findProject(d, nextProjId)) {
+            rekeyed = true;
             const clonedFields = structuredClone(tDiff.fields);
             if (isPlainObject(clonedFields.set)) {
               delete clonedFields.set.project;
@@ -1352,14 +1353,16 @@ export function applyWorkspacePatch(targetState, patch) {
         if (tDiff.subtasks) {
           t.subtasks = applyGenericKeyedList(t.subtasks || [], tDiff.subtasks);
         }
-        t.deps = activeProjectDeps(d, t.project, Array.isArray(t.deps) ? t.deps : [], t.id);
       }
     }
     if (Array.isArray(patch.tasks.created)) {
       for (const raw of patch.tasks.created) {
         if (!isPlainObject(raw) || typeof raw.id !== 'string' || !raw.id || findTask(d, raw.id)) continue;
         const p = findProject(d, raw.project);
-        if (!p) continue;
+        if (!p) {
+          rekeyed = true;
+          continue;
+        }
         const t = structuredClone(raw);
         t.subtasks = Array.isArray(t.subtasks) ? t.subtasks : [];
         if (!t.key || typeof t.key !== 'string' || !t.key.startsWith(p.key + '-') || d.tasks.some(other => other.key === t.key)) {
@@ -1369,13 +1372,15 @@ export function applyWorkspacePatch(targetState, patch) {
           const num = Number(t.key.slice(p.key.length + 1));
           if (Number.isInteger(num) && num > (p.seq || 200)) p.seq = num;
         }
-        t.deps = activeProjectDeps(d, p.id, Array.isArray(t.deps) ? t.deps : [], t.id);
         d.tasks.push(t);
       }
     }
     if (Array.isArray(patch.tasks.order)) d.tasks = reorderByIds(d.tasks, patch.tasks.order);
     for (const t of d.tasks) {
-      t.deps = activeProjectDeps(d, t.project, Array.isArray(t.deps) ? t.deps : [], t.id);
+      const rawDeps = Array.isArray(t.deps) ? t.deps : [];
+      const nextDeps = activeProjectDeps(d, t.project, rawDeps, t.id);
+      if (!deepEqual(rawDeps, nextDeps)) rekeyed = true;
+      t.deps = nextDeps;
     }
   }
 
