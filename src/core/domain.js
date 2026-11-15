@@ -915,10 +915,8 @@ export function createTask(data, fields = {}, opts = {}) {
       pushNotif(data, { type: 'blocker', by, agent, task: t, text: 'needs your input on', snippet: stripHtml(t.desc) || t.title }, { now });
     } else if (isExternalCreate && !isClosedStatus(status)) {
       const descMd = htmlToMarkdown(t.desc || '');
-      if (descMd && mentionsWorkspaceOwner(data, descMd)) {
-        if (data.notifPrefs?.push_mention !== false) {
-          pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: stripHtml(t.desc) || t.title }, { now });
-        }
+      if (data.notifPrefs?.push_mention !== false && descMd && mentionsWorkspaceOwner(data, descMd)) {
+        pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: stripHtml(t.desc) || t.title }, { now });
       } else if (assignee && assignee === data.me && data.notifPrefs?.assign_self !== false && data.notifPrefs?.push_assign !== false) {
         pushNotif(data, { type: 'assign', by, agent, task: t, text: 'assigned you', snippet: t.title }, { now });
       }

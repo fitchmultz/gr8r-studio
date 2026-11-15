@@ -1475,6 +1475,14 @@ test('live inbox fires on --needs-owner, @mentions, agent comments, and PR/agent
   assert.equal(queryInbox(state.data, { type: 'mention', unread: true }).length, 1);
   assert.equal(queryInbox(state.data, { type: 'comment' }).length, 0);
   assert.equal(queryInbox(state.data, { type: 'assign' }).length, 0);
+  state.data.notifPrefs = { ...state.data.notifPrefs, push_mention: false, push_assign: true };
+  const assignedWithMention = createTask(
+    state.data,
+    { project: p.id, title: 'Assigned handoff', assignee: state.data.me, descMarkdown: 'Please review @owner.' },
+    { agent: 'pi:worker-1', now: FIXED_NOW + 36.5 },
+  );
+  assert.equal(queryInbox(state.data, { type: 'assign', task: assignedWithMention.id }).length, 1);
+  deleteTasks(state.data, [assignedWithMention.id]);
   state.data.notifPrefs = { ...state.data.notifPrefs, push_mention: true, push_assign: true };
 
   // Claiming an unassigned ready task does not emit spurious "assigned you" notifications.
