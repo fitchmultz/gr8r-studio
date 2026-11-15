@@ -2586,12 +2586,7 @@ export function applyWorkspacePatch(targetState, patch) {
   }
 
   // 5. Generic keyed lists
-  const preExistingDocIds = new Set((d.docs || []).map(doc => doc?.id).filter(Boolean));
-  const updatedSlugDocIds = new Set(
-    Object.entries(patch.docs?.updated || {})
-      .filter(([, u]) => u?.fields?.set && Object.hasOwn(u.fields.set, 'slug'))
-      .map(([id]) => id),
-  );
+  const prevDocLoc = new Map((d.docs || []).filter(doc => doc?.id).map(doc => [doc.id, `${doc.project}:${doc.slug}`]));
   for (const key of KEYED_DATA_LISTS) {
     if (patch[key] === undefined) continue;
     if (key === 'labels') ensureLabels(d);
@@ -2679,9 +2674,9 @@ export function applyWorkspacePatch(targetState, patch) {
        steals an existing document's stable slug. */
     const seenSlugsByProject = new Map();
     const slugPriorityOrder = [
-      ...keptDocs.filter(doc => preExistingDocIds.has(doc.id) && !updatedSlugDocIds.has(doc.id)),
-      ...keptDocs.filter(doc => preExistingDocIds.has(doc.id) && updatedSlugDocIds.has(doc.id)),
-      ...keptDocs.filter(doc => !preExistingDocIds.has(doc.id)),
+      ...keptDocs.filter(doc => prevDocLoc.has(doc.id) && prevDocLoc.get(doc.id) === `${doc.project}:${doc.slug}`),
+      ...keptDocs.filter(doc => prevDocLoc.has(doc.id) && prevDocLoc.get(doc.id) !== `${doc.project}:${doc.slug}`),
+      ...keptDocs.filter(doc => !prevDocLoc.has(doc.id)),
     ];
     for (const doc of slugPriorityOrder) {
       let projSlugs = seenSlugsByProject.get(doc.project);
