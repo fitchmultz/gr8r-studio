@@ -1,24 +1,121 @@
 /* ---------- optional sync with a self-hosted server (README: Self-hosting) ---------- */
-import { getPendingSave, getRev, hydrate, setOnSave, stampRev } from './store.js';
+import { S, getPendingSave, getRev, hydrate, setOnSave, stampRev } from './store.js';
+import { openModal } from '../overlays/modals.js';
 import { render } from '../shell/render.js';
 import { toast } from '../ui/toast.js';
 
 /* Sync config: VITE_SYNC_URL ('/api' when this server serves the app), unset →
-   the app stays standalone. The token comes from GET /api/config: fetched
-   lazily before the first request and refreshed once on a 401, so a failed
-   boot fetch or a server-side token rotation recovers on the next pull
-   instead of stranding the page unauthenticated. VITE_SYNC_TOKEN remains as
-   a build-time fallback. */
+   the app stays standalone. On private loopback / Tailscale Serve routes,
+   GET /api/config bootstraps GR8R_TOKEN automatically; on non-Tailscale routes
+   it returns { authRequired: true } and prompts once for GR8R_TOKEN, verified
+   against POST /api/auth. VITE_SYNC_TOKEN remains as a build-time fallback. */
+const TOKEN_KEY = 'gr8r.token';
 const BASE = import.meta.env.VITE_SYNC_URL;
-let TOKEN = import.meta.env.VITE_SYNC_TOKEN || '';
+
+function readSavedToken() {
+  try {
+    return localStorage.getItem(TOKEN_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+function writeSavedToken(tok) {
+  try {
+    if (tok) localStorage.setItem(TOKEN_KEY, tok);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* private browsing or storage blocked */
+  }
+}
+
+let TOKEN = import.meta.env.VITE_SYNC_TOKEN || readSavedToken() || '';
 let auth = TOKEN ? { authorization: 'Bearer ' + TOKEN } : {};
 const syncOn = !!BASE;
 let authWarned = false;
+let promptShown = false;
+let awaitingManualToken = false;
+
+const isTokenModalOpen = () => S.ui.modals.some(m => m.id === 'sync-auth');
+
+function setToken(tok) {
+  TOKEN = tok || '';
+  auth = TOKEN ? { authorization: 'Bearer ' + TOKEN } : {};
+  if (TOKEN) awaitingManualToken = false;
+}
+
+function notifySignInNeeded(msg = 'Sync is paused until you sign in.') {
+  if (isTokenModalOpen()) return;
+  toast(msg, { kind: 'info', action: 'Sign in', onAction: openTokenModal, ms: 10000 });
+}
+
 const warnAuth = () => {
-  if (authWarned) return;
+  if (authWarned || isTokenModalOpen()) return;
   authWarned = true;
-  toast("Sync is off — the server rejected this device's token. Check GR8R_TOKEN.", { kind: 'err' });
+  toast("Sync is off — the server rejected this device's token.", {
+    kind: 'err',
+    action: 'Sign in',
+    onAction: openTokenModal,
+  });
 };
+
+async function submitToken(raw) {
+  const candidate = String(raw || '').trim();
+  if (!candidate) {
+    toast('Enter your workspace access token.', { kind: 'err', action: 'Sign in', onAction: openTokenModal });
+    return;
+  }
+  try {
+    const r = await fetch(BASE + '/auth', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: candidate }),
+    });
+    if (!r.ok) {
+      toast('Access token rejected by server.', { kind: 'err', action: 'Try again', onAction: openTokenModal });
+      return;
+    }
+    writeSavedToken(candidate);
+    setToken(candidate);
+    authWarned = false;
+    promptShown = false;
+    toast('Connected to workspace sync');
+    pull();
+    connectEvents();
+  } catch {
+    toast('Could not reach server to verify token.', { kind: 'err', action: 'Try again', onAction: openTokenModal });
+  }
+}
+
+function openTokenModal() {
+  if (isTokenModalOpen()) return;
+  openModal({
+    id: 'sync-auth',
+    type: 'prompt',
+    title: 'Sign in to workspace sync',
+    sub: 'This route requires your GR8R_TOKEN access token.',
+    label: 'Access token',
+    inputType: 'password',
+    autocomplete: 'current-password',
+    ok: 'Connect',
+    run: submitToken,
+    onCancel: () => {
+      if (!TOKEN) notifySignInNeeded();
+    },
+  });
+}
+
+function requestTokenIfNeeded({ fromUserSave = false } = {}) {
+  if (isTokenModalOpen()) return;
+  if (!promptShown && S.ui.modals.length === 0) {
+    promptShown = true;
+    openTokenModal();
+    return;
+  }
+  if (!promptShown || fromUserSave) {
+    promptShown = true;
+    notifySignInNeeded('Sign in with GR8R_TOKEN to sync your changes.');
+  }
+}
 
 let pushing = false;
 let pushT = 0;
@@ -32,14 +129,28 @@ function queuePush() {
   pushT = setTimeout(push, 300);
 }
 
-async function loadConfig() {
+async function loadConfig({ fromUserSave = false } = {}) {
+  if (!TOKEN) {
+    const saved = readSavedToken();
+    if (saved) setToken(saved);
+  }
+  const sentToken = TOKEN;
   try {
-    const r = await fetch(BASE + '/config');
+    const r = await fetch(BASE + '/config', { headers: auth });
     if (!r.ok) return false;
-    const t = (await r.json()).token;
+    const j = await r.json();
+    if (j.authRequired && !j.token) {
+      if (TOKEN !== sentToken) return !!TOKEN;
+      if (sentToken && readSavedToken() === sentToken) writeSavedToken('');
+      setToken('');
+      awaitingManualToken = true;
+      requestTokenIfNeeded({ fromUserSave });
+      return false;
+    }
+    const t = j.token;
     if (!t) return false;
-    TOKEN = t;
-    auth = { authorization: 'Bearer ' + TOKEN };
+    setToken(t);
+    promptShown = false;
     return true;
   } catch {
     return false;
@@ -48,10 +159,10 @@ async function loadConfig() {
 
 /* Authenticated request: pick up the token if we never got one; on a 401,
    the server may have rotated its token, so refresh it once and try again. */
-async function authedFetch(path, opts = {}) {
-  if (!TOKEN && !(await loadConfig())) return null;
+async function authedFetch(path, opts = {}, { fromUserSave = false } = {}) {
+  if (!TOKEN && !(await loadConfig({ fromUserSave }))) return null;
   let r = await fetch(BASE + path, { ...opts, headers: { ...auth, ...(opts.headers || {}) } });
-  if (r.status === 401 && (await loadConfig())) r = await fetch(BASE + path, { ...opts, headers: { ...auth, ...(opts.headers || {}) } });
+  if (r.status === 401 && (await loadConfig({ fromUserSave }))) r = await fetch(BASE + path, { ...opts, headers: { ...auth, ...(opts.headers || {}) } });
   return r;
 }
 
@@ -63,11 +174,15 @@ async function push() {
       const blob = getPendingSave();
       let r;
       try {
-        r = await authedFetch('/sync', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ baseRev: getRev(), state: { data: blob.data, prefs: blob.prefs, views: blob.views, collapsed: blob.collapsed } }),
-        });
+        r = await authedFetch(
+          '/sync',
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ baseRev: getRev(), state: { data: blob.data, prefs: blob.prefs, views: blob.views, collapsed: blob.collapsed } }),
+          },
+          { fromUserSave: true },
+        );
       } catch {
         /* The store retains the pending snapshot, including across reloads. */
         return;
@@ -166,9 +281,11 @@ async function connectEvents() {
   } finally {
     if (eventAbort === ctrl) {
       eventAbort = null;
-      const wait = retryDelay;
-      retryDelay = Math.min(5000, retryDelay * 2);
-      eventRetryT = setTimeout(connectEvents, wait);
+      if (!awaitingManualToken) {
+        const wait = retryDelay;
+        retryDelay = Math.min(5000, retryDelay * 2);
+        eventRetryT = setTimeout(connectEvents, wait);
+      }
     }
   }
 }
@@ -183,7 +300,17 @@ export function initSync() {
     pull();
     connectEvents();
   });
-  addEventListener('storage', pull);
+  addEventListener('storage', e => {
+    if (e.key === TOKEN_KEY) {
+      setToken(e.newValue || '');
+      if (TOKEN) {
+        authWarned = false;
+        promptShown = false;
+        connectEvents();
+      }
+    }
+    pull();
+  });
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
       pull();

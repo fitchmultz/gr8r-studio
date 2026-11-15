@@ -148,6 +148,11 @@ export class Gr8rClient {
   async ensureToken(force = false) {
     if (this.token && !force) return this.token;
     const res = await this.sendRaw('/config', { method: 'GET' });
+    if (res.status === 200 && res.json?.authRequired && !res.json?.token) {
+      throw new Error(
+        `Server at ${this.apiBase} requires an explicit token on non-Tailscale routes. Set GR8R_TOKEN, pass --token, or run "gr8r config set --token <token>".`,
+      );
+    }
     if (res.status !== 200 || !res.json?.token) {
       throw new Error(`Failed to obtain token from ${this.apiBase}/config (HTTP ${res.status})`);
     }

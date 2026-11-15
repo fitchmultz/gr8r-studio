@@ -171,3 +171,23 @@ test('gr8r CLI manages config, projects, tasks, Markdown stdin, subtasks, commen
   assert.equal(exitCode, 0, stderrText);
   assert.equal(stderrText, '');
 });
+
+test('gr8r CLI guides user to GR8R_TOKEN when /api/config bootstrap is disabled, and works with explicit GR8R_TOKEN', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gr8r-cli-strict-'));
+  const srv = await startServer({ dataFile: path.join(dir, 'state.json'), distDir: dir, token: 'strict-secret', trustBootstrap: 'none' });
+  t.after(async () => {
+    await srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const baseEnv = {
+    HOME: dir,
+    GR8R_CONFIG: path.join(dir, 'config.json'),
+    GR8R_URL: `http://127.0.0.1:${srv.port}`,
+  };
+  await assert.rejects(() => invoke(['status'], { env: baseEnv }), /requires an explicit token on non-Tailscale routes/);
+
+  const allowed = await invoke(['status', '--json'], { env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' } });
+  assert.equal(allowed.code, 0, allowed.stderr);
+  assert.equal(JSON.parse(allowed.stdout).rev, 0);
+});

@@ -9,6 +9,8 @@ services:
         VITE_SYNC_URL: /api
     environment:
       GR8R_TOKEN: ${GR8R_TOKEN:?export GR8R_TOKEN first}
+      GR8R_TRUST_BOOTSTRAP: ${GR8R_TRUST_BOOTSTRAP:-tailnet}
+      GR8R_DOCKER_LOOPBACK: '1'
       PORT: 4180
     ports:
       - '127.0.0.1:4180:4180'
