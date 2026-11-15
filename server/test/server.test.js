@@ -781,4 +781,35 @@ test('/api/blobs enforces auth, cookie-backed <img> reads, CSP sandbox, and atta
     body: JSON.stringify({ project: 'RCE', name: 'ghost.png', blobId: upB.blobId }),
   });
   assert.equal(missingBlobAttach.status, 409);
+
+  // Malformed non-array files/attachments in /api/sync do not poison subsequent writes.
+  const cur = await (await fetch(base + '/api/state', { headers: auth })).json();
+  const malformedState = structuredClone(cur.state);
+  malformedState.data.files = {};
+  malformedState.data.tasks = [{ id: 't_bad', title: 'Bad container', attachments: {} }];
+  const syncBad = await fetch(base + '/api/sync', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ baseRev: cur.rev, state: malformedState }),
+  });
+  assert.equal(syncBad.status, 200);
+  const afterBadProj = await fetch(base + '/api/projects', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Still Writable', key: 'SWR' }),
+  });
+  assert.equal(afterBadProj.status, 201);
+
+  // Orphaned POST /api/blobs uploads are automatically reclaimed once blobLeaseMs expires.
+  const shortLease = await withServer(t, { trustBootstrap: 'none', blobLeaseMs: 30 });
+  const orphanUp = await (
+    await fetch(shortLease.base + '/api/blobs', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'image/png', 'x-file-name': 'orphan.png' },
+      body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xdd]),
+    })
+  ).json();
+  assert.equal((await fetch(shortLease.base + `/api/blobs/${orphanUp.blobId}`, { headers: auth })).status, 200);
+  await new Promise(r => setTimeout(r, 90));
+  assert.equal((await fetch(shortLease.base + `/api/blobs/${orphanUp.blobId}`, { headers: auth })).status, 404);
 });

@@ -298,4 +298,11 @@ test('gr8r CLI guides user to GR8R_TOKEN when /api/config bootstrap is disabled,
     headers: { authorization: 'Bearer strict-secret' },
   });
   assert.equal(afterDel.status, 404);
+
+  // Failed gr8r attach to a nonexistent task validates target before uploading any blob bytes.
+  const blobsDir = path.join(dir, 'blobs');
+  const beforeOrphanCount = fs.existsSync(blobsDir) ? fs.readdirSync(blobsDir).length : 0;
+  await assert.rejects(() => invoke(['attach', 'PID-999', pngPath], { env: autoEnv }), /Task not found: PID-999/);
+  const afterOrphanCount = fs.existsSync(blobsDir) ? fs.readdirSync(blobsDir).length : 0;
+  assert.equal(afterOrphanCount, beforeOrphanCount);
 });

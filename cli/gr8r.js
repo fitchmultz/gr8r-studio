@@ -1108,17 +1108,62 @@ export async function runCli(argv, io = {}) {
     }
     const buf = fs.readFileSync(filePath);
     const fileName = opts.name || path.basename(filePath);
-    const uploaded = await client.uploadBlob(buf, fileName);
     let attachBody;
     if (opts.task) {
+      const tRes = await client.request('GET', `/tasks/${encodeURIComponent(opts.task)}`);
+      if (opts.project) {
+        const pRes = await client.request('GET', `/projects/${encodeURIComponent(opts.project)}`);
+        if (tRes.task.project !== pRes.project.id) {
+          throw new Error(`Task ${tRes.task.key} belongs to a different project than ${pRes.project.key}`);
+        }
+      }
       attachBody = { task: opts.task, ...(opts.project ? { project: opts.project } : {}) };
     } else if (opts.project && targetRef) {
+      const pRes = await client.request('GET', `/projects/${encodeURIComponent(opts.project)}`);
+      if (/^[A-Z][A-Z0-9]*-\d+$/i.test(targetRef)) {
+        const tRes = await client.request('GET', `/tasks/${encodeURIComponent(targetRef)}`);
+        if (tRes.task.project !== pRes.project.id) {
+          throw new Error(`Task ${tRes.task.key} belongs to a different project than ${pRes.project.key}`);
+        }
+      } else {
+        let tpRes = null;
+        try {
+          tpRes = await client.request('GET', `/projects/${encodeURIComponent(targetRef)}`);
+        } catch {
+          /* fall back to task lookup */
+        }
+        if (tpRes) {
+          if (tpRes.project.id !== pRes.project.id) {
+            throw new Error(`Project target "${targetRef}" conflicts with -p ${pRes.project.key}`);
+          }
+        } else {
+          const tRes = await client.request('GET', `/tasks/${encodeURIComponent(targetRef)}`);
+          if (tRes.task.project !== pRes.project.id) {
+            throw new Error(`Task ${tRes.task.key} belongs to a different project than ${pRes.project.key}`);
+          }
+        }
+      }
       attachBody = { project: opts.project, target: targetRef };
     } else if (opts.project) {
+      await client.request('GET', `/projects/${encodeURIComponent(opts.project)}`);
       attachBody = { project: opts.project };
     } else {
+      if (/^[A-Z][A-Z0-9]*-\d+$/i.test(targetRef)) {
+        await client.request('GET', `/tasks/${encodeURIComponent(targetRef)}`);
+      } else {
+        try {
+          await client.request('GET', `/projects/${encodeURIComponent(targetRef)}`);
+        } catch {
+          try {
+            await client.request('GET', `/tasks/${encodeURIComponent(targetRef)}`);
+          } catch (err) {
+            throw new Error(`Task or project not found: ${targetRef}`, { cause: err });
+          }
+        }
+      }
       attachBody = { target: targetRef };
     }
+    const uploaded = await client.uploadBlob(buf, fileName);
     const res = await client.request('POST', '/files', {
       ...attachBody,
       name: fileName,
