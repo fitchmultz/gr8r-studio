@@ -1098,6 +1098,32 @@ test('canceled status excludes tasks from open/overdue counts and progress denom
   assert.equal(tTodo.status, 'canceled');
   assert.equal(tTodo.canceledAt, FIXED_NOW + 2000);
 
+  // Resyncing that same PR (#12) later with an authoritative mergedAt older than canceledAt still keeps canceled,
+  // whereas an authoritative mergedAt after canceledAt completes the task even after the earlier timestamp-less merge.
+  const tResync = createTask(state.data, { project: p.id, title: 'Resync slice', status: 'progress' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(state.data, { repo: 'acme/app', number: 15, title: `feat: resync (${tResync.key})`, state: 'open' }, { now: FIXED_NOW + 1000 });
+  applyTaskPatch(state.data, tResync, { status: 'canceled' }, { now: FIXED_NOW + 2000 });
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/app', number: 15, title: `feat: resync (${tResync.key})`, state: 'merged', merged: true },
+    { now: FIXED_NOW + 3000 },
+  );
+  assert.equal(tResync.status, 'canceled');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/app',
+      number: 15,
+      title: `feat: resync (${tResync.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: new Date(FIXED_NOW + 2500).toISOString(),
+    },
+    { now: FIXED_NOW + 4000 },
+  );
+  assert.equal(tResync.status, 'done');
+  assert.equal(tResync.prs.find(x => x.number === 15)?.mergedAt, FIXED_NOW + 2500);
+
   syncGitHubPullRequests(
     state.data,
     {

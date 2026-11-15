@@ -512,6 +512,9 @@ export function normalizeTaskPrLink(raw) {
   if (state === 'merged' && typeof raw.mergedAt === 'number' && Number.isFinite(raw.mergedAt) && raw.mergedAt > 0) {
     out.mergedAt = raw.mergedAt;
   }
+  if (state === 'merged' && raw.mergedAtExact) {
+    out.mergedAtExact = true;
+  }
   return out;
 }
 
@@ -1852,15 +1855,19 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
         mergedSeq,
         mergedAt:
           incoming.state === 'merged'
-            ? prev?.state === 'merged'
-              ? prev.mergedAt || incoming.mergedAt || undefined
-              : incoming.mergedAt || incoming.updatedAt || (prev?.state === 'open' ? now : undefined)
+            ? incoming.mergedAt
+              ? incoming.mergedAt
+              : prev?.state === 'merged'
+                ? prev.mergedAt || undefined
+                : incoming.updatedAt || (prev?.state === 'open' ? now : undefined)
             : undefined,
+        mergedAtExact: incoming.state === 'merged' && Boolean(incoming.mergedAt || prev?.mergedAtExact),
       });
       if (!nextLink || deepEqual(prev, nextLink)) continue;
 
       const preMerged = preExistingMergedByTask.get(t.id) || new Set();
       const gainedMergedAt = nextLink.state === 'merged' && prev?.state === 'merged' && !prev.mergedAt && !!nextLink.mergedAt;
+      const gainedExactMergedAt = nextLink.state === 'merged' && prev?.state === 'merged' && !prev.mergedAtExact && Boolean(incoming.mergedAt);
       const prevUnsatisfied = gainedMergedAt ? unsatisfiedMergedPartials(t.prs, preMerged) : [];
 
       const idx = t.prs.findIndex(samePr);
@@ -1896,7 +1903,7 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
         } else if (t.status === 'backlog' || t.status === 'todo') {
           applyTaskPatch(data, t, { status: 'progress' }, { by, now });
         }
-      } else if (becameMerged && nextLink.closing) {
+      } else if ((becameMerged || gainedExactMergedAt) && nextLink.closing) {
         const hasOpenPr = t.prs.some(x => x.state === 'open');
         if (!hasOpenPr) {
           const nowUnsatisfied = unsatisfiedMergedPartials(t.prs, preMerged);
