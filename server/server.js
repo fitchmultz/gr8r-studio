@@ -201,81 +201,69 @@ export function startServer({
   const DIST = distDir || path.join(HERE, '..', 'dist');
   let store = readStore(DATA);
   const subscribers = new Set();
-  const pendingBlobUploads = new Map();
   const sweepTimers = new Set();
-  const preexistingUninitializedBlobs = new Set();
 
   const hasBlob = blobId => /^[0-9a-f]{64}$/.test(String(blobId || '')) && fs.existsSync(path.join(BLOBS_DIR, blobId));
-  const consumeBlobLeases = (blobId, count, now = Date.now()) => {
-    const list = (pendingBlobUploads.get(blobId) || []).filter(exp => exp > now);
-    list.splice(0, count);
-    if (list.length) pendingBlobUploads.set(blobId, list);
-    else pendingBlobUploads.delete(blobId);
-  };
-  const sweepUnreferencedBlobs = (now = Date.now()) => {
-    for (const [bid, list] of pendingBlobUploads) {
-      const live = list.filter(exp => exp > now);
-      if (live.length) pendingBlobUploads.set(bid, live);
-      else pendingBlobUploads.delete(bid);
+  const readBlobMeta = blobId => {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(BLOBS_DIR, `${blobId}.json`), 'utf8'));
+    } catch {
+      return null;
     }
-    if (!fs.existsSync(BLOBS_DIR)) return;
-    const refCounts = blobRefCounts(store.state?.data);
-    for (const entry of fs.readdirSync(BLOBS_DIR)) {
-      if (!/^[0-9a-f]{64}$/.test(entry)) continue;
-      if (preexistingUninitializedBlobs.has(entry)) continue;
-      if (!refCounts.has(entry) && !pendingBlobUploads.has(entry)) {
-        try {
-          fs.rmSync(path.join(BLOBS_DIR, entry), { force: true });
-          fs.rmSync(path.join(BLOBS_DIR, `${entry}.json`), { force: true });
-        } catch {
-          /* best-effort unreferenced blob cleanup */
-        }
-      }
+  };
+  const writeBlobMeta = (blobId, meta) => {
+    const dest = path.join(BLOBS_DIR, blobId);
+    if (!fs.existsSync(dest)) return;
+    const tmp = `${dest}.json.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(meta));
+    fs.renameSync(tmp, `${dest}.json`);
+  };
+  const unlinkBlob = blobId => {
+    try {
+      fs.rmSync(path.join(BLOBS_DIR, blobId), { force: true });
+      fs.rmSync(path.join(BLOBS_DIR, `${blobId}.json`), { force: true });
+    } catch {
+      /* best-effort unreferenced blob cleanup */
     }
   };
   const scheduleSweep = delayMs => {
     const tm = setTimeout(
       () => {
         sweepTimers.delete(tm);
-        sweepUnreferencedBlobs();
+        sweepPendingBlobs();
       },
       Math.max(1, delayMs) + 25,
     );
     tm.unref?.();
     sweepTimers.add(tm);
   };
-  const addBlobLease = blobId => {
-    const now = Date.now();
-    const list = (pendingBlobUploads.get(blobId) || []).filter(exp => exp > now);
-    list.push(now + blobLeaseMs);
-    pendingBlobUploads.set(blobId, list);
-    scheduleSweep(blobLeaseMs);
-  };
-  /* Recover unexpired upload leases from disk mtimes so restarts do not drop in-flight uploads,
-     and preserve preexisting blobs while state.json is uninitialized so browser /api/sync recovery keeps them. */
-  if (fs.existsSync(BLOBS_DIR)) {
-    if (!store.state) {
-      for (const entry of fs.readdirSync(BLOBS_DIR)) {
-        if (/^[0-9a-f]{64}$/.test(entry)) preexistingUninitializedBlobs.add(entry);
-      }
-    }
-    const initNow = Date.now();
-    const initRefs = blobRefCounts(store.state?.data);
+  function sweepPendingBlobs(now = Date.now(), { sweepAllUnreferenced = false, armTimers = false } = {}) {
+    if (!fs.existsSync(BLOBS_DIR)) return;
+    const refCounts = blobRefCounts(store.state?.data);
     for (const entry of fs.readdirSync(BLOBS_DIR)) {
-      if (!/^[0-9a-f]{64}$/.test(entry) || initRefs.has(entry)) continue;
-      try {
-        const st = fs.statSync(path.join(BLOBS_DIR, entry));
-        const exp = st.mtimeMs + blobLeaseMs;
-        if (exp > initNow) {
-          pendingBlobUploads.set(entry, [exp]);
-          scheduleSweep(exp - initNow);
+      if (!/^[0-9a-f]{64}$/.test(entry) || refCounts.has(entry)) continue;
+      const meta = readBlobMeta(entry);
+      let liveLeases = Array.isArray(meta?.leases) ? meta.leases.filter(exp => exp > now) : [];
+      let isPending = meta?.pending === true;
+      if (!meta) {
+        try {
+          const exp = fs.statSync(path.join(BLOBS_DIR, entry)).mtimeMs + blobLeaseMs;
+          isPending = true;
+          if (exp > now) liveLeases = [exp];
+        } catch {
+          continue;
         }
-      } catch {
-        /* ignore unreadable or disappearing entry */
+      }
+      if (liveLeases.length > 0) {
+        if (armTimers) scheduleSweep(Math.max(...liveLeases) - now);
+        continue;
+      }
+      if (sweepAllUnreferenced || isPending) {
+        unlinkBlob(entry);
       }
     }
   }
-  sweepUnreferencedBlobs();
+  sweepPendingBlobs(Date.now(), { armTimers: true });
 
   const broadcastRev = rev => {
     const msg = `event: rev\ndata: ${JSON.stringify({ rev })}\n\n`;
@@ -287,20 +275,37 @@ export function startServer({
       }
     }
   };
-  const commitState = (state, { clearUninitializedBlobs = false } = {}) => {
+  const commitState = (state, { isFullSync = false } = {}) => {
     const prevCounts = blobRefCounts(store.state?.data);
     const next = { rev: store.rev + 1, state };
     writeStore(DATA, next);
     store = next;
-    if (clearUninitializedBlobs) preexistingUninitializedBlobs.clear();
     const now = Date.now();
     const nextCounts = blobRefCounts(state?.data);
     for (const [bid, nextCount] of nextCounts) {
-      preexistingUninitializedBlobs.delete(bid);
       const prevCount = prevCounts.get(bid) || 0;
-      if (nextCount > prevCount) consumeBlobLeases(bid, nextCount - prevCount, now);
+      const meta = readBlobMeta(bid);
+      if (meta) {
+        const liveLeases = Array.isArray(meta.leases) ? meta.leases.filter(exp => exp > now) : [];
+        if (nextCount > prevCount) liveLeases.splice(0, nextCount - prevCount);
+        if (meta.pending !== false || !Array.isArray(meta.leases) || meta.leases.length !== liveLeases.length) {
+          writeBlobMeta(bid, { ...meta, pending: false, leases: liveLeases });
+        }
+      }
     }
-    sweepUnreferencedBlobs(now);
+    for (const [bid] of prevCounts) {
+      if (!nextCounts.has(bid)) {
+        const meta = readBlobMeta(bid);
+        const liveLeases = Array.isArray(meta?.leases) ? meta.leases.filter(exp => exp > now) : [];
+        if (liveLeases.length > 0 && meta) {
+          writeBlobMeta(bid, { ...meta, pending: true, leases: liveLeases });
+          scheduleSweep(Math.max(...liveLeases) - now);
+        } else {
+          unlinkBlob(bid);
+        }
+      }
+    }
+    sweepPendingBlobs(now, { sweepAllUnreferenced: isFullSync });
     broadcastRev(store.rev);
     return store;
   };
@@ -507,20 +512,21 @@ export function startServer({
         const tmp = `${dest}.${process.pid}.${Date.now()}.tmp`;
         fs.writeFileSync(tmp, buf);
         fs.renameSync(tmp, dest);
-      } else {
-        try {
-          const nowDate = new Date();
-          fs.utimesSync(dest, nowDate, nowDate);
-        } catch {
-          /* best-effort lease mtime refresh */
-        }
       }
-      if (!fs.existsSync(dest + '.json')) {
-        const metaTmp = `${dest}.json.${process.pid}.${Date.now()}.tmp`;
-        fs.writeFileSync(metaTmp, JSON.stringify({ name, mime, sizeBytes: buf.length }));
-        fs.renameSync(metaTmp, dest + '.json');
-      }
-      addBlobLease(blobId);
+      const now = Date.now();
+      const refCounts = blobRefCounts(store.state?.data);
+      const prevMeta = readBlobMeta(blobId);
+      const liveLeases = Array.isArray(prevMeta?.leases) ? prevMeta.leases.filter(exp => exp > now) : [];
+      liveLeases.push(now + blobLeaseMs);
+      const pending = refCounts.has(blobId) ? false : prevMeta ? prevMeta.pending !== false : true;
+      writeBlobMeta(blobId, {
+        name: prevMeta?.name || name,
+        mime: prevMeta?.mime || mime,
+        sizeBytes: buf.length,
+        pending,
+        leases: liveLeases,
+      });
+      scheduleSweep(blobLeaseMs);
       const qp = new URLSearchParams({ name, mime });
       return send(res, 201, {
         blobId,
@@ -569,7 +575,7 @@ export function startServer({
       const prevCounts = blobRefCounts(store.state?.data);
       const nextState = structuredClone(state);
       const { changed: blobSanitized, droppedFiles } = sanitizeStateBlobs(nextState.data, prevCounts, hasBlob);
-      commitState(nextState, { clearUninitializedBlobs: true });
+      commitState(nextState, { isFullSync: true });
       return send(res, 200, {
         rev: store.rev,
         ...(blobSanitized ? { merged: true, state: store.state } : {}),

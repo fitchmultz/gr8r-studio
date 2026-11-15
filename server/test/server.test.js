@@ -908,10 +908,9 @@ test('/api/blobs enforces auth, cookie-backed <img> reads, CSP sandbox, and atta
   await new Promise(r => setTimeout(r, 90));
 
   const srv3 = await startServer({ port: 0, token: 'secret', dataFile, distDir, trustBootstrap: 'none', blobLeaseMs: 40 });
-  t.after(() => srv3.close());
   const base3 = `http://127.0.0.1:${srv3.port}`;
   await new Promise(r => setTimeout(r, 90));
-  // Even an intervening domain mutation while uninitialized does not wipe preserved blobs before /api/sync re-seeds.
+  // Even an intervening domain mutation + another server restart after state.json loss does not wipe settled blobs before /api/sync re-seeds.
   const interveningProj = await (
     await fetch(base3 + '/api/projects', {
       method: 'POST',
@@ -920,7 +919,14 @@ test('/api/blobs enforces auth, cookie-backed <img> reads, CSP sandbox, and atta
     })
   ).json();
   assert.equal((await fetch(base3 + `/api/blobs/${preRestartUp.blobId}`, { headers: auth })).status, 200);
-  const reseed = await fetch(base3 + '/api/sync', {
+  await srv3.close();
+  await new Promise(r => setTimeout(r, 90));
+
+  const srv4 = await startServer({ port: 0, token: 'secret', dataFile, distDir, trustBootstrap: 'none', blobLeaseMs: 40 });
+  t.after(() => srv4.close());
+  const base4 = `http://127.0.0.1:${srv4.port}`;
+  assert.equal((await fetch(base4 + `/api/blobs/${preRestartUp.blobId}`, { headers: auth })).status, 200);
+  const reseed = await fetch(base4 + '/api/sync', {
     method: 'POST',
     headers: { ...auth, 'content-type': 'application/json' },
     body: JSON.stringify({ baseRev: interveningProj.rev, state: savedClientState }),
@@ -936,5 +942,5 @@ test('/api/blobs enforces auth, cookie-backed <img> reads, CSP sandbox, and atta
     reseedJson.state.data.files.some(f => f.id === 'f_dead_sync'),
     false,
   );
-  assert.equal((await fetch(base3 + `/api/blobs/${preRestartUp.blobId}`, { headers: auth })).status, 200);
+  assert.equal((await fetch(base4 + `/api/blobs/${preRestartUp.blobId}`, { headers: auth })).status, 200);
 });
