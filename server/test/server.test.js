@@ -543,4 +543,24 @@ test('PATCH /api/workspace merges concurrent browser deltas with domain API writ
   assert.equal(pidTasks.find(x => x.key === 'PID-201').status, 'done');
   assert.equal(pidTasks.find(x => x.key === 'PID-202').title, 'Agent concurrent task');
   assert.equal(pidTasks.find(x => x.key === 'PID-203').title, 'Browser concurrent task');
+
+  // Browser deleting a commented task via PATCH /api/workspace succeeds cleanly with 200 (cascade already removed comment).
+  const { addComment, deleteTasks } = await import('../../src/core/domain.js');
+  const state4 = mergeRes.state;
+  const browserWithComment = structuredClone(state4);
+  addComment(browserWithComment.data, t1.id, 'Note before delete');
+  await fetch(base + '/api/workspace', {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ baseRev: 4, patch: diffWorkspacePatch(state4, browserWithComment) }),
+  });
+  const browserDeleted = structuredClone(browserWithComment);
+  deleteTasks(browserDeleted.data, [t1.id]);
+  const delHttp = await fetch(base + '/api/workspace', {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ baseRev: 5, patch: diffWorkspacePatch(browserWithComment, browserDeleted) }),
+  });
+  assert.equal(delHttp.status, 200);
+  assert.deepEqual(await delHttp.json(), { rev: 6, merged: false });
 });

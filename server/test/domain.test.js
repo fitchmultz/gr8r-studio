@@ -330,4 +330,40 @@ test('diffWorkspacePatch and applyWorkspacePatch merge concurrent field, subtask
   // Prototype-pollution keys in untrusted JSON patches are ignored safely.
   applyWorkspacePatch(serverState, JSON.parse('{"prefs":{"set":{"__proto__":{"polluted":true}}}}'));
   assert.equal({}.polluted, undefined);
+
+  // Deleting tasks or projects that own comments (or concurrent deletion) succeeds without 404,
+  // and activity histories larger than 1000 entries are preserved intact without silent truncation.
+  const delBase = createDefaultState(FIXED_NOW);
+  delBase.data.activity = Array.from({ length: 1200 }, (_, i) => ({
+    id: `a_seed_${i}`,
+    by: 'm1',
+    verb: 'updated task',
+    task: null,
+    project: null,
+    at: FIXED_NOW - i,
+    extra: '',
+  }));
+  const pDel = createProject(delBase.data, { name: 'Cleanup', key: 'CLN' }, { now: FIXED_NOW });
+  const tDel1 = createTask(delBase.data, { project: pDel.id, title: 'Has comments' }, { now: FIXED_NOW });
+  const tDel2 = createTask(delBase.data, { project: pDel.id, title: 'Project cascade' }, { now: FIXED_NOW });
+  addComment(delBase.data, tDel1.id, 'Comment A', { now: FIXED_NOW });
+  addComment(delBase.data, tDel2.id, 'Comment B', { now: FIXED_NOW });
+
+  const delServer = structuredClone(delBase);
+  const delBrowser = structuredClone(delBase);
+  const { deleteProject, deleteTasks } = await import('../../src/core/domain.js');
+  // Server already deleted tDel1 concurrently while browser deletes both tDel1 and project CLN + logs new activity.
+  deleteTasks(delServer.data, [tDel1.id]);
+  deleteTasks(delBrowser.data, [tDel1.id]);
+  deleteProject(delBrowser.data, pDel.id);
+  applyTaskPatch(delBrowser.data, delBrowser.data.tasks[0].id, { status: 'done' }, { now: FIXED_NOW + 500 });
+
+  const delPatch = diffWorkspacePatch(delBase, delBrowser);
+  applyWorkspacePatch(delServer, delPatch);
+  assert.equal(
+    delServer.data.projects.some(p => p.id === pDel.id),
+    false,
+  );
+  assert.equal(delServer.data.comments.length, 0);
+  assert.ok(delServer.data.activity.length > 1200);
 });

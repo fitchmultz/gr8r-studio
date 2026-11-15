@@ -1379,8 +1379,9 @@ export function applyWorkspacePatch(targetState, patch) {
   // 4. Comments & emoji reactions
   if (patch.comments !== undefined) {
     if (!isPlainObject(patch.comments)) throw new DomainError('Invalid comments patch', 400);
-    if (Array.isArray(patch.comments.deleted)) {
-      for (const cid of patch.comments.deleted) deleteComment(d, cid);
+    if (Array.isArray(patch.comments.deleted) && patch.comments.deleted.length) {
+      const rm = new Set(patch.comments.deleted);
+      d.comments = (d.comments || []).filter(c => !rm.has(c.id));
     }
     if (isPlainObject(patch.comments.updated)) {
       const byId = new Map((d.comments || []).map(c => [c.id, c]));
@@ -1423,7 +1424,7 @@ export function applyWorkspacePatch(targetState, patch) {
       existing.add(raw.id);
     }
     merged.sort((a, b) => (b.at || 0) - (a.at || 0));
-    d.activity = merged.slice(0, 1000);
+    d.activity = merged;
   }
 
   // 7. Project sidebar order
