@@ -911,10 +911,19 @@ test('/api/blobs enforces auth, cookie-backed <img> reads, CSP sandbox, and atta
   t.after(() => srv3.close());
   const base3 = `http://127.0.0.1:${srv3.port}`;
   await new Promise(r => setTimeout(r, 90));
+  // Even an intervening domain mutation while uninitialized does not wipe preserved blobs before /api/sync re-seeds.
+  const interveningProj = await (
+    await fetch(base3 + '/api/projects', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Intervening CLI Write', key: 'INT' }),
+    })
+  ).json();
+  assert.equal((await fetch(base3 + `/api/blobs/${preRestartUp.blobId}`, { headers: auth })).status, 200);
   const reseed = await fetch(base3 + '/api/sync', {
     method: 'POST',
     headers: { ...auth, 'content-type': 'application/json' },
-    body: JSON.stringify({ baseRev: 0, state: savedClientState }),
+    body: JSON.stringify({ baseRev: interveningProj.rev, state: savedClientState }),
   });
   assert.equal(reseed.status, 200);
   const reseedJson = await reseed.json();

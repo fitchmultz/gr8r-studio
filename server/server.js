@@ -222,7 +222,7 @@ export function startServer({
     const refCounts = blobRefCounts(store.state?.data);
     for (const entry of fs.readdirSync(BLOBS_DIR)) {
       if (!/^[0-9a-f]{64}$/.test(entry)) continue;
-      if (!store.state && preexistingUninitializedBlobs.has(entry)) continue;
+      if (preexistingUninitializedBlobs.has(entry)) continue;
       if (!refCounts.has(entry) && !pendingBlobUploads.has(entry)) {
         try {
           fs.rmSync(path.join(BLOBS_DIR, entry), { force: true });
@@ -258,21 +258,20 @@ export function startServer({
       for (const entry of fs.readdirSync(BLOBS_DIR)) {
         if (/^[0-9a-f]{64}$/.test(entry)) preexistingUninitializedBlobs.add(entry);
       }
-    } else {
-      const initNow = Date.now();
-      const initRefs = blobRefCounts(store.state?.data);
-      for (const entry of fs.readdirSync(BLOBS_DIR)) {
-        if (!/^[0-9a-f]{64}$/.test(entry) || initRefs.has(entry)) continue;
-        try {
-          const st = fs.statSync(path.join(BLOBS_DIR, entry));
-          const exp = st.mtimeMs + blobLeaseMs;
-          if (exp > initNow) {
-            pendingBlobUploads.set(entry, [exp]);
-            scheduleSweep(exp - initNow);
-          }
-        } catch {
-          /* ignore unreadable or disappearing entry */
+    }
+    const initNow = Date.now();
+    const initRefs = blobRefCounts(store.state?.data);
+    for (const entry of fs.readdirSync(BLOBS_DIR)) {
+      if (!/^[0-9a-f]{64}$/.test(entry) || initRefs.has(entry)) continue;
+      try {
+        const st = fs.statSync(path.join(BLOBS_DIR, entry));
+        const exp = st.mtimeMs + blobLeaseMs;
+        if (exp > initNow) {
+          pendingBlobUploads.set(entry, [exp]);
+          scheduleSweep(exp - initNow);
         }
+      } catch {
+        /* ignore unreadable or disappearing entry */
       }
     }
   }
@@ -288,15 +287,16 @@ export function startServer({
       }
     }
   };
-  const commitState = state => {
+  const commitState = (state, { clearUninitializedBlobs = false } = {}) => {
     const prevCounts = blobRefCounts(store.state?.data);
     const next = { rev: store.rev + 1, state };
     writeStore(DATA, next);
     store = next;
-    preexistingUninitializedBlobs.clear();
+    if (clearUninitializedBlobs) preexistingUninitializedBlobs.clear();
     const now = Date.now();
     const nextCounts = blobRefCounts(state?.data);
     for (const [bid, nextCount] of nextCounts) {
+      preexistingUninitializedBlobs.delete(bid);
       const prevCount = prevCounts.get(bid) || 0;
       if (nextCount > prevCount) consumeBlobLeases(bid, nextCount - prevCount, now);
     }
@@ -569,7 +569,7 @@ export function startServer({
       const prevCounts = blobRefCounts(store.state?.data);
       const nextState = structuredClone(state);
       const { changed: blobSanitized, droppedFiles } = sanitizeStateBlobs(nextState.data, prevCounts, hasBlob);
-      commitState(nextState);
+      commitState(nextState, { clearUninitializedBlobs: true });
       return send(res, 200, {
         rev: store.rev,
         ...(blobSanitized ? { merged: true, state: store.state } : {}),
