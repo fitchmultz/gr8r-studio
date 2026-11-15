@@ -10,10 +10,13 @@ import {
   addComment as domainAddComment,
   addSubtask as domainAddSubtask,
   applyTaskPatch,
+  attachFileRecord,
+  createDoc as domainCreateDoc,
   createLabel as domainCreateLabel,
   createProject as domainCreateProject,
   createTask as domainCreateTask,
   deleteComment as domainDeleteComment,
+  deleteDoc as domainDeleteDoc,
   deleteLabel as domainDeleteLabel,
   deleteProject as domainDeleteProject,
   deleteTasks as domainDeleteTasks,
@@ -25,10 +28,12 @@ import {
   removeMember as domainRemoveMember,
   removeSubtask as domainRemoveSubtask,
   toggleReaction as domainToggleReaction,
+  updateDoc as domainUpdateDoc,
   updateLabel as domainUpdateLabel,
   updateProject as domainUpdateProject,
   updateSubtask as domainUpdateSubtask,
 } from '../core/domain.js';
+import { isSyncEnabled, uploadBlobToServer } from '../core/sync.js';
 import { htmlToMarkdown, markdownToHtml } from '../core/markdown.js';
 import { fileType, fsize } from '../ui/helpers.js';
 import { effectiveDark } from '../core/theme.js';
@@ -644,7 +649,7 @@ IN.formMore = el => {
   S.ui.form.more = el.checked;
 };
 IN.formFiles = el => {
-  [...el.files].forEach(f => S.ui.form.files.push({ name: f.name, size: fsize(f.size), type: fileType(f.name) }));
+  [...el.files].forEach(f => S.ui.form.files.push({ name: f.name, size: fsize(f.size), type: fileType(f.name), raw: f }));
   render();
 };
 KEY.formAddSub = el => {
@@ -675,7 +680,7 @@ A.submitTask = () => {
     return;
   }
   S.ui.errors = {};
-  const files = f.files.map(x => ({ id: uid('a'), name: x.name, type: x.type, size: x.size, by: D().me, at: Date.now() }));
+  const rawFiles = f.files.map(x => x.raw).filter(Boolean);
   const base = {
     title,
     project: f.project,
@@ -695,11 +700,11 @@ A.submitTask = () => {
       !mutate(() => {
         applyPatch(t, base);
         if (f.desc !== htmlToMarkdown(t.desc)) t.desc = markdownToHtml(f.desc);
-        t.attachments.push(...files);
       })
     )
       return;
     S.ui.modals.pop();
+    if (rawFiles.length) handleFiles(rawFiles, { project: t.project, task: t.id });
     render();
     toast('Changes saved');
     return;
@@ -707,11 +712,11 @@ A.submitTask = () => {
   let t;
   if (
     !mutate(() => {
-      t = createTask({ ...base, descHtml: markdownToHtml(f.desc), attachments: files });
-      files.forEach(x => D().files.unshift({ ...x, project: t.project, task: t.id }));
+      t = createTask({ ...base, descHtml: markdownToHtml(f.desc) });
     })
   )
     return;
+  if (rawFiles.length) handleFiles(rawFiles, { project: t.project, task: t.id });
   if (f.more) {
     Object.assign(f, { title: '', desc: '', subtasks: [], files: [] });
     render();
@@ -856,6 +861,7 @@ A.rmAttach = el => {
   const f = t.attachments.find(a => a.id === el.dataset.aid);
   mutate(() => {
     t.attachments = t.attachments.filter(a => a.id !== el.dataset.aid);
+    D().files = (D().files || []).filter(x => x.id !== el.dataset.aid);
     logAct('removed a file from', t);
   });
   toast(`Removed ${f.name}`);
@@ -880,6 +886,34 @@ export function handleFiles(files, ctx) {
   [...files].forEach(file => {
     const up = { id: uid('u'), name: file.name, size: fsize(file.size), project: ctx.project, task: ctx.task, pct: 0 };
     S.ui.uploads.push(up);
+    if (isSyncEnabled()) {
+      up.pct = 35;
+      uploadBlobToServer(file)
+        .then(blob => {
+          S.ui.uploads = S.ui.uploads.filter(x => x !== up);
+          mutate(() => {
+            attachFileRecord(D(), {
+              name: up.name,
+              type: fileType(up.name),
+              size: up.size,
+              sizeBytes: blob.sizeBytes,
+              mime: blob.mime,
+              blobId: blob.blobId,
+              url: blob.url,
+              project: up.project,
+              task: up.task || null,
+            });
+          });
+          toast(`Uploaded ${up.name}`);
+        })
+        .catch(err => {
+          S.ui.uploads = S.ui.uploads.filter(x => x !== up);
+          render();
+          toast(err.message || `Upload failed for ${up.name}`, { kind: 'err' });
+        });
+      return;
+    }
+    const localUrl = file.type?.startsWith('image/') ? URL.createObjectURL(file) : undefined;
     const iv = setInterval(() => {
       up.pct = Math.min(100, up.pct + 9 + Math.round(Math.random() * 22));
       const bar = document.getElementById('upbar-' + up.id),
@@ -889,15 +923,18 @@ export function handleFiles(files, ctx) {
       if (up.pct >= 100) {
         clearInterval(iv);
         S.ui.uploads = S.ui.uploads.filter(x => x !== up);
-        const rec = { id: uid('f'), name: up.name, type: fileType(up.name), size: up.size, by: D().me, at: Date.now() };
-        D().files.unshift({ ...rec, project: up.project, task: up.task || null });
-        if (up.task) {
-          const t = task(up.task);
-          t.attachments.push(rec);
-          logAct('added a file to', t, up.name);
-        }
-        save();
-        render();
+        mutate(() => {
+          attachFileRecord(D(), {
+            name: up.name,
+            type: fileType(up.name),
+            size: up.size,
+            sizeBytes: file.size,
+            mime: file.type || undefined,
+            url: localUrl,
+            project: up.project,
+            task: up.task || null,
+          });
+        });
         toast(`Uploaded ${up.name}`);
       }
     }, 220);
@@ -1614,10 +1651,94 @@ A.delFile = el => {
       if (
         mutate(() => {
           D().files = D().files.filter(x => x !== f);
-          if (f.task && task(f.task)) task(f.task).attachments = task(f.task).attachments.filter(a => a.name !== f.name);
+          if (f.task && task(f.task)) task(f.task).attachments = task(f.task).attachments.filter(a => a.id !== f.id && (a.id || a.name !== f.name));
         })
       )
         toast(`Deleted ${f.name}`, { action: 'Undo', onAction: () => restore(snap) });
+    },
+  });
+};
+
+/* project docs */
+A.selDoc = el => {
+  S.ui.docSel = S.ui.docSel || {};
+  S.ui.docSel[el.dataset.project] = el.dataset.id;
+  if (S.ui.params) delete S.ui.params.doc;
+  render();
+};
+A.openDocSearch = el => {
+  S.ui.docSel = S.ui.docSel || {};
+  S.ui.docSel[el.dataset.project] = el.dataset.id;
+  go('project', { id: el.dataset.project, tab: 'docs', doc: el.dataset.id });
+};
+A.newDoc = el => {
+  const pid = el.dataset.project;
+  openModal({
+    type: 'prompt',
+    title: 'New document',
+    label: 'Document title',
+    value: '',
+    ok: 'Create doc',
+    run: val => {
+      const title = val.trim();
+      if (!title) return;
+      let created = null;
+      if (mutate(() => (created = domainCreateDoc(D(), { project: pid, title })))) {
+        S.ui.docSel = S.ui.docSel || {};
+        S.ui.docSel[pid] = created.id;
+        S.ui.docEdit = S.ui.docEdit || {};
+        S.ui.docEdit[created.id] = true;
+        render();
+        setTimeout(() => $('#doc-body')?.focus(), 0);
+      }
+    },
+  });
+};
+A.toggleEditDoc = el => {
+  const doc = (D().docs || []).find(d => d.id === el.dataset.id);
+  if (!doc) return;
+  S.ui.docEdit = S.ui.docEdit || {};
+  const cur = S.ui.docEdit[doc.id] ?? !doc.body;
+  S.ui.docEdit[doc.id] = !cur;
+  render();
+  if (S.ui.docEdit[doc.id]) setTimeout(() => $('#doc-body')?.focus(), 0);
+};
+IN.docBody = el => {
+  const doc = (D().docs || []).find(d => d.id === el.dataset.id);
+  if (!doc) return;
+  doc.body = el.value;
+  doc.updated = Date.now();
+  doc.updatedBy = D().me;
+  save();
+};
+BLUR.commitDocTitle = el => {
+  const doc = (D().docs || []).find(d => d.id === el.dataset.id);
+  if (!doc) return;
+  const next = el.value.trim();
+  if (!next) {
+    el.value = doc.title;
+    return;
+  }
+  if (next !== doc.title) mutate(() => domainUpdateDoc(D(), doc.id, { title: next }));
+};
+A.togglePinDoc = el => {
+  const doc = (D().docs || []).find(d => d.id === el.dataset.id);
+  if (!doc) return;
+  mutate(() => domainUpdateDoc(D(), doc.id, { pinned: !doc.pinned }));
+};
+A.deleteDoc = el => {
+  const doc = (D().docs || []).find(d => d.id === el.dataset.id);
+  if (!doc) return;
+  confirmDlg({
+    title: `Delete “${doc.title}”?`,
+    body: 'This document will be removed from the project.',
+    ok: 'Delete doc',
+    danger: true,
+    run: () => {
+      const snap = snapshot();
+      if (mutate(() => domainDeleteDoc(D(), doc.id))) {
+        toast(`Deleted “${doc.title}”`, { action: 'Undo', onAction: () => restore(snap) });
+      }
     },
   });
 };

@@ -646,3 +646,54 @@ test('POST /api/github/pull-requests and HMAC POST /api/webhooks/github link PRs
   assert.equal(repeatRes.changed, false);
   assert.equal(repeatRes.rev, revAfterOpen);
 });
+
+test('/api/blobs enforces auth, cookie-backed <img> reads, CSP sandbox, and attachment disposition for unsafe types', async t => {
+  const { base } = await withServer(t, { trustBootstrap: 'none' });
+
+  // Unauthenticated upload and read are rejected when trustBootstrap=none.
+  assert.equal((await fetch(base + '/api/blobs', { method: 'POST', body: Buffer.from('abc') })).status, 401);
+  assert.equal((await fetch(base + '/api/blobs/' + 'a'.repeat(64))).status, 401);
+
+  // Upload PNG and SVG with Bearer token.
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const upPng = await fetch(base + '/api/blobs', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'image/png', 'x-file-name': 'shot.png' },
+    body: pngBytes,
+  });
+  assert.equal(upPng.status, 201);
+  const pngMeta = await upPng.json();
+
+  const upSvg = await fetch(base + '/api/blobs', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'image/svg+xml', 'x-file-name': 'evil.svg' },
+    body: Buffer.from('<svg onload="alert(1)"/>'),
+  });
+  assert.equal(upSvg.status, 201);
+  const svgMeta = await upSvg.json();
+
+  // Sign in via POST /api/auth to receive HttpOnly gr8r_blob cookie for browser <img> tags.
+  const authRes = await fetch(base + '/api/auth', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token: 'secret' }),
+  });
+  const setCookie = authRes.headers.get('set-cookie') || '';
+  const cookiePair = setCookie.split(';')[0];
+  assert.match(cookiePair, /^gr8r_blob=[0-9a-f]{64}$/);
+
+  // PNG serves inline with sandbox CSP via cookie alone (no Authorization header).
+  const getPng = await fetch(base + pngMeta.url, { headers: { cookie: cookiePair } });
+  assert.equal(getPng.status, 200);
+  assert.match(getPng.headers.get('content-disposition') || '', /^inline; filename="shot\.png"$/);
+  assert.match(getPng.headers.get('content-security-policy') || '', /sandbox/);
+  assert.deepEqual(Buffer.from(await getPng.arrayBuffer()), pngBytes);
+
+  // SVG is forced to Content-Disposition: attachment to prevent active content execution.
+  const getSvg = await fetch(base + svgMeta.url, { headers: { cookie: cookiePair } });
+  assert.equal(getSvg.status, 200);
+  assert.match(getSvg.headers.get('content-disposition') || '', /^attachment; filename="evil\.svg"$/);
+
+  // Malformed percent-encoding returns 400 cleanly without throwing URIError.
+  assert.equal((await fetch(base + '/api/blobs/%E0%A4%A', { headers: auth })).status, 400);
+});

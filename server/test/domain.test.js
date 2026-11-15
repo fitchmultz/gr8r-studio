@@ -7,20 +7,26 @@ import {
   addSubtask,
   applyTaskPatch,
   applyWorkspacePatch,
+  attachFileRecord,
   childrenOfTask,
   claimNextReadyTask,
   claimTask,
   createDefaultState,
+  createDoc,
   createLabel,
   createProject,
   createTask,
+  deleteDoc,
   deleteLabel,
   deleteProject,
   deleteTasks,
+  deleteWorkspaceFile,
   diffWorkspacePatch,
+  docsOfProject,
   duplicateProject,
   duplicateTask,
   ensureLabels,
+  formatDocForApi,
   formatProjectForApi,
   formatTaskForApi,
   isTaskBlocked,
@@ -39,6 +45,7 @@ import {
   searchWorkspace,
   setNotifRead,
   syncGitHubPullRequests,
+  updateDoc,
   updateLabel,
   updateProject,
   updateSubtask,
@@ -1518,4 +1525,48 @@ test('live inbox fires on --needs-owner, @mentions, agent comments, and PR/agent
     state.data.tasks.map(x => x.id),
   );
   assert.equal(queryInbox(state.data).length, 0);
+});
+
+test('persisted attachment records and Markdown Project Docs round-trip, search, sync, and cascade cleanly', () => {
+  const state = createDefaultState(FIXED_NOW);
+  const p = createProject(state.data, { name: 'Docs & Blobs', key: 'DCB' }, { now: FIXED_NOW });
+  const t = createTask(state.data, { project: p.id, title: 'QA UI flow' }, { now: FIXED_NOW });
+
+  const sha = 'a'.repeat(64);
+  const fileRec = attachFileRecord(
+    state.data,
+    { task: t.key, name: 'qa-shot.png', blobId: sha, sizeBytes: 4096, mime: 'image/png' },
+    { agent: 'pi:qa-agent', now: FIXED_NOW + 10 },
+  );
+  assert.equal(fileRec.url, `/api/blobs/${sha}`);
+  assert.equal(t.attachments.length, 1);
+  assert.equal(t.attachments[0].blobId, sha);
+
+  deleteWorkspaceFile(state.data, fileRec.id, { now: FIXED_NOW + 20 });
+  assert.equal(t.attachments.length, 0);
+
+  const snapBeforeDoc = structuredClone(state);
+  const doc = createDoc(
+    state.data,
+    {
+      project: p.id,
+      title: 'Runbook & Architecture',
+      pinned: true,
+      bodyMarkdown: '#### Deploy\n\nRun `docker compose up -d --build`.',
+    },
+    { agent: 'pi:arch-agent', now: FIXED_NOW + 30 },
+  );
+  assert.equal(doc.slug, 'runbook-architecture');
+  assert.match(formatDocForApi(state.data, doc).bodyMarkdown, /docker compose up -d --build/);
+  assert.equal(searchWorkspace(state.data, 'docker compose').docs.length, 1);
+
+  updateDoc(state.data, 'runbook-architecture', { appendBody: '#### Rollback\n\nCheckout previous tag.' }, { project: p.id, now: FIXED_NOW + 40 });
+  assert.match(formatDocForApi(state.data, doc).bodyMarkdown, /Rollback/);
+
+  const peer = structuredClone(snapBeforeDoc);
+  applyWorkspacePatch(peer, diffWorkspacePatch(snapBeforeDoc, state));
+  assert.equal(docsOfProject(peer.data, p.id).length, 1);
+
+  deleteDoc(state.data, doc.id, { now: FIXED_NOW + 50 });
+  assert.equal(docsOfProject(state.data, p.id).length, 0);
 });

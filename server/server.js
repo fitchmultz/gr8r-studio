@@ -17,6 +17,23 @@ import { handleDomainApi } from './api.js';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 /* The workspace blob is ~100 KB; 10 MB bounds request memory while leaving room to grow. */
 const MAX_BODY = 10 * 1024 * 1024;
+/* Binary attachments (screenshots, recordings, PDFs) are stored out-of-line on disk up to 50 MB. */
+const MAX_BLOB_BYTES = 50 * 1024 * 1024;
+const SAFE_INLINE_BLOB_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf', 'text/plain']);
+const EXT_BLOB_MIMES = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.pdf': 'application/pdf',
+  '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/plain; charset=utf-8',
+  '.json': 'application/json',
+  '.csv': 'text/csv; charset=utf-8',
+  '.zip': 'application/zip',
+};
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -158,9 +175,26 @@ export function startServer({
   const trustMode = normalizeTrustBootstrap(trustBootstrap);
   const ghWebhookSecret = String(webhookSecret || '').trim();
   const tokenKey = createHash('sha256').update(token).digest();
+  const blobSessionCookie = createHmac('sha256', tokenKey).update('gr8r-blob-read-v1').digest('hex');
   const matchesToken = candidate =>
     typeof candidate === 'string' && candidate.length > 0 && timingSafeEqual(createHash('sha256').update(candidate).digest(), tokenKey);
+  const hasValidBlobCookie = req => {
+    const raw = String(req.headers.cookie || '');
+    for (const part of raw.split(';')) {
+      const eq = part.indexOf('=');
+      if (eq < 0) continue;
+      const k = part.slice(0, eq).trim();
+      const v = part.slice(eq + 1).trim();
+      if (k === 'gr8r_blob' && v.length === blobSessionCookie.length) {
+        const a = Buffer.from(v);
+        const b = Buffer.from(blobSessionCookie);
+        if (a.length === b.length && timingSafeEqual(a, b)) return true;
+      }
+    }
+    return false;
+  };
   const DATA = dataFile || path.join(HERE, 'data', 'state.json');
+  const BLOBS_DIR = path.join(path.dirname(DATA), 'blobs');
   const DIST = distDir || path.join(HERE, '..', 'dist');
   let store = readStore(DATA);
   const subscribers = new Set();
@@ -192,14 +226,16 @@ export function startServer({
     res.writeHead(code, { 'content-type': type, 'content-length': buf.length, ...extra });
     res.end(buf);
   };
-  const readRawBody = req =>
+  const readRawBody = (req, limit = MAX_BODY) =>
     new Promise((resolve, reject) => {
       let n = 0;
       const chunks = [];
       req.on('data', c => {
         n += c.length;
-        if (n > MAX_BODY) {
-          reject(new Error('body too large'));
+        if (n > limit) {
+          const err = new Error('body too large');
+          err.code = 'PAYLOAD_TOO_LARGE';
+          reject(err);
           req.destroy();
           return;
         }
@@ -209,6 +245,9 @@ export function startServer({
       req.on('error', reject);
     });
   const readBody = req => readRawBody(req).then(buf => buf.toString('utf8'));
+  const setBlobCookieHeader = res => {
+    res.setHeader('set-cookie', `gr8r_blob=${blobSessionCookie}; Path=/api/blobs; Max-Age=2592000; HttpOnly; SameSite=Strict`);
+  };
 
   async function api(req, res, url) {
     /* On loopback and private Tailscale Serve routes, /api/config bootstraps
@@ -218,6 +257,7 @@ export function startServer({
     if (url.pathname === '/api/config') {
       if (req.method !== 'GET') return send(res, 405, { error: 'method not allowed' });
       const canBootstrap = authorized(req) || trustMode === 'always' || (trustMode === 'tailnet' && isTrustedPrivateRequest(req));
+      if (canBootstrap) setBlobCookieHeader(res);
       return send(res, 200, { token: canBootstrap ? token : null, authRequired: !canBootstrap }, 'application/json', {
         'cache-control': 'no-store',
         vary: 'Authorization, Host, Tailscale-User-Login, X-Forwarded-For',
@@ -234,7 +274,45 @@ export function startServer({
       }
       const ok = authorized(req) || matchesToken(body?.token);
       if (!ok) return send(res, 401, { error: 'unauthorized' }, 'application/json', { 'cache-control': 'no-store' });
+      setBlobCookieHeader(res);
       return send(res, 200, { ok: true }, 'application/json', { 'cache-control': 'no-store' });
+    }
+    if (url.pathname.startsWith('/api/blobs/') && (req.method === 'GET' || req.method === 'HEAD')) {
+      const canRead = authorized(req) || hasValidBlobCookie(req) || trustMode === 'always' || (trustMode === 'tailnet' && isTrustedPrivateRequest(req));
+      if (!canRead) return send(res, 401, { error: 'unauthorized' });
+      const blobId = url.pathname.slice('/api/blobs/'.length).toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(blobId)) return send(res, 400, { error: 'invalid blob id' });
+      const blobPath = path.join(BLOBS_DIR, blobId);
+      if (!fs.existsSync(blobPath)) return send(res, 404, { error: 'blob not found' });
+      let meta = {};
+      try {
+        meta = JSON.parse(fs.readFileSync(blobPath + '.json', 'utf8'));
+      } catch {
+        /* optional metadata */
+      }
+      const rawMime = String(meta.mime || 'application/octet-stream')
+        .split(';')[0]
+        .trim()
+        .toLowerCase();
+      const forceDownload = url.searchParams.get('download') === '1' || !SAFE_INLINE_BLOB_MIMES.has(rawMime);
+      const requestedName = url.searchParams.get('name');
+      const safeName = String(requestedName || meta.name || blobId)
+        .replace(/[/\\"\r\n]/g, '_')
+        .trim() || blobId;
+      const headers = {
+        'content-type': meta.mime || 'application/octet-stream',
+        'cache-control': 'private, max-age=31536000, immutable',
+        'x-content-type-options': 'nosniff',
+        'content-security-policy': "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; sandbox",
+        'content-disposition': `${forceDownload ? 'attachment' : 'inline'}; filename="${safeName}"`,
+      };
+      if (req.method === 'HEAD') {
+        const st = fs.statSync(blobPath);
+        res.writeHead(200, { ...headers, 'content-length': st.size });
+        res.end();
+        return;
+      }
+      return send(res, 200, fs.readFileSync(blobPath), headers['content-type'], headers);
     }
     if (url.pathname === '/api/webhooks/github') {
       if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' });
@@ -269,6 +347,48 @@ export function startServer({
       }
     }
     if (!authorized(req)) return send(res, 401, { error: 'unauthorized' });
+    setBlobCookieHeader(res);
+    if (url.pathname === '/api/blobs' && req.method === 'POST') {
+      let buf;
+      try {
+        buf = await readRawBody(req, MAX_BLOB_BYTES);
+      } catch (err) {
+        if (err?.code === 'PAYLOAD_TOO_LARGE') return send(res, 413, { error: 'Blob exceeds 50 MB limit' });
+        throw err;
+      }
+      if (!buf.length) return send(res, 400, { error: 'Empty blob upload' });
+      let rawName = '';
+      const hdrName = req.headers['x-file-name'];
+      if (hdrName) {
+        try {
+          rawName = decodeURIComponent(Array.isArray(hdrName) ? hdrName[0] : hdrName);
+        } catch {
+          rawName = String(Array.isArray(hdrName) ? hdrName[0] : hdrName);
+        }
+      }
+      const name = (rawName || url.searchParams.get('name') || 'attachment.bin').replace(/[/\\]/g, '_').trim();
+      const hdrType = String(req.headers['content-type'] || '').trim();
+      const extMime = EXT_BLOB_MIMES[path.extname(name).toLowerCase()];
+      const mime = !hdrType || hdrType === 'application/octet-stream' ? extMime || 'application/octet-stream' : hdrType;
+      const blobId = createHash('sha256').update(buf).digest('hex');
+      fs.mkdirSync(BLOBS_DIR, { recursive: true });
+      const dest = path.join(BLOBS_DIR, blobId);
+      if (!fs.existsSync(dest)) {
+        const tmp = `${dest}.${process.pid}.${Date.now()}.tmp`;
+        fs.writeFileSync(tmp, buf);
+        fs.renameSync(tmp, dest);
+      }
+      const metaTmp = `${dest}.json.${process.pid}.${Date.now()}.tmp`;
+      fs.writeFileSync(metaTmp, JSON.stringify({ name, mime, sizeBytes: buf.length }));
+      fs.renameSync(metaTmp, dest + '.json');
+      return send(res, 201, {
+        blobId,
+        url: `/api/blobs/${blobId}`,
+        name,
+        mime,
+        sizeBytes: buf.length,
+      });
+    }
     if (url.pathname === '/api/events' && req.method === 'GET') {
       res.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',

@@ -7,24 +7,31 @@ import {
   addSubtask,
   applyTaskPatch,
   applyWorkspacePatch,
+  attachFileRecord,
   childrenOfTask,
   claimNextReadyTask,
   claimTask,
   commentsOfTask,
   createDefaultState,
+  createDoc,
   createLabel,
   createProject,
   createTask,
   deleteComment,
+  deleteDoc,
   deleteLabel,
   deleteNotif,
   deleteProject,
   deleteTasks,
+  deleteWorkspaceFile,
+  docsOfProject,
   ensureLabels,
   ensureTeams,
   findMember,
   findProject,
   findTask,
+  formatDocForApi,
+  formatFileForApi,
   formatNotifForApi,
   formatProjectForApi,
   formatTaskForApi,
@@ -33,10 +40,12 @@ import {
   normalizeAgentName,
   promoteSubtask,
   pushNotif,
+  queryFiles,
   queryInbox,
   queryTasks,
   releaseTask,
   removeSubtask,
+  requireDoc,
   requireProject,
   requireTask,
   resolveMember,
@@ -45,6 +54,7 @@ import {
   searchWorkspace,
   setNotifRead,
   syncGitHubPullRequests,
+  updateDoc,
   updateLabel,
   updateProject,
   updateSubtask,
@@ -376,7 +386,8 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
           const d = state.data;
           const p = requireProject(d, ref);
           const tasks = queryTasks(d, { project: p.id, archived: url.searchParams.get('archived') }).map(t => formatTaskForApi(d, t));
-          return send(res, 200, { rev, project: formatProjectForApi(d, p), tasks });
+          const docs = docsOfProject(d, p.id).map(doc => formatDocForApi(d, doc));
+          return send(res, 200, { rev, project: formatProjectForApi(d, p), tasks, docs });
         }
         if (method === 'PATCH') {
           const result = await mutate((data, body) => {
@@ -390,6 +401,98 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
           const result = await mutate(data => {
             const p = deleteProject(data, ref);
             return { deleted: p.id, key: p.key };
+          });
+          if (result) send(res, 200, result);
+          return;
+        }
+      }
+    }
+
+    // /api/files
+    if (segments[0] === 'files') {
+      if (segments.length === 1 && method === 'GET') {
+        const { rev, state } = readView();
+        const d = state.data;
+        const filters = Object.fromEntries(url.searchParams.entries());
+        const files = queryFiles(d, filters).map(f => formatFileForApi(d, f));
+        return send(res, 200, { rev, files });
+      }
+      if (segments.length === 1 && method === 'POST') {
+        const result = await mutate((data, body) => {
+          const by = resolveActor(data, body.by);
+          const agent = resolveRequestAgent(req, body);
+          const rec = attachFileRecord(data, body, { by, agent });
+          const t = rec.task ? findTask(data, rec.task) : null;
+          return {
+            file: formatFileForApi(data, rec),
+            task: t ? formatTaskForApi(data, t) : null,
+          };
+        });
+        if (result) send(res, 201, result);
+        return;
+      }
+      if (segments.length === 2 && method === 'DELETE') {
+        const fileId = segments[1];
+        const result = await mutate((data, body) => {
+          const removed = deleteWorkspaceFile(data, fileId, {
+            by: resolveActor(data, body.by),
+            agent: resolveRequestAgent(req, body),
+          });
+          return { deleted: removed.id };
+        });
+        if (result) send(res, 200, result);
+        return;
+      }
+    }
+
+    // /api/docs
+    if (segments[0] === 'docs') {
+      if (segments.length === 1 && method === 'GET') {
+        const { rev, state } = readView();
+        const d = state.data;
+        const projParam = url.searchParams.get('project');
+        const list = projParam ? docsOfProject(d, requireProject(d, projParam).id) : (d.docs || []).slice().sort((a, b) => (b.updated || 0) - (a.updated || 0));
+        return send(res, 200, { rev, docs: list.map(doc => formatDocForApi(d, doc)) });
+      }
+      if (segments.length === 1 && method === 'POST') {
+        const result = await mutate((data, body) => {
+          const by = resolveActor(data, body.by);
+          const agent = resolveRequestAgent(req, body);
+          const doc = createDoc(data, body, { by, agent });
+          return { doc: formatDocForApi(data, doc) };
+        });
+        if (result) send(res, 201, result);
+        return;
+      }
+      if (segments.length === 2) {
+        const ref = segments[1];
+        const projParam = url.searchParams.get('project');
+        if (method === 'GET') {
+          const { rev, state } = readView();
+          const d = state.data;
+          const doc = requireDoc(d, ref, projParam);
+          return send(res, 200, { rev, doc: formatDocForApi(d, doc) });
+        }
+        if (method === 'PATCH') {
+          const result = await mutate((data, body) => {
+            const doc = updateDoc(data, ref, body, {
+              project: body.project ?? projParam,
+              by: resolveActor(data, body.by),
+              agent: resolveRequestAgent(req, body),
+            });
+            return { doc: formatDocForApi(data, doc) };
+          });
+          if (result) send(res, 200, result);
+          return;
+        }
+        if (method === 'DELETE') {
+          const result = await mutate((data, body) => {
+            const removed = deleteDoc(data, ref, {
+              project: body.project ?? projParam,
+              by: resolveActor(data, body.by),
+              agent: resolveRequestAgent(req, body),
+            });
+            return { deleted: removed.id, slug: removed.slug };
           });
           if (result) send(res, 200, result);
           return;

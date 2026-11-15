@@ -130,4 +130,17 @@ gr8r comment add PID-201 "Need approval before rotating production webhook secre
 # Triage and clear Inbox notifications
 gr8r inbox --unread
 gr8r inbox read --all -p PID
+
+# Attach persisted screenshots / QA artifacts directly to a task or project
+gr8r attach PID-201 ./qa-screenshot.png
+gr8r files -t PID-201
+
+# Create and update Markdown Project Docs (architecture specs, runbooks, decisions)
+gr8r doc create "Architecture & Runbook" -p PID --pinned --body - <<'EOF'
+#### Service Topology
+
+Authoritative state lives in `server/data/state.json` with binary blobs in `server/data/blobs/`.
+EOF
+gr8r docs -p PID
+gr8r doc view architecture-runbook -p PID
 ```

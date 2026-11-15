@@ -267,4 +267,23 @@ test('gr8r CLI guides user to GR8R_TOKEN when /api/config bootstrap is disabled,
   assert.match(inboxUnread.stdout, /blocker\s+PID-202/);
   const markRead = await invoke(['inbox', 'read', '--all', '-p', 'PID'], { env: autoEnv });
   assert.match(markRead.stdout, /0 unread remaining/);
+
+  const pngPath = path.join(dir, 'qa-proof.png');
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02, 0x03]);
+  fs.writeFileSync(pngPath, pngBytes);
+  const attOut = await invoke(['attach', 'PID-202', pngPath], { env: autoEnv });
+  assert.match(attOut.stdout, /Attached qa-proof\.png .* to PID-202/);
+  const filesJson = JSON.parse((await invoke(['files', '-t', 'PID-202', '--json'], { env: autoEnv })).stdout);
+  assert.equal(filesJson.files.length, 1);
+  const dlPath = path.join(dir, 'downloaded.png');
+  await invoke(['file', 'download', filesJson.files[0].id, '-o', dlPath], { env: autoEnv });
+  assert.deepEqual(fs.readFileSync(dlPath), pngBytes);
+
+  await invoke(['doc', 'create', 'Service Runbook', '-p', 'PID', '--pinned', '--body', '-'], {
+    env: autoEnv,
+    stdin: '#### Verification\n\nVerified live blob upload.',
+  });
+  const docView = await invoke(['doc', 'view', 'service-runbook', '-p', 'PID'], { env: autoEnv });
+  assert.match(docView.stdout, /# Service Runbook/);
+  assert.match(docView.stdout, /Verified live blob upload\./);
 });

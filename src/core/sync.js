@@ -36,6 +36,38 @@ let authWarned = false;
 let promptShown = false;
 let awaitingManualToken = false;
 
+export function isSyncEnabled() {
+  return syncOn;
+}
+
+export async function uploadBlobToServer(file) {
+  if (!syncOn) return null;
+  const r = await fetch(BASE + '/blobs', {
+    method: 'POST',
+    headers: {
+      ...auth,
+      'content-type': file.type || 'application/octet-stream',
+      'x-file-name': encodeURIComponent(file.name || 'attachment.bin'),
+    },
+    body: file,
+  });
+  if (r.status === 401) {
+    warnAuth();
+    throw new Error('Unauthorized upload');
+  }
+  if (!r.ok) {
+    let msg = `Upload failed (HTTP ${r.status})`;
+    try {
+      const j = await r.json();
+      if (j?.error) msg = j.error;
+    } catch {
+      /* non-json error */
+    }
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
 const isTokenModalOpen = () => S.ui.modals.some(m => m.id === 'sync-auth');
 
 function setToken(tok) {
