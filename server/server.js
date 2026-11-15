@@ -80,27 +80,39 @@ export function normalizeTrustBootstrap(val = 'tailnet') {
 
 /* Direct loopback / direct tailnet sockets bootstrap without extra headers.
    Proxied requests only bootstrap when Tailscale Serve injects Tailscale-User-Login
-   (which Serve strips from incoming traffic and never sets on Funnel) over a single
-   tailnet X-Forwarded-For hop. */
+   (which Serve strips from incoming traffic and never sets on Funnel) on a .ts.net
+   Host over a single tailnet X-Forwarded-For hop, with no public edge/Funnel headers. */
+function bareHost(raw) {
+  const s = String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/, '');
+  if (!s) return '';
+  return s.startsWith('[') ? s.slice(1, s.indexOf(']')) : s.replace(/:\d+$/, '');
+}
+
 export function isTrustedPrivateRequest(req) {
   if (!isLocalOrTailnetSocket(req.socket?.remoteAddress)) return false;
-  const forwarded = Boolean(
-    req.headers['x-forwarded-for'] ||
-    req.headers['x-forwarded-proto'] ||
-    req.headers['x-forwarded-host'] ||
-    req.headers['x-real-ip'] ||
-    req.headers.forwarded ||
+  if (
     req.headers['tailscale-funnel-request'] ||
-    req.headers['cf-connecting-ip'],
+    req.headers['cf-connecting-ip'] ||
+    req.headers['cf-ray'] ||
+    req.headers['true-client-ip'] ||
+    req.headers['cdn-loop']
+  ) {
+    return false;
+  }
+  const host = bareHost(req.headers.host);
+  if (!host) return false;
+  const forwarded = Boolean(
+    req.headers['x-forwarded-for'] || req.headers['x-forwarded-proto'] || req.headers['x-forwarded-host'] || req.headers['x-real-ip'] || req.headers.forwarded,
   );
   if (!forwarded) {
-    const rawHost = String(req.headers.host || '')
-      .trim()
-      .toLowerCase();
-    const host = rawHost.startsWith('[') ? rawHost.slice(1, rawHost.indexOf(']')) : rawHost.replace(/:\d+$/, '');
     return host === '127.0.0.1' || host === 'localhost' || host === '::1' || isTailnetIp(host);
   }
-  if (!String(req.headers['tailscale-user-login'] || '').trim() || req.headers['tailscale-funnel-request']) return false;
+  const fwdHost = req.headers['x-forwarded-host'] ? bareHost(req.headers['x-forwarded-host']) : host;
+  if (!host.endsWith('.ts.net') || !fwdHost.endsWith('.ts.net')) return false;
+  if (!String(req.headers['tailscale-user-login'] || '').trim()) return false;
   const hops = String(req.headers['x-forwarded-for'] || '')
     .split(',')
     .map(s => s.trim())

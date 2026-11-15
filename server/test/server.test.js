@@ -439,6 +439,15 @@ test('gates /api/config token bootstrap to loopback and private Tailscale routes
     { host: 'alienarchy.tail854973.ts.net', 'tailscale-funnel-request': '?1', 'x-forwarded-for': '203.0.113.9' },
     // Spoofed Tailscale-User-Login through a public reverse proxy (public X-Forwarded-For) is rejected.
     { host: 'gr8r.example.com', 'tailscale-user-login': 'spoof@example.com', 'x-forwarded-for': '203.0.113.9' },
+    // Cloudflare WARP CGNAT (100.96.x.x) + spoofed Tailscale-User-Login through Cloudflare Tunnel is rejected.
+    {
+      host: 'gr8r.example.com',
+      'cf-connecting-ip': '100.96.1.2',
+      'x-forwarded-for': '100.96.1.2',
+      'tailscale-user-login': 'attacker@example.com',
+    },
+    // CGNAT client through a non-.ts.net reverse proxy + spoofed Tailscale-User-Login is rejected.
+    { host: 'gr8r.example.com', 'x-forwarded-for': '100.96.1.2', 'tailscale-user-login': 'attacker@example.com' },
     { host: 'gr8r.example.com', 'cf-connecting-ip': '203.0.113.9' },
     { host: '127.0.0.1:' + port, 'x-forwarded-for': '203.0.113.9' },
     { host: '127.0.0.1:' + port, 'x-real-ip': '198.51.100.4' },
