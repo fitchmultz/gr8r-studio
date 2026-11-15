@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
@@ -397,4 +398,72 @@ test('archived project detail and project-scoped task queries keep summary count
 
   const globalAll = await (await fetch(base + '/api/tasks?archived=ALL', { headers: auth })).json();
   assert.equal(globalAll.tasks.filter(t => t.projectKey === 'LEG').length, 2);
+});
+
+function rawGet(port, pathname, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: pathname, method: 'GET', headers }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+test('gates /api/config token bootstrap to loopback and private Tailscale routes, and verifies tokens via /api/auth', async t => {
+  const { port, base } = await withServer(t);
+
+  // Private Tailscale Serve route (tailnet CGNAT IP + .ts.net host) receives bootstrap token.
+  const tsServe = await rawGet(port, '/api/config', {
+    host: 'alienarchy.tail854973.ts.net:8443',
+    'x-forwarded-for': '100.101.102.103',
+    'x-forwarded-host': 'alienarchy.tail854973.ts.net:8443',
+  });
+  assert.deepEqual(tsServe.json, { token: 'secret', authRequired: false });
+
+  // Tailscale IPv6 ULA route also receives bootstrap token.
+  const tsV6 = await rawGet(port, '/api/config', {
+    host: 'alienarchy.tail854973.ts.net:8443',
+    'x-forwarded-for': 'fd7a:115c:a1e0::1234',
+  });
+  assert.deepEqual(tsV6.json, { token: 'secret', authRequired: false });
+
+  // Public exposure vectors withhold the token unless authenticated.
+  for (const headers of [
+    { host: 'alienarchy.tail854973.ts.net', 'tailscale-funnel-request': '?1', 'x-forwarded-for': '203.0.113.9' },
+    { host: 'gr8r.example.com', 'cf-connecting-ip': '203.0.113.9' },
+    { host: '127.0.0.1:' + port, 'x-forwarded-for': '203.0.113.9' },
+    { host: '127.0.0.1:' + port, 'x-real-ip': '198.51.100.4' },
+    { host: 'gr8r.example.com' },
+    { host: '127.0.0.1:' + port, 'x-forwarded-host': 'gr8r.example.com' },
+    { host: '127.0.0.1:' + port, forwarded: 'for=203.0.113.9;proto=https' },
+    { host: '127.0.0.1:' + port, forwarded: 'proto=https;host=gr8r.example.com' },
+  ]) {
+    const denied = await rawGet(port, '/api/config', headers);
+    assert.equal(denied.status, 200);
+    assert.deepEqual(denied.json, { token: null, authRequired: true });
+
+    const authed = await rawGet(port, '/api/config', { ...headers, authorization: 'Bearer secret' });
+    assert.deepEqual(authed.json, { token: 'secret', authRequired: false });
+  }
+
+  // POST /api/auth verifies explicit tokens without exposing the secret.
+  assert.equal(
+    (await fetch(base + '/api/auth', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: 'wrong' }) })).status,
+    401,
+  );
+  const okAuth = await fetch(base + '/api/auth', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token: 'secret' }),
+  });
+  assert.equal(okAuth.status, 200);
+  assert.deepEqual(await okAuth.json(), { ok: true });
+
+  // Explicit trustBootstrap: 'none' disables unauthenticated bootstrap even on loopback.
+  const strict = await withServer(t, { trustBootstrap: 'none' });
+  const strictCfg = await (await fetch(strict.base + '/api/config')).json();
+  assert.deepEqual(strictCfg, { token: null, authRequired: true });
 });

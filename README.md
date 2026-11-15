@@ -90,18 +90,25 @@ browser keeps its own standalone copy (no sync).
 
 Run the bundled server to keep one workspace in sync across devices:
 
-Keep the server behind a private network or an authenticated reverse proxy.
-Anyone who can reach `/api/config` can obtain the shared token and read or
-change the workspace. The token is not a user login.
+Keep the server behind a private network or an authenticated reverse proxy. By
+default (`GR8R_TRUST_BOOTSTRAP=tailnet`), `GET /api/config` only bootstraps
+`GR8R_TOKEN` automatically on direct loopback and private Tailscale Serve
+(`*.ts.net` / `100.64.0.0/10`) routes. Requests arriving through Tailscale
+Funnel, Cloudflare Tunnel, or any public reverse proxy receive
+`{ token: null, authRequired: true }` and must authenticate explicitly with
+`GR8R_TOKEN` (`POST /api/auth` in the browser or `Authorization: Bearer` in API
+clients). Set `GR8R_TRUST_BOOTSTRAP=none` to require an explicit token on every
+route.
 
 ```bash
 VITE_SYNC_URL=/api npm run build
 cd server && GR8R_TOKEN=<secret> npm start    # app + sync API on 127.0.0.1:4180
 ```
 
-- `GR8R_TOKEN` is the single shared bearer token. The client fetches it from
-  `GET /api/config` at startup, so rotating it only needs a server restart.
-  `PORT`, `HOST`, `GR8R_DATA`
+- `GR8R_TOKEN` is the single shared bearer token. Clients on private loopback or
+  Tailscale Serve routes fetch it from `GET /api/config` at startup, so rotating
+  it on a tailnet deployment only needs a server restart.
+  `GR8R_TRUST_BOOTSTRAP` (`tailnet`, `none`, or `always`), `PORT`, `HOST`, `GR8R_DATA`
   (state file) and `DIST` (static dir) can be overridden through the environment.
 - The server keeps the workspace blob and a revision in `server/data/state.json`.
   A push advances the revision only after the state file is written. An unreadable

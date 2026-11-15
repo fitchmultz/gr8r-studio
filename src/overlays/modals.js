@@ -41,7 +41,7 @@ export function modalHtml(m) {
     case 'prompt':
       return wrap(
         'sm',
-        `${H(m.title)}<form class="modal-b" data-submit="promptSubmit"><div class="field"><label class="label" for="prompt-in">${esc(m.label)}</label><input class="input" id="prompt-in" value="${esc(m.value || '')}" autofocus></div></form><div class="modal-f"><span class="sp"></span><button class="btn btn-secondary" data-a="closeModal">Cancel</button><button class="btn btn-primary" data-a="promptSubmit">${esc(m.ok || 'Save')}</button></div>`,
+        `${H(m.title, m.sub ? esc(m.sub) : '')}<form class="modal-b" data-submit="promptSubmit"><div class="field"><label class="label" for="prompt-in">${esc(m.label)}</label><input class="input" type="${esc(m.inputType || 'text')}" id="prompt-in" value="${esc(m.value || '')}" autocomplete="${esc(m.autocomplete || 'off')}" autofocus></div></form><div class="modal-f"><span class="sp"></span><button class="btn btn-secondary" data-a="closeModal">Cancel</button><button class="btn btn-primary" data-a="promptSubmit">${esc(m.ok || 'Save')}</button></div>`,
       );
     case 'shortcuts':
       return wrap('lg', shortcutsModal(H));

@@ -1,24 +1,109 @@
 /* ---------- optional sync with a self-hosted server (README: Self-hosting) ---------- */
-import { getPendingSave, getRev, hydrate, setOnSave, stampRev } from './store.js';
+import { S, getPendingSave, getRev, hydrate, setOnSave, stampRev } from './store.js';
+import { openModal } from '../overlays/modals.js';
 import { render } from '../shell/render.js';
 import { toast } from '../ui/toast.js';
 
 /* Sync config: VITE_SYNC_URL ('/api' when this server serves the app), unset →
-   the app stays standalone. The token comes from GET /api/config: fetched
-   lazily before the first request and refreshed once on a 401, so a failed
-   boot fetch or a server-side token rotation recovers on the next pull
-   instead of stranding the page unauthenticated. VITE_SYNC_TOKEN remains as
-   a build-time fallback. */
+   the app stays standalone. On private loopback / Tailscale Serve routes,
+   GET /api/config bootstraps GR8R_TOKEN automatically; on non-Tailscale routes
+   it returns { authRequired: true } and prompts once for GR8R_TOKEN, verified
+   against POST /api/auth. VITE_SYNC_TOKEN remains as a build-time fallback. */
+const TOKEN_KEY = 'gr8r.token';
 const BASE = import.meta.env.VITE_SYNC_URL;
-let TOKEN = import.meta.env.VITE_SYNC_TOKEN || '';
+
+function readSavedToken() {
+  try {
+    return localStorage.getItem(TOKEN_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+function writeSavedToken(tok) {
+  try {
+    if (tok) localStorage.setItem(TOKEN_KEY, tok);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* private browsing or storage blocked */
+  }
+}
+
+let TOKEN = import.meta.env.VITE_SYNC_TOKEN || readSavedToken() || '';
 let auth = TOKEN ? { authorization: 'Bearer ' + TOKEN } : {};
 const syncOn = !!BASE;
 let authWarned = false;
+let promptShown = false;
+
+function setToken(tok) {
+  TOKEN = tok || '';
+  auth = TOKEN ? { authorization: 'Bearer ' + TOKEN } : {};
+}
+
 const warnAuth = () => {
-  if (authWarned) return;
+  if (authWarned || promptShown) return;
   authWarned = true;
-  toast("Sync is off — the server rejected this device's token. Check GR8R_TOKEN.", { kind: 'err' });
+  toast("Sync is off — the server rejected this device's token.", {
+    kind: 'err',
+    action: 'Sign in',
+    onAction: openTokenModal,
+  });
 };
+
+async function submitToken(raw) {
+  const candidate = String(raw || '').trim();
+  if (!candidate) {
+    toast('Enter your workspace access token.', { kind: 'err', action: 'Sign in', onAction: openTokenModal });
+    return;
+  }
+  try {
+    const r = await fetch(BASE + '/auth', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: candidate }),
+    });
+    if (!r.ok) {
+      toast('Access token rejected by server.', { kind: 'err', action: 'Try again', onAction: openTokenModal });
+      return;
+    }
+    writeSavedToken(candidate);
+    setToken(candidate);
+    authWarned = false;
+    promptShown = false;
+    toast('Connected to workspace sync');
+    pull();
+    connectEvents();
+  } catch {
+    toast('Could not reach server to verify token.', { kind: 'err', action: 'Try again', onAction: openTokenModal });
+  }
+}
+
+function openTokenModal() {
+  openModal({
+    type: 'prompt',
+    title: 'Sign in to workspace sync',
+    sub: 'This route requires your GR8R_TOKEN access token.',
+    label: 'Access token',
+    inputType: 'password',
+    autocomplete: 'current-password',
+    ok: 'Connect',
+    run: submitToken,
+  });
+}
+
+function requestTokenIfNeeded() {
+  if (promptShown) return;
+  promptShown = true;
+  if (S.ui.modals.length === 0) {
+    openTokenModal();
+  } else {
+    toast('Sign in with GR8R_TOKEN to sync this workspace.', {
+      kind: 'info',
+      action: 'Sign in',
+      onAction: openTokenModal,
+      ms: 8000,
+    });
+  }
+}
 
 let pushing = false;
 let pushT = 0;
@@ -34,12 +119,19 @@ function queuePush() {
 
 async function loadConfig() {
   try {
-    const r = await fetch(BASE + '/config');
+    const r = await fetch(BASE + '/config', { headers: auth });
     if (!r.ok) return false;
-    const t = (await r.json()).token;
+    const j = await r.json();
+    if (j.authRequired && !j.token) {
+      if (readSavedToken()) writeSavedToken('');
+      setToken('');
+      requestTokenIfNeeded();
+      return false;
+    }
+    const t = j.token;
     if (!t) return false;
-    TOKEN = t;
-    auth = { authorization: 'Bearer ' + TOKEN };
+    setToken(t);
+    promptShown = false;
     return true;
   } catch {
     return false;
