@@ -174,7 +174,7 @@ export function drawerHtml(t) {
 export function commentHtml(c) {
   const m = mem(c.by);
   const mine = c.by === D().me;
-  return `<div class="cmt">${av(c.by, 'md', false)}<div class="body"><div class="who"><b>${esc(m?.name)}</b>${c.agent ? agentBadge(c.agent) : ''}<time>${ago(c.at)}</time>${mine ? `<span class="sp"></span><button class="ibtn ibtn-xs" data-a="delComment" data-id="${c.id}" aria-label="Delete comment" data-tip="Delete">${ic('trash-2', 12)}</button>` : ''}</div><div class="txt">${fmtComment(c.text)}</div>
+  return `<div class="cmt">${av(c.by, 'md', false)}<div class="body"><div class="who"><b>${esc(m?.name)}</b>${c.agent ? agentBadge(c.agent) : ''}${c.needsOwner ? `<span class="badge red" style="height:18px;font-size:10.5px;padding:0 6px;gap:3px">${ic('octagon-alert', 11)}Needs you</span>` : ''}<time>${ago(c.at)}</time>${mine ? `<span class="sp"></span><button class="ibtn ibtn-xs" data-a="delComment" data-id="${c.id}" aria-label="Delete comment" data-tip="Delete">${ic('trash-2', 12)}</button>` : ''}</div><div class="txt">${fmtComment(c.text)}</div>
     <div class="reacts">${Object.entries(c.re || {})
       .filter(([, v]) => v.length)
       .map(

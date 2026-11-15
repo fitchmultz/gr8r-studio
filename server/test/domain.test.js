@@ -26,14 +26,18 @@ import {
   isTaskBlocked,
   isTaskOverdue,
   isTaskReady,
+  markAllNotifsRead,
+  mentionsWorkspaceOwner,
   projectProgress,
   promoteSubtask,
+  queryInbox,
   queryTasks,
   releaseTask,
   removeMember,
   removeSubtask,
   resolveLabel,
   searchWorkspace,
+  setNotifRead,
   syncGitHubPullRequests,
   updateLabel,
   updateProject,
@@ -1435,4 +1439,45 @@ test('agent claims, --ready queue ordering, dependency unblocking, and claim cle
   updateSubtask(state.data, ordA, sub.id, { assignee: 'me', due: '2026-12-01' }, { agent: 'pi:worker-9', now: FIXED_NOW + 121 });
   assert.equal(state.data.activity[0].agent, 'pi:worker-9');
   assert.equal(state.data.activity[1].agent, 'pi:worker-9');
+});
+
+test('live inbox fires on --needs-owner, @mentions, agent comments, and PR/agent review/done transitions without self-noise', () => {
+  const state = createDefaultState(FIXED_NOW);
+  const p = createProject(state.data, { name: 'Inbox Flow', key: 'IBX' }, { now: FIXED_NOW });
+  const t = createTask(state.data, { project: p.id, title: 'Rotate webhook secret', assignee: state.data.me }, { now: FIXED_NOW });
+
+  // Owner's own interactive comments/edits (no agent, no --needs-owner) produce zero Inbox noise.
+  addComment(state.data, t, 'Checking current secret store', { now: FIXED_NOW + 10 });
+  applyTaskPatch(state.data, t, { status: 'progress' }, { now: FIXED_NOW + 20 });
+  assert.equal(queryInbox(state.data).length, 0);
+
+  // Code-fenced `@owner` does not trigger a false mention; real `@owner` does.
+  assert.equal(mentionsWorkspaceOwner(state.data, 'Run `@owner` in shell'), false);
+  assert.equal(mentionsWorkspaceOwner(state.data, 'Hey @owner please review'), true);
+  addComment(state.data, t, 'Hey @owner can you verify this?', { agent: 'pi:worker-1', now: FIXED_NOW + 30 });
+  assert.equal(queryInbox(state.data, { type: 'mention', unread: true }).length, 1);
+
+  // Explicit --needs-owner creates a blocker notification.
+  addComment(state.data, t, 'Blocked on production DNS approval', { agent: 'pi:worker-1', needsOwner: true, now: FIXED_NOW + 40 });
+  const blockers = queryInbox(state.data, { type: 'blocker', unread: true });
+  assert.equal(blockers.length, 1);
+  assert.equal(blockers[0].agent, 'pi:worker-1');
+
+  // GitHub PR opening ready -> moves task to review AND notifies Inbox with PR snippet.
+  syncGitHubPullRequests(
+    state.data,
+    [{ repo: 'fitchmultz/gr8r-studio', number: 99, title: 'feat: rotate secret', body: `Closes ${t.key}`, state: 'open', draft: false }],
+    { now: FIXED_NOW + 50 },
+  );
+  const updates = queryInbox(state.data, { type: 'update', unread: true });
+  assert.equal(updates.length, 1);
+  assert.match(updates[0].snippet, /gr8r-studio#99/);
+
+  // Marking individual and all notifications read updates unread counts; deleting the task cascades its notifications.
+  setNotifRead(state.data, blockers[0].id, true);
+  assert.equal(queryInbox(state.data, { unread: true }).length, 2);
+  assert.equal(markAllNotifsRead(state.data, { project: p.id }), 2);
+  assert.equal(queryInbox(state.data, { unread: true }).length, 0);
+  deleteTasks(state.data, [t.id]);
+  assert.equal(queryInbox(state.data).length, 0);
 });

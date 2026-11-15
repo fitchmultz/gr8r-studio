@@ -1625,6 +1625,7 @@ A.delFile = el => {
 /* inbox & notifications */
 A.selNotif = el => {
   const n = D().notifs.find(x => x.id === el.dataset.id);
+  if (!n) return;
   n.read = true;
   S.ui.inboxSel = n.id;
   save();
@@ -1632,6 +1633,7 @@ A.selNotif = el => {
 };
 A.toggleRead = el => {
   const n = D().notifs.find(x => x.id === el.dataset.id);
+  if (!n) return;
   n.read = !n.read;
   save();
   render();
@@ -1649,6 +1651,7 @@ A.toggleUnreadOnly = () => {
 };
 A.openNotif = el => {
   const n = D().notifs.find(x => x.id === el.dataset.id);
+  if (!n) return;
   n.read = true;
   save();
   if (n.task) A.openTask({ dataset: { id: n.task } });

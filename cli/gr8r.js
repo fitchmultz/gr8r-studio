@@ -304,7 +304,7 @@ function formatTaskDetail(payload) {
     lines.push('', `--- Comments (${comments.length}) ---`);
     for (const c of comments) {
       const who = `${c.byName || c.by}${c.agent ? ` [${c.agent}]` : ''}`;
-      lines.push(`[${c.id}] ${who} (${new Date(c.at).toISOString()}): ${c.text}`);
+      lines.push(`[${c.id}] ${who}${c.needsOwner ? ' [NEEDS OWNER]' : ''} (${new Date(c.at).toISOString()}): ${c.text}`);
     }
   }
   return lines.join('\n');
@@ -352,8 +352,12 @@ Commands:
   subtask remove <task> <sub-id>            Delete a subtask
 
   comment list <task>                       List task comments
-  comment add <task> [text] [--body -]      Post a comment on a task
+  comment add <task> [text] [--needs-owner] Post a comment (--needs-owner flags owner Inbox)
   comment delete <task> <comment-id>        Delete a comment
+
+  inbox [--unread] [--type blocker|...]     List Inbox notifications (blockers, mentions, updates)
+  inbox read <id | --all> [-p PROJECT]      Mark one or all Inbox notifications read
+  inbox unread <id>                         Mark an Inbox notification unread
 
   pr-sync [--file -] | [--repo R --pr N ..] Link GitHub PRs to KEY-123 tasks & sync status
   search <query>                            Search tasks, projects, people, files, and comments
@@ -433,6 +437,10 @@ export async function runCli(argv, io = {}) {
       claimed: { type: 'string' },
       next: { type: 'boolean' },
       force: { type: 'boolean' },
+      'needs-owner': { type: 'boolean' },
+      unread: { type: 'boolean' },
+      all: { type: 'boolean' },
+      type: { type: 'string' },
       archive: { type: 'boolean' },
       restore: { type: 'boolean' },
       fav: { type: 'boolean' },
@@ -762,6 +770,7 @@ export async function runCli(argv, io = {}) {
       if (opts.subtask?.length) body.subtasks = opts.subtask;
       if (opts.recur !== undefined) body.recur = nullableOpt(opts.recur);
       if (opts.fav) body.fav = true;
+      if (opts['needs-owner']) body.needsOwner = true;
       const res = await client.request('POST', '/tasks', body);
       if (opts.json) return outJson(res);
       stdout(`Created ${res.task.key}: ${res.task.title} [rev ${res.rev}]`);
@@ -847,6 +856,10 @@ export async function runCli(argv, io = {}) {
       if (opts['no-fav']) body.fav = false;
       if (opts.archive) body.archived = true;
       if (opts.restore) body.archived = false;
+      if (opts['needs-owner']) {
+        body.needsOwner = true;
+        if (commentText) body.skipNeedsOwnerNotif = true;
+      }
       if (opts['if-rev'] !== undefined) {
         const rev = Number(opts['if-rev']);
         if (!Number.isInteger(rev) || rev < 0) throw new Error(`Invalid --if-rev "${opts['if-rev']}": expected non-negative integer`);
@@ -854,7 +867,10 @@ export async function runCli(argv, io = {}) {
       }
       let res = await client.request('PATCH', `/tasks/${encodeURIComponent(ref)}`, body);
       if (commentText) {
-        const cmt = await client.request('POST', `/tasks/${encodeURIComponent(res.task.id)}/comments`, { text: commentText });
+        const cmt = await client.request('POST', `/tasks/${encodeURIComponent(res.task.id)}/comments`, {
+          text: commentText,
+          needsOwner: !!opts['needs-owner'],
+        });
         res = { ...res, rev: cmt.rev, task: cmt.task, comment: cmt.comment };
       }
       if (opts.json) return outJson(res);
@@ -939,7 +955,10 @@ export async function runCli(argv, io = {}) {
     if (sub === 'add') {
       const text = resolveTextArg(opts.body ?? pos[3], opts['body-file'], readStdin);
       if (!text || !text.trim()) throw new Error('Usage: gr8r comment add <task-ref> <text> (or --body -)');
-      const res = await client.request('POST', `/tasks/${encodeURIComponent(taskRef)}/comments`, { text });
+      const res = await client.request('POST', `/tasks/${encodeURIComponent(taskRef)}/comments`, {
+        text,
+        needsOwner: !!opts['needs-owner'],
+      });
       if (opts.json) return outJson(res);
       stdout(`Posted comment ${res.comment.id} on ${res.task.key} [rev ${res.rev}]`);
       return 0;
@@ -953,6 +972,63 @@ export async function runCli(argv, io = {}) {
       return 0;
     }
     throw new Error(`Unknown comment subcommand: ${sub}`);
+  }
+
+  if (cmd === 'inbox') {
+    if (sub === 'read') {
+      if (opts.all) {
+        const body = {};
+        if (opts.project) body.project = opts.project;
+        if (opts.task) body.task = opts.task;
+        if (opts.type) body.type = opts.type;
+        const res = await client.request('POST', '/inbox/read-all', body);
+        if (opts.json) return outJson(res);
+        stdout(`Marked ${res.marked} notification(s) read (${res.unreadCount} unread remaining) [rev ${res.rev}]`);
+        return 0;
+      }
+      const nid = pos[2];
+      if (!nid) throw new Error('Usage: gr8r inbox read <notif-id | --all>');
+      const res = await client.request('PATCH', `/inbox/${encodeURIComponent(nid)}`, { read: true });
+      if (opts.json) return outJson(res);
+      stdout(`Marked ${res.notification.id} read (${res.unreadCount} unread remaining) [rev ${res.rev}]`);
+      return 0;
+    }
+    if (sub === 'unread') {
+      const nid = pos[2];
+      if (!nid) throw new Error('Usage: gr8r inbox unread <notif-id>');
+      const res = await client.request('PATCH', `/inbox/${encodeURIComponent(nid)}`, { read: false });
+      if (opts.json) return outJson(res);
+      stdout(`Marked ${res.notification.id} unread (${res.unreadCount} unread remaining) [rev ${res.rev}]`);
+      return 0;
+    }
+    if (sub && sub !== 'list') {
+      throw new Error(`Unknown inbox subcommand: ${sub}`);
+    }
+    const params = new URLSearchParams();
+    if (opts.unread) params.set('unread', 'true');
+    if (opts.project) params.set('project', opts.project);
+    if (opts.task) params.set('task', opts.task);
+    if (opts.type) params.set('type', opts.type);
+    if (opts.limit) params.set('limit', opts.limit);
+    const qs = params.toString();
+    const res = await client.request('GET', `/inbox${qs ? '?' + qs : ''}`);
+    if (opts.json) return outJson(res);
+    stdout(`Inbox (${res.unreadCount} unread) [rev ${res.rev}]`);
+    if (!res.notifications.length) {
+      stdout('(empty)');
+      return 0;
+    }
+    stdout(
+      formatTable(res.notifications, [
+        ['ID', n => n.id],
+        ['STATE', n => (n.read ? 'read' : 'UNREAD')],
+        ['TYPE', n => n.type],
+        ['TASK', n => n.taskKey || n.projectKey || '-'],
+        ['FROM', n => (n.agent ? `${n.byName || n.by || '-'} [${n.agent}]` : n.byName || n.by || '-')],
+        ['SUMMARY', n => `${n.text}${n.snippet ? ' — ' + n.snippet : ''}`],
+      ]),
+    );
+    return 0;
   }
 
   if (cmd === 'pr-sync') {

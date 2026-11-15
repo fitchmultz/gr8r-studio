@@ -266,6 +266,9 @@ export function removeMember(data, memberOrRef) {
       if (data.me && !p.members.includes(data.me)) p.members.push(data.me);
     }
   }
+  for (const n of data.notifs || []) {
+    if (n.by === m.id) n.by = null;
+  }
   return m;
 }
 
@@ -397,6 +400,142 @@ export function normalizeAgentName(raw) {
   const s = String(raw).trim().replace(/\s+/g, ' ');
   if (!s || ['none', 'null', 'clear'].includes(s.toLowerCase())) return null;
   return s;
+}
+
+/* ---------- live inbox & notifications ---------- */
+export const NOTIF_TYPES = ['blocker', 'mention', 'assign', 'comment', 'update'];
+
+export function mentionsWorkspaceOwner(data, rawText) {
+  const np = data.notifPrefs || {};
+  if (np.mention_all === false && !np.mention_ws && np.mention_team === false) return false;
+  const stripped = stripCodeAndComments(String(rawText ?? ''));
+  const tokens = [...stripped.matchAll(/(?:^|[^\w])@([a-z0-9._-]+)/gi)].map(m => m[1].toLowerCase());
+  if (!tokens.length) return false;
+  const owner = findMember(data, data.me);
+  const ownerTokens = new Set(['me', 'owner']);
+  if (owner) {
+    const nameParts = String(owner.name || '')
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
+    for (const part of nameParts) ownerTokens.add(part);
+    if (nameParts.length > 1) ownerTokens.add(nameParts.join(''));
+    if (nameParts.length > 1) ownerTokens.add(nameParts.join('-'));
+    const emailLocal = String(owner.email || '')
+      .split('@')[0]
+      .toLowerCase();
+    if (emailLocal) ownerTokens.add(emailLocal);
+  }
+  if (np.mention_all !== false && tokens.some(tok => ownerTokens.has(tok))) return true;
+  if (np.mention_ws && tokens.some(tok => tok === 'workspace' || tok === 'everyone' || tok === 'here')) return true;
+  if (np.mention_team !== false && data.me) {
+    const myTeamTokens = new Set(
+      ensureTeams(data)
+        .filter(tm => (tm.members || []).includes(data.me))
+        .map(tm =>
+          String(tm.name || '')
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, ''),
+        )
+        .filter(Boolean),
+    );
+    if (tokens.some(tok => myTeamTokens.has(tok.replace(/-/g, '')))) return true;
+  }
+  return false;
+}
+
+export function pushNotif(data, fields = {}, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const type = NOTIF_TYPES.includes(fields.type) ? fields.type : 'update';
+  const agent = normalizeAgentName(fields.agent ?? opts.agent);
+  const by = fields.by !== undefined ? validMemberId(data, fields.by) : null;
+  const taskObj = fields.task ? (typeof fields.task === 'object' ? fields.task : findTask(data, fields.task)) : null;
+  const projId = fields.project ? (typeof fields.project === 'object' ? fields.project.id : fields.project) : (taskObj?.project ?? null);
+  data.notifs = Array.isArray(data.notifs) ? data.notifs : [];
+  const n = {
+    id: uid('n'),
+    type,
+    by,
+    ...(agent ? { agent } : {}),
+    task: taskObj?.id || null,
+    project: projId,
+    text: String(fields.text ?? ''),
+    snippet: String(fields.snippet ?? '')
+      .replace(/\s+/g, ' ')
+      .trim(),
+    at: now,
+    read: !!fields.read,
+  };
+  data.notifs.unshift(n);
+  return n;
+}
+
+export function formatNotifForApi(data, n) {
+  const t = n.task ? findTask(data, n.task) : null;
+  const p = n.project ? findProject(data, n.project) : t ? findProject(data, t.project) : null;
+  return {
+    ...n,
+    agent: n.agent || null,
+    byName: n.by ? findMember(data, n.by)?.name || null : null,
+    taskKey: t?.key || null,
+    taskTitle: t?.title || null,
+    taskStatus: t?.status || null,
+    projectKey: p?.key || null,
+    projectName: p?.name || null,
+  };
+}
+
+export function queryInbox(data, filters = {}) {
+  let list = Array.isArray(data.notifs) ? data.notifs.slice() : [];
+  if (filters.project) {
+    const p = requireProject(data, filters.project);
+    list = list.filter(n => n.project === p.id);
+  }
+  if (filters.task) {
+    const t = requireTask(data, filters.task);
+    list = list.filter(n => n.task === t.id);
+  }
+  if (filters.type && filters.type !== 'all') {
+    const types = String(filters.type)
+      .split(',')
+      .map(s => s.trim().toLowerCase())
+      .filter(Boolean);
+    for (const ty of types) {
+      if (!NOTIF_TYPES.includes(ty)) {
+        throw new DomainError(`Invalid inbox type "${ty}". Expected one of: ${NOTIF_TYPES.join(', ')}`);
+      }
+    }
+    const allow = new Set(types);
+    list = list.filter(n => allow.has(n.type));
+  }
+  const unreadOnly = filters.unread === true || (typeof filters.unread === 'string' && ['1', 'true', 'yes'].includes(filters.unread.trim().toLowerCase()));
+  if (unreadOnly) list = list.filter(n => !n.read);
+  list.sort((a, b) => (b.at || 0) - (a.at || 0));
+  const lim = Number(filters.limit);
+  if (Number.isFinite(lim) && lim > 0) list = list.slice(0, lim);
+  return list;
+}
+
+export function setNotifRead(data, notifId, read = true) {
+  const n = (data.notifs || []).find(x => x.id === notifId);
+  if (!n) throw new DomainError(`Notification not found: ${notifId}`, 404);
+  n.read = !!read;
+  return n;
+}
+
+export function markAllNotifsRead(data, filters = {}) {
+  const targets = queryInbox(data, { ...filters, unread: true, limit: undefined });
+  for (const n of targets) n.read = true;
+  return targets.length;
+}
+
+export function deleteNotif(data, notifId) {
+  const list = data.notifs || [];
+  const idx = list.findIndex(x => x.id === notifId);
+  if (idx < 0) throw new DomainError(`Notification not found: ${notifId}`, 404);
+  const [removed] = list.splice(idx, 1);
+  return removed;
 }
 
 /* ---------- activity ---------- */
@@ -593,6 +732,7 @@ export function deleteProject(data, projectOrRef) {
   data.projects = data.projects.filter(x => x.id !== p.id);
   data.projOrder = (data.projOrder || []).filter(id => id !== p.id);
   data.files = (data.files || []).filter(f => f.project !== p.id);
+  data.notifs = (data.notifs || []).filter(n => n.project !== p.id);
   if (Array.isArray(data.savedViews)) {
     data.savedViews = data.savedViews.filter(v => v.project !== p.id);
   }
@@ -769,6 +909,17 @@ export function createTask(data, fields = {}, opts = {}) {
   }
   data.tasks.push(t);
   logActivity(data, 'created', t, '', { by, agent, now });
+  const isExternalCreate = Boolean(agent) || by !== data.me;
+  if (opts.needsOwner) {
+    pushNotif(data, { type: 'blocker', by, agent, task: t, text: 'needs your input on', snippet: stripHtml(t.desc) || t.title }, { now });
+  } else if (isExternalCreate) {
+    const descText = stripHtml(t.desc);
+    if (descText && mentionsWorkspaceOwner(data, descText)) {
+      pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: descText }, { now });
+    } else if (assignee && assignee === data.me && data.notifPrefs?.assign_self !== false) {
+      pushNotif(data, { type: 'assign', by, agent, task: t, text: 'assigned you', snippet: t.title }, { now });
+    }
+  }
   return t;
 }
 
@@ -910,6 +1061,7 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
   let completed = false;
   let spawned = null;
   let changed = false;
+  const isExternalActor = Boolean(agent) || by !== data.me || opts.source === 'github';
 
   for (const k of Object.keys(patch)) {
     const old = t[k];
@@ -937,6 +1089,15 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
         if (old === 'done') t.completedAt = null;
         if (old === 'canceled') t.canceledAt = null;
         logActivity(data, 'moved', t, `from ${ST[old].name} to ${ST[nv].name}`, { by, agent, now });
+      }
+      if (isExternalActor && data.notifPrefs?.assign_status !== false && !opts.needsOwner) {
+        if (nv === 'review') {
+          pushNotif(data, { type: 'update', by, agent, task: t, text: 'moved to In Review:', snippet: opts.snippet || 'Ready for review' }, { now });
+        } else if (nv === 'done') {
+          pushNotif(data, { type: 'update', by, agent, task: t, text: 'completed', snippet: opts.snippet || 'Marked done' }, { now });
+        } else if (nv === 'canceled') {
+          pushNotif(data, { type: 'update', by, agent, task: t, text: 'canceled', snippet: opts.snippet || 'Canceled' }, { now });
+        }
       }
       if (nv === 'done' && t.recur && t.due) {
         const nd = iso(addD(parse(t.due), RECUR_DAYS[t.recur] || 7));
@@ -975,8 +1136,18 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
     } else if (k === 'claimedBy') {
       t.claimedAt = nv ? now : null;
       logActivity(data, nv ? 'claimed' : 'released', t, nv ? `(${nv})` : '', { by, agent: nv || agent, now });
-    } else if (k === 'assignee') logActivity(data, 'assigned', t, nv ? `to ${findMember(data, nv)?.name}` : '(unassigned)', { by, agent, now });
-    else if (k === 'priority') logActivity(data, 'changed priority of', t, `to ${PR[nv].name}`, { by, agent, now });
+    } else if (k === 'assignee') {
+      logActivity(data, 'assigned', t, nv ? `to ${findMember(data, nv)?.name}` : '(unassigned)', { by, agent, now });
+      if (isExternalActor && nv && nv === data.me && data.notifPrefs?.assign_self !== false && !opts.needsOwner) {
+        pushNotif(data, { type: 'assign', by, agent, task: t, text: 'assigned you', snippet: t.title }, { now });
+      }
+    } else if (k === 'desc') {
+      const prevPlain = stripHtml(old || '');
+      const nextPlain = stripHtml(nv || '');
+      if (isExternalActor && !opts.needsOwner && !mentionsWorkspaceOwner(data, prevPlain) && mentionsWorkspaceOwner(data, nextPlain)) {
+        pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: nextPlain }, { now });
+      }
+    } else if (k === 'priority') logActivity(data, 'changed priority of', t, `to ${PR[nv].name}`, { by, agent, now });
     else if (k === 'due') logActivity(data, 'changed due date of', t, nv ? `to ${fmt(nv)}` : '(cleared)', { by, agent, now });
     else if (k === 'start') logActivity(data, 'changed start date of', t, nv ? `to ${fmt(nv)}` : '(cleared)', { by, agent, now });
     else if (k === 'project') {
@@ -984,6 +1155,9 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
       t.key = nextTaskKey(data, p);
       t.deps = activeProjectDeps(data, p.id, t.deps, t.id);
       t.parent = activeProjectParent(data, p.id, t.parent, t.id);
+      for (const n of data.notifs || []) {
+        if (n.task === t.id) n.project = p.id;
+      }
       for (const other of data.tasks) {
         if (other.id !== t.id && other.project !== p.id) {
           if (other.deps?.includes(t.id)) other.deps = other.deps.filter(d => d !== t.id);
@@ -1015,6 +1189,9 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
       logActivity(data, nv ? 'archived' : 'restored', t, '', { by, agent, now });
     }
     t.updated = now;
+  }
+  if (opts.needsOwner && !opts.skipNeedsOwnerNotif) {
+    pushNotif(data, { type: 'blocker', by, agent, task: t, text: 'needs your input on', snippet: opts.snippet || stripHtml(t.desc) || t.title }, { now });
   }
 
   return { task: t, changed, completed, spawned, messages };
@@ -1100,6 +1277,9 @@ export function deleteTasks(data, idsOrRefs) {
   data.comments = data.comments.filter(c => !set.has(c.task));
   if (data.files) {
     data.files = data.files.filter(f => !f.task || !set.has(f.task));
+  }
+  if (data.notifs) {
+    data.notifs = data.notifs.filter(n => !n.task || !set.has(n.task));
   }
   return removed;
 }
@@ -1199,9 +1379,27 @@ export function addComment(data, taskOrRef, text, opts = {}) {
   const t = requireTask(data, taskOrRef);
   const txt = String(text ?? '').trim();
   if (!txt) throw new DomainError('Comment text cannot be empty');
-  const c = { id: uid('c'), task: t.id, by, ...(agent ? { agent } : {}), at: now, text: txt, re: {} };
+  const needsOwner = !!opts.needsOwner;
+  const c = {
+    id: uid('c'),
+    task: t.id,
+    by,
+    ...(agent ? { agent } : {}),
+    ...(needsOwner ? { needsOwner: true } : {}),
+    at: now,
+    text: txt,
+    re: {},
+  };
   data.comments.push(c);
   logActivity(data, 'commented on', t, '', { by, agent, now });
+  const isExternal = Boolean(agent) || by !== data.me;
+  if (needsOwner) {
+    pushNotif(data, { type: 'blocker', by, agent, task: t, text: 'needs your input on', snippet: txt }, { now });
+  } else if (isExternal && mentionsWorkspaceOwner(data, txt)) {
+    pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: txt }, { now });
+  } else if (isExternal && data.notifPrefs?.push_comment !== false && (Boolean(agent) || t.assignee === data.me)) {
+    pushNotif(data, { type: 'comment', by, agent, task: t, text: 'commented on', snippet: txt }, { now });
+  }
   return c;
 }
 
@@ -1769,6 +1967,16 @@ export function applyWorkspacePatch(targetState, patch) {
         }
       }
     }
+    if (Array.isArray(d.notifs)) {
+      for (const n of d.notifs) {
+        if (n?.task && deletedProjIds.has(n.project)) {
+          const parentTask = findTask(d, n.task);
+          if (parentTask && !deletedProjIds.has(parentTask.project)) {
+            n.project = parentTask.project;
+          }
+        }
+      }
+    }
   }
 
   // 1. Projects
@@ -2019,6 +2227,28 @@ export function applyWorkspacePatch(targetState, patch) {
       rekeyed = true;
     }
   }
+  if (Array.isArray(d.notifs)) {
+    const kept = [];
+    for (const n of d.notifs) {
+      if (!n || (n.task && !findTask(d, n.task)) || (n.project && !findProject(d, n.project))) {
+        rekeyed = true;
+        continue;
+      }
+      if (n.task) {
+        const pt = findTask(d, n.task);
+        if (pt && n.project !== pt.project) {
+          n.project = pt.project;
+          rekeyed = true;
+        }
+      }
+      if (n.by && !findMember(d, n.by)) {
+        n.by = null;
+        rekeyed = true;
+      }
+      kept.push(n);
+    }
+    if (kept.length !== d.notifs.length) d.notifs = kept;
+  }
 
   // 6. Activity
   if (patch.activityCleared) d.activity = [];
@@ -2249,7 +2479,7 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
         if (prev.updatedAt > 0 && incoming.updatedAt > 0 && incoming.updatedAt < prev.updatedAt) continue;
         t.prs = t.prs.filter(x => !samePr(x));
         if (prev.state === 'open' && hasSatisfiedPostCancelMerge(t)) {
-          applyTaskPatch(data, t, { status: 'done' }, { by, now });
+          applyTaskPatch(data, t, { status: 'done' }, { by, agent: opts.agent, now, source: 'github' });
         }
         t.updated = Math.max(t.updated || 0, now);
         touchedIds.add(t.id);
@@ -2296,7 +2526,7 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
       if (!nextLink) continue;
       if (deepEqual(prev, nextLink)) {
         if (hasSatisfiedPostCancelMerge(t)) {
-          applyTaskPatch(data, t, { status: 'done' }, { by, now });
+          applyTaskPatch(data, t, { status: 'done' }, { by, agent: opts.agent, now, source: 'github' });
           touchedIds.add(t.id);
           changed = true;
         }
@@ -2312,6 +2542,7 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
       else t.prs.push(nextLink);
 
       const prLabel = `${nextLink.repo}#${nextLink.number}`;
+      const prSnippet = nextLink.title ? `${prLabel}: ${nextLink.title}` : prLabel;
       if (!prev || prev.state !== nextLink.state || prev.draft !== nextLink.draft) {
         if (nextLink.state === 'merged') logActivity(data, 'merged PR on', t, prLabel, { by, now });
         else if (nextLink.state === 'closed' && prev) logActivity(data, 'closed PR on', t, prLabel, { by, now });
@@ -2328,17 +2559,19 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
         t.status !== 'done' && (t.status !== 'canceled' || Boolean(incoming.mergedAt && (!t.canceledAt || incoming.mergedAt > t.canceledAt)));
 
       if (becameOpenDraft) {
-        if (t.status === 'backlog' || t.status === 'todo') applyTaskPatch(data, t, { status: 'progress' }, { by, now });
+        if (t.status === 'backlog' || t.status === 'todo') {
+          applyTaskPatch(data, t, { status: 'progress' }, { by, agent: opts.agent, now, source: 'github', snippet: prSnippet });
+        }
       } else if (becameOpenReady) {
         if (nextLink.closing) {
           const closedAt = t.status === 'done' ? t.completedAt : t.status === 'canceled' ? t.canceledAt : 0;
           const reopenCompleted =
             isClosedStatus(t.status) && (prev?.state === 'closed' || Boolean(nextLink.createdAt && closedAt && nextLink.createdAt > closedAt));
           if (['backlog', 'todo', 'progress'].includes(t.status) || reopenCompleted) {
-            applyTaskPatch(data, t, { status: 'review' }, { by, now });
+            applyTaskPatch(data, t, { status: 'review' }, { by, agent: opts.agent, now, source: 'github', snippet: prSnippet });
           }
         } else if (t.status === 'backlog' || t.status === 'todo') {
-          applyTaskPatch(data, t, { status: 'progress' }, { by, now });
+          applyTaskPatch(data, t, { status: 'progress' }, { by, agent: opts.agent, now, source: 'github', snippet: prSnippet });
         }
       } else if (becameMerged && nextLink.closing) {
         const hasOpenPr = t.prs.some(x => x.state === 'open');
@@ -2346,9 +2579,11 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
           const nowUnsatisfied = unsatisfiedMergedPartials(t.prs, preMerged);
           const waitingOnStack = isIncompleteStackMerge(t.prs, nextLink, preMerged) || nowUnsatisfied.some(p => isNewerPartialThan(p, nextLink));
           if (waitingOnStack) {
-            if (t.status === 'backlog' || t.status === 'todo') applyTaskPatch(data, t, { status: 'progress' }, { by, now });
+            if (t.status === 'backlog' || t.status === 'todo') {
+              applyTaskPatch(data, t, { status: 'progress' }, { by, agent: opts.agent, now, source: 'github', snippet: prSnippet });
+            }
           } else if (allowMergeComplete) {
-            applyTaskPatch(data, t, { status: 'done' }, { by, now });
+            applyTaskPatch(data, t, { status: 'done' }, { by, agent: opts.agent, now, source: 'github', snippet: prSnippet });
           }
         }
       } else if (gainedMergedAt && nextLink.closing && prevUnsatisfied.length > 0) {
@@ -2358,18 +2593,18 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
           const nowKeys = new Set(nowUnsatisfied.map(p => `${p.repo.toLowerCase()}#${p.number}`));
           const newlySatisfied = prevUnsatisfied.some(p => !nowKeys.has(`${p.repo.toLowerCase()}#${p.number}`));
           if (newlySatisfied && !nowUnsatisfied.some(p => isNewerPartialThan(p, nextLink)) && allowMergeComplete) {
-            applyTaskPatch(data, t, { status: 'done' }, { by, now });
+            applyTaskPatch(data, t, { status: 'done' }, { by, agent: opts.agent, now, source: 'github', snippet: prSnippet });
           }
         }
       } else if (becameClosedUnmerged) {
         const hasReadyOpen = t.prs.some(x => x.state === 'open' && !x.draft);
         const hasMergedClosing = t.prs.some(x => x.state === 'merged' && x.closing);
         if (t.status === 'review' && !hasReadyOpen && !hasMergedClosing) {
-          applyTaskPatch(data, t, { status: 'progress' }, { by, now });
+          applyTaskPatch(data, t, { status: 'progress' }, { by, agent: opts.agent, now, source: 'github', snippet: prSnippet });
         }
       }
       if (hasSatisfiedPostCancelMerge(t)) {
-        applyTaskPatch(data, t, { status: 'done' }, { by, now });
+        applyTaskPatch(data, t, { status: 'done' }, { by, agent: opts.agent, now, source: 'github', snippet: prSnippet });
       }
 
       t.updated = Math.max(t.updated || 0, now);
