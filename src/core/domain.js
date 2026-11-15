@@ -1880,6 +1880,8 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
         nextLink.state === 'open' && !nextLink.draft && (!prev || prev.state !== 'open' || prev.draft || (!prev.closing && nextLink.closing));
       const becameMerged = nextLink.state === 'merged' && (!prev || prev.state !== 'merged' || (!prev.closing && nextLink.closing));
       const becameClosedUnmerged = nextLink.state === 'closed' && prev?.state === 'open';
+      const allowMergeComplete =
+        t.status !== 'done' && (t.status !== 'canceled' || Boolean(incoming.mergedAt && (!t.canceledAt || incoming.mergedAt > t.canceledAt)));
 
       if (becameOpenDraft) {
         if (t.status === 'backlog' || t.status === 'todo') applyTaskPatch(data, t, { status: 'progress' }, { by, now });
@@ -1901,7 +1903,7 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
           const waitingOnStack = isIncompleteStackMerge(t.prs, nextLink, preMerged) || nowUnsatisfied.some(p => isNewerPartialThan(p, nextLink));
           if (waitingOnStack) {
             if (t.status === 'backlog' || t.status === 'todo') applyTaskPatch(data, t, { status: 'progress' }, { by, now });
-          } else if (t.status !== 'done' && (t.status !== 'canceled' || !t.canceledAt || !nextLink.mergedAt || nextLink.mergedAt > t.canceledAt)) {
+          } else if (allowMergeComplete) {
             applyTaskPatch(data, t, { status: 'done' }, { by, now });
           }
         }
@@ -1911,12 +1913,7 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
           const nowUnsatisfied = unsatisfiedMergedPartials(t.prs, preMerged);
           const nowKeys = new Set(nowUnsatisfied.map(p => `${p.repo.toLowerCase()}#${p.number}`));
           const newlySatisfied = prevUnsatisfied.some(p => !nowKeys.has(`${p.repo.toLowerCase()}#${p.number}`));
-          if (
-            newlySatisfied &&
-            !nowUnsatisfied.some(p => isNewerPartialThan(p, nextLink)) &&
-            t.status !== 'done' &&
-            (t.status !== 'canceled' || !t.canceledAt || !nextLink.mergedAt || nextLink.mergedAt > t.canceledAt)
-          ) {
+          if (newlySatisfied && !nowUnsatisfied.some(p => isNewerPartialThan(p, nextLink)) && allowMergeComplete) {
             applyTaskPatch(data, t, { status: 'done' }, { by, now });
           }
         }

@@ -49,7 +49,7 @@ export function taskRow(t, cols, tpl, opt = {}) {
     <div class="handle" draggable="${opt.drag !== false}" data-drag-row="${t.id}" aria-hidden="true">${opt.drag !== false ? ic('grip-vertical', 14) : ''}</div>
     <div class="c-check">${
       opt.complete
-        ? `<input type="checkbox" class="check round" ${t.status === 'done' ? 'checked' : ''} data-a="toggleDone" data-id="${t.id}" aria-label="Mark ${esc(t.title)} complete">`
+        ? `<input type="checkbox" class="check round" ${isClosedStatus(t.status) ? 'checked' : ''} data-a="toggleDone" data-id="${t.id}" aria-label="${isClosedStatus(t.status) ? 'Reopen' : 'Mark complete'}: ${esc(t.title)}">`
         : `<input type="checkbox" class="check" ${sel ? 'checked' : ''} data-a="selRow" data-id="${t.id}" aria-label="Select ${esc(t.title)}">`
     }</div>
     <div class="ttl" ${editing ? '' : `data-a="openTask" data-id="${t.id}"`} data-dbl="editTitle">
@@ -136,7 +136,7 @@ export function actHtml(a, opt = {}) {
 export function miniRow(t, opt = {}) {
   const p = proj(t.project);
   return `<div class="mini ${isClosedStatus(t.status) ? 'done' : ''}${fxc('done', t.id)}${fxc('added', t.id)}" data-a="openTask" data-id="${t.id}" data-ctx="task" role="button" tabindex="0">
-    <input type="checkbox" class="check round" ${t.status === 'done' ? 'checked' : ''} data-a="toggleDone" data-id="${t.id}" aria-label="Complete ${esc(t.title)}">
+    <input type="checkbox" class="check round" ${isClosedStatus(t.status) ? 'checked' : ''} data-a="toggleDone" data-id="${t.id}" aria-label="${isClosedStatus(t.status) ? 'Reopen' : 'Complete'} ${esc(t.title)}">
     <span data-tip="${ST[t.status].name}">${stIcon(t.status)}</span>
     <span class="tt">${esc(t.title)}</span>
     ${opt.noProj ? '' : `<span class="pj hide-m"><span class="pdot" style="--c:${pColor(p)}"></span><span class="trunc">${esc(p.name)}</span></span>`}

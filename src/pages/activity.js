@@ -13,7 +13,7 @@ export function pageActivity() {
       f === 'comments'
         ? a.verb.includes('comment')
         : f === 'status'
-          ? /moved|completed|reopened/.test(a.verb)
+          ? /moved|completed|canceled|reopened/.test(a.verb)
           : f === 'projects'
             ? a.verb.includes('project')
             : true,

@@ -374,6 +374,7 @@ export async function runCli(argv, io = {}) {
       state: { type: 'string' },
       head: { type: 'string' },
       'pr-url': { type: 'string' },
+      'merged-at': { type: 'string' },
       merged: { type: 'boolean' },
       draft: { type: 'boolean' },
       comment: { type: 'string' },
@@ -834,6 +835,7 @@ export async function runCli(argv, io = {}) {
       if (opts.title !== undefined) item.title = opts.title;
       if (opts.head !== undefined) item.headRef = opts.head;
       if (opts['pr-url'] !== undefined) item.url = opts['pr-url'];
+      if (opts['merged-at'] !== undefined) item.mergedAt = opts['merged-at'];
       if (opts.body !== undefined || opts['body-file'] !== undefined) item.body = resolveTextArg(opts.body, opts['body-file'], readStdin);
       pullRequests = [item];
     } else {

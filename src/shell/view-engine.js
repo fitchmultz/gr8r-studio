@@ -1,7 +1,7 @@
 /* ---------- filter engine ---------- */
 import { DAY, TODAY, diffD, esc, parse } from '../core/utils.js';
 import { ic } from '../core/icons.js';
-import { LABELS, PR, PRIOS, STATUSES, isClosedStatus } from '../core/constants.js';
+import { LABELS, PR, PRIOS, STATUSES } from '../core/constants.js';
 import { D, S, canSee, isOver, mem, pColor, proj, visibleProjects } from '../core/store.js';
 import { av, prIcon, stIcon } from '../ui/helpers.js';
 
@@ -78,7 +78,7 @@ export function matchF(t, f) {
       if (v === 'nodate') return !t.due;
       if (!t.due) return false;
       const n = diffD(parse(t.due), TODAY);
-      return v === 'overdue' ? isOver(t) : !isClosedStatus(t.status) && (v === 'today' ? n === 0 : v === 'week' ? n >= 0 && n <= 7 : n > 7);
+      return v === 'overdue' ? isOver(t) : v === 'today' ? n === 0 : v === 'week' ? n >= 0 && n <= 7 : n > 7;
     });
   } else if (f.f === 'created' || f.f === 'updated') {
     const ts = f.f === 'created' ? t.created : t.updated;

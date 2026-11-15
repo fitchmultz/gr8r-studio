@@ -21,6 +21,7 @@ import {
   removeMember,
   removeSubtask,
   searchWorkspace,
+  syncGitHubPullRequests,
   updateProject,
   updateSubtask,
 } from '../../src/core/domain.js';
@@ -1084,4 +1085,44 @@ test('canceled status excludes tasks from open/overdue counts and progress denom
   applyTaskPatch(state.data, tTodo, { status: 'todo' }, { now: FIXED_NOW + 200 });
   assert.equal(tTodo.canceledAt, null);
   assert.equal(projectProgress(state.data, p.id), 50);
+
+  // Timestamp-less or updatedAt-only merge syncs do not overwrite an explicit cancellation;
+  // only an explicit mergedAt after canceledAt completes the task.
+  syncGitHubPullRequests(state.data, { repo: 'acme/app', number: 12, title: `feat: attempt (${tTodo.key})`, state: 'open' }, { now: FIXED_NOW + 1000 });
+  applyTaskPatch(state.data, tTodo, { status: 'canceled' }, { now: FIXED_NOW + 2000 });
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/app', number: 12, title: `feat: attempt (${tTodo.key})`, state: 'merged', merged: true },
+    { now: FIXED_NOW + 3000 },
+  );
+  assert.equal(tTodo.status, 'canceled');
+  assert.equal(tTodo.canceledAt, FIXED_NOW + 2000);
+
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/app',
+      number: 13,
+      title: `feat: superseded (${tTodo.key})`,
+      state: 'merged',
+      merged: true,
+      updatedAt: new Date(FIXED_NOW + 4000).toISOString(),
+    },
+    { now: FIXED_NOW + 4000 },
+  );
+  assert.equal(tTodo.status, 'canceled');
+
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/app',
+      number: 14,
+      title: `feat: replacement (${tTodo.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: new Date(FIXED_NOW + 5000).toISOString(),
+    },
+    { now: FIXED_NOW + 5000 },
+  );
+  assert.equal(tTodo.status, 'done');
 });
