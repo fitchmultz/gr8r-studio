@@ -913,7 +913,7 @@ export function createTask(data, fields = {}, opts = {}) {
   if (!opts.skipNotifs) {
     if (opts.needsOwner) {
       pushNotif(data, { type: 'blocker', by, agent, task: t, text: 'needs your input on', snippet: stripHtml(t.desc) || t.title }, { now });
-    } else if (isExternalCreate) {
+    } else if (isExternalCreate && !isClosedStatus(status)) {
       const descMd = htmlToMarkdown(t.desc || '');
       if (descMd && mentionsWorkspaceOwner(data, descMd)) {
         if (data.notifPrefs?.push_mention !== false) {

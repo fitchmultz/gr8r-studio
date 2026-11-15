@@ -1481,6 +1481,7 @@ test('live inbox fires on --needs-owner, @mentions, agent comments, and PR/agent
   createTask(state.data, { project: p.id, title: 'Ready slice', assignee: null }, { now: FIXED_NOW + 37 });
   const claimed = claimNextReadyTask(state.data, { project: p.id, assignee: 'none' }, { agent: 'pi:worker-2', now: FIXED_NOW + 38 });
   assert.equal(claimed.claimedBy, 'pi:worker-2');
+  createTask(state.data, { project: p.id, title: 'Already done', status: 'done', assignee: state.data.me }, { agent: 'pi:worker-2', now: FIXED_NOW + 39 });
   assert.equal(queryInbox(state.data, { type: 'assign' }).length, 0);
 
   // Explicit --needs-owner creates a blocker notification.
