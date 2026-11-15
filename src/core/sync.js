@@ -234,6 +234,7 @@ async function push() {
             clearSyncedBase();
             continue;
           }
+          if (j.error && j.error !== 'uninitialized') toast(j.error);
           adopt(j.rev, j.state);
           return;
         }

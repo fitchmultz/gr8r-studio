@@ -253,18 +253,42 @@ export function startServer({
       }
     }
   };
+  const scheduleSweep = delayMs => {
+    const tm = setTimeout(
+      () => {
+        sweepTimers.delete(tm);
+        sweepUnreferencedBlobs();
+      },
+      Math.max(1, delayMs) + 25,
+    );
+    tm.unref?.();
+    sweepTimers.add(tm);
+  };
   const addBlobLease = blobId => {
     const now = Date.now();
     const list = (pendingBlobUploads.get(blobId) || []).filter(exp => exp > now);
     list.push(now + blobLeaseMs);
     pendingBlobUploads.set(blobId, list);
-    const tm = setTimeout(() => {
-      sweepTimers.delete(tm);
-      sweepUnreferencedBlobs();
-    }, blobLeaseMs + 25);
-    tm.unref?.();
-    sweepTimers.add(tm);
+    scheduleSweep(blobLeaseMs);
   };
+  /* Recover unexpired upload leases from disk mtimes so restarts do not drop in-flight uploads. */
+  if (fs.existsSync(BLOBS_DIR)) {
+    const initNow = Date.now();
+    const initRefs = blobRefCounts(store.state?.data);
+    for (const entry of fs.readdirSync(BLOBS_DIR)) {
+      if (!/^[0-9a-f]{64}$/.test(entry) || initRefs.has(entry)) continue;
+      try {
+        const st = fs.statSync(path.join(BLOBS_DIR, entry));
+        const exp = st.mtimeMs + blobLeaseMs;
+        if (exp > initNow) {
+          pendingBlobUploads.set(entry, [exp]);
+          scheduleSweep(exp - initNow);
+        }
+      } catch {
+        /* ignore unreadable or disappearing entry */
+      }
+    }
+  }
   sweepUnreferencedBlobs();
 
   const broadcastRev = rev => {
@@ -495,6 +519,13 @@ export function startServer({
         const tmp = `${dest}.${process.pid}.${Date.now()}.tmp`;
         fs.writeFileSync(tmp, buf);
         fs.renameSync(tmp, dest);
+      } else {
+        try {
+          const nowDate = new Date();
+          fs.utimesSync(dest, nowDate, nowDate);
+        } catch {
+          /* best-effort lease mtime refresh */
+        }
       }
       if (!fs.existsSync(dest + '.json')) {
         const metaTmp = `${dest}.json.${process.pid}.${Date.now()}.tmp`;

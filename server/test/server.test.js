@@ -812,4 +812,60 @@ test('/api/blobs enforces auth, cookie-backed <img> reads, CSP sandbox, and atta
   assert.equal((await fetch(shortLease.base + `/api/blobs/${orphanUp.blobId}`, { headers: auth })).status, 200);
   await new Promise(r => setTimeout(r, 90));
   assert.equal((await fetch(shortLease.base + `/api/blobs/${orphanUp.blobId}`, { headers: auth })).status, 404);
+
+  // Restarting the server before an in-flight upload is attached preserves its lease across restart, while missing-blob workspace patches return 409.
+  const restartDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gr8r-restart-'));
+  t.after(() => fs.rmSync(restartDir, { recursive: true, force: true }));
+  const dataFile = path.join(restartDir, 'state.json');
+  const distDir = path.join(restartDir, 'dist');
+  fs.mkdirSync(distDir);
+  const srv1 = await startServer({ port: 0, token: 'secret', dataFile, distDir, trustBootstrap: 'none', blobLeaseMs: 5000 });
+  const base1 = `http://127.0.0.1:${srv1.port}`;
+  const pRes = await (
+    await fetch(base1 + '/api/projects', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Restart Safe', key: 'RST' }),
+    })
+  ).json();
+  const preRestartUp = await (
+    await fetch(base1 + '/api/blobs', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'image/png', 'x-file-name': 'survive.png' },
+      body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xee, 0xff]),
+    })
+  ).json();
+  await srv1.close();
+
+  const srv2 = await startServer({ port: 0, token: 'secret', dataFile, distDir, trustBootstrap: 'none', blobLeaseMs: 5000 });
+  t.after(() => srv2.close());
+  const base2 = `http://127.0.0.1:${srv2.port}`;
+  const patchOk = await fetch(base2 + '/api/workspace', {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      baseRev: pRes.rev,
+      patch: {
+        files: {
+          created: [{ id: 'f_survive', name: 'survive.png', project: pRes.project.id, blobId: preRestartUp.blobId, mime: 'image/png', sizeBytes: 6 }],
+        },
+      },
+    }),
+  });
+  assert.equal(patchOk.status, 200);
+  assert.equal((await fetch(base2 + `/api/blobs/${preRestartUp.blobId}`, { headers: auth })).status, 200);
+
+  const patchMissingBlob = await fetch(base2 + '/api/workspace', {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      baseRev: pRes.rev + 1,
+      patch: {
+        files: {
+          created: [{ id: 'f_missing', name: 'missing.png', project: pRes.project.id, blobId: 'a'.repeat(64), mime: 'image/png', sizeBytes: 6 }],
+        },
+      },
+    }),
+  });
+  assert.equal(patchMissingBlob.status, 409);
 });

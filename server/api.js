@@ -121,6 +121,23 @@ function parseJsonBody(raw) {
   }
 }
 
+function referencedBlobIds(data) {
+  const out = new Set();
+  if (!data || typeof data !== 'object') return out;
+  const files = Array.isArray(data.files) ? data.files : [];
+  for (const f of files) {
+    if (f && typeof f.blobId === 'string' && /^[0-9a-f]{64}$/.test(f.blobId)) out.add(f.blobId);
+  }
+  const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+  for (const t of tasks) {
+    const atts = Array.isArray(t?.attachments) ? t.attachments : [];
+    for (const a of atts) {
+      if (a && typeof a.blobId === 'string' && /^[0-9a-f]{64}$/.test(a.blobId)) out.add(a.blobId);
+    }
+  }
+  return out;
+}
+
 export async function handleDomainApi({ req, res, url, getStore, commitState, readBody, send, hasBlob }) {
   let segments;
   try {
@@ -235,6 +252,18 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
       }
       const draft = structuredClone(cur.state);
       const { rekeyed } = applyWorkspacePatch(draft, body.patch);
+      if (hasBlob) {
+        const prevRefs = referencedBlobIds(cur.state?.data);
+        for (const bid of referencedBlobIds(draft.data)) {
+          if (!prevRefs.has(bid) && !hasBlob(bid)) {
+            return send(res, 409, {
+              error: 'Blob not found on server; upload via POST /api/blobs first',
+              rev: cur.rev,
+              state: cur.state,
+            });
+          }
+        }
+      }
       const merged = baseRev !== cur.rev || rekeyed;
       const committed = commitState(draft);
       return send(res, 200, { rev: committed.rev, merged, ...(merged ? { state: committed.state } : {}) });
