@@ -249,6 +249,13 @@ function formatTaskDetail(payload) {
   ];
   if (t.labels?.length) lines.push(`Labels: ${t.labels.join(', ')}`);
   if (t.depKeys?.length) lines.push(`Blocked by: ${t.depKeys.join(', ')}`);
+  if (t.prs?.length) {
+    lines.push('Pull requests:');
+    for (const pr of t.prs) {
+      const stateTag = pr.state === 'open' && pr.draft ? 'draft' : pr.state;
+      lines.push(`  [${stateTag}] ${pr.repo}#${pr.number}  ${pr.title || ''}  ${pr.url}`.replace(/\s{2,}/g, '  '));
+    }
+  }
   if (t.descMarkdown) lines.push('', '--- Description ---', t.descMarkdown);
   if (t.subtasks?.length) {
     lines.push('', `--- Subtasks (${t.subtaskDoneCount}/${t.subtaskCount}) ---`);
@@ -302,6 +309,7 @@ Commands:
   comment add <task> [text] [--body -]      Post a comment on a task
   comment delete <task> <comment-id>        Delete a comment
 
+  pr-sync [--file -] | [--repo R --pr N ..] Link GitHub PRs to KEY-123 tasks & sync status
   search <query>                            Search tasks, projects, people, files, and comments
   activity [-p PROJECT] [-t TASK] [--limit] Show recent workspace activity
 `;
@@ -346,6 +354,14 @@ export async function runCli(argv, io = {}) {
       note: { type: 'string' },
       body: { type: 'string' },
       'body-file': { type: 'string' },
+      file: { type: 'string', short: 'f' },
+      repo: { type: 'string' },
+      pr: { type: 'string' },
+      state: { type: 'string' },
+      head: { type: 'string' },
+      'pr-url': { type: 'string' },
+      merged: { type: 'boolean' },
+      draft: { type: 'boolean' },
       comment: { type: 'string' },
       title: { type: 'string' },
       name: { type: 'string' },
@@ -785,6 +801,41 @@ export async function runCli(argv, io = {}) {
       return 0;
     }
     throw new Error(`Unknown comment subcommand: ${sub}`);
+  }
+
+  if (cmd === 'pr-sync') {
+    let pullRequests;
+    if (opts.repo || opts.pr) {
+      if (!opts.repo || !opts.pr) throw new Error('Usage: gr8r pr-sync --repo owner/name --pr <number> [--title TEXT] [--state open|merged|closed]');
+      const item = {
+        repo: opts.repo,
+        number: Number(opts.pr),
+        state: opts.merged ? 'merged' : opts.state || 'open',
+        merged: !!opts.merged || opts.state === 'merged',
+        draft: !!opts.draft,
+      };
+      if (opts.title !== undefined) item.title = opts.title;
+      if (opts.head !== undefined) item.headRef = opts.head;
+      if (opts['pr-url'] !== undefined) item.url = opts['pr-url'];
+      if (opts.body !== undefined || opts['body-file'] !== undefined) item.body = resolveTextArg(opts.body, opts['body-file'], readStdin);
+      pullRequests = [item];
+    } else {
+      const src = opts.file ?? pos[1] ?? '-';
+      const raw = src === '-' ? readStdin() : fs.readFileSync(src, 'utf8');
+      if (!raw || !raw.trim()) throw new Error('Usage: gr8r pr-sync <json-file | ->  (or --repo owner/name --pr <n>)');
+      const parsed = JSON.parse(raw);
+      pullRequests = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.pullRequests) ? parsed.pullRequests : [parsed];
+    }
+    const res = await client.request('POST', '/github/pull-requests', { pullRequests });
+    if (opts.json) return outJson(res);
+    if (!res.changed || !res.updated?.length) {
+      stdout(`No task changes [rev ${res.rev}]`);
+      return 0;
+    }
+    for (const t of res.updated) {
+      stdout(`Synced ${t.key} -> ${t.status}: ${t.title} [rev ${res.rev}]`);
+    }
+    return 0;
   }
 
   if (cmd === 'search') {

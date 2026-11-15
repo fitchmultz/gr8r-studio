@@ -454,3 +454,587 @@ test('diffWorkspacePatch and applyWorkspacePatch merge concurrent field, subtask
   assert.equal(renameOut.rekeyed, false);
   assert.equal(svServer.data.savedViews.find(v => v.id === 'sv_1')?.name, 'Bug Triage');
 });
+
+test('syncGitHubPullRequests handles draft/ready/merge, stacked (1/n) PRs, Refs vs Closes, prose safety, and idempotency', async () => {
+  const { applyTaskPatch, createDefaultState, createProject, createTask, duplicateTask, searchWorkspace, syncGitHubPullRequests } =
+    await import('../../src/core/domain.js');
+  const state = createDefaultState(FIXED_NOW);
+  const pid = createProject(state.data, { name: 'Pi Durable', key: 'PID', status: 'active' }, { now: FIXED_NOW });
+  const t1 = createTask(state.data, { project: pid.id, title: 'Slice 1', status: 'backlog' }, { now: FIXED_NOW });
+  const t2 = createTask(state.data, { project: pid.id, title: 'Slice 2 (untouched)', status: 'todo' }, { now: FIXED_NOW });
+  const t3 = createTask(state.data, { project: pid.id, title: 'Slice 3 (referenced)', status: 'backlog' }, { now: FIXED_NOW });
+
+  // 1. Draft PR on branch feat/pid-201-part1 moves backlog -> progress; prose/code mentions of PID-202 are ignored; Refs PID-203 links non-closing.
+  const r1 = syncGitHubPullRequests(
+    state.data,
+    [
+      {
+        repo: 'fitchmultz/pi-durable',
+        number: 101,
+        title: 'Ledger schema (1/2)',
+        headRef: 'feat/pid-201-ledger',
+        body: 'Avoids colliding with PID-202.\n```\nCloses PID-202\n```\nRefs PID-203',
+        state: 'OPEN',
+        draft: true,
+        updatedAt: '2026-11-15T01:00:00Z',
+      },
+    ],
+    { now: FIXED_NOW + 100 },
+  );
+  assert.equal(r1.changed, true);
+  assert.equal(t1.status, 'progress');
+  assert.equal(t2.status, 'todo');
+  assert.equal(t2.prs.length, 0);
+  assert.equal(t3.status, 'progress');
+  assert.equal(t3.prs[0].closing, false);
+
+  // Repeated identical sync is a strict no-op.
+  const noop = syncGitHubPullRequests(
+    state.data,
+    [
+      {
+        repo: 'fitchmultz/pi-durable',
+        number: 101,
+        title: 'Ledger schema (1/2)',
+        headRef: 'feat/pid-201-ledger',
+        body: 'Avoids colliding with PID-202.\n```\nCloses PID-202\n```\nRefs PID-203',
+        state: 'open',
+        draft: true,
+        updatedAt: '2026-11-15T01:00:00Z',
+      },
+    ],
+    { now: FIXED_NOW + 200 },
+  );
+  assert.equal(noop.changed, false);
+
+  // 2. Marking PR #101 ready moves PID-201 to review; stale older event is ignored.
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 101,
+      title: 'Ledger schema (1/2)',
+      headRef: 'feat/pid-201-ledger',
+      body: 'Refs PID-203',
+      state: 'open',
+      draft: false,
+      updatedAt: '2026-11-15T01:05:00Z',
+    },
+    { now: FIXED_NOW + 300 },
+  );
+  assert.equal(t1.status, 'review');
+
+  const stale = syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 101,
+      title: 'Ledger schema (1/2)',
+      headRef: 'feat/pid-201-ledger',
+      body: 'Refs PID-203',
+      state: 'open',
+      draft: true,
+      updatedAt: '2026-11-15T01:01:00Z',
+    },
+    { now: FIXED_NOW + 350 },
+  );
+  assert.equal(stale.changed, false);
+  assert.equal(t1.prs[0].draft, false);
+
+  // 3. Merging part (1/2) alone keeps PID-201 in review (incomplete stack) and keeps Refs-only PID-203 open.
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 101,
+      title: 'Ledger schema (1/2)',
+      headRef: 'feat/pid-201-ledger',
+      body: 'Refs PID-203',
+      state: 'MERGED',
+      merged: true,
+      updatedAt: '2026-11-15T01:10:00Z',
+    },
+    { now: FIXED_NOW + 400 },
+  );
+  assert.equal(t1.status, 'review');
+  assert.equal(t3.status, 'progress');
+
+  // 4. Merging part (2/2) completes the stack and marks PID-201 done; duplicating PID-201 does not copy PR links.
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 102,
+      title: 'Ledger UI (2/2) (PID-201)',
+      headRef: 'feat/ledger-ui',
+      body: '',
+      state: 'merged',
+      merged: true,
+      updatedAt: '2026-11-15T01:15:00Z',
+    },
+    { now: FIXED_NOW + 500 },
+  );
+  assert.equal(t1.status, 'done');
+  assert.equal(t1.prs.length, 2);
+  assert.equal(searchWorkspace(state.data, 'pi-durable#102').tasks[0]?.id, t1.id);
+
+  const dup = duplicateTask(state.data, t1.id, { now: FIXED_NOW + 600 });
+  assert.deepEqual(dup.prs, []);
+
+  // 5. Prior non-stacked merged PR does not prematurely complete a later follow-up (1/2) stack;
+  //    and completing a recurring task via PR merge spawns the next occurrence with prs: [].
+  const tRecur = createTask(state.data, { project: pid.id, title: 'Weekly audit', status: 'todo', recur: 'Weekly', due: '2026-11-18' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 201,
+      title: `Initial audit (${tRecur.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T01:20:00Z',
+    },
+    { now: FIXED_NOW + 700 },
+  );
+  assert.equal(tRecur.status, 'done');
+  const nextOcc = state.data.tasks.find(x => x.id !== tRecur.id && x.title === 'Weekly audit');
+  assert.ok(nextOcc);
+  assert.deepEqual(nextOcc.prs, []);
+
+  // Follow-up stacked PR (1/2) created after completion reopens tRecur -> review, and merging (1/2) alone keeps it in review.
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 202,
+      title: `Audit follow-up (1/2) (${tRecur.key})`,
+      state: 'open',
+      draft: false,
+      createdAt: '2026-11-15T02:00:00Z',
+      updatedAt: '2026-11-15T02:00:00Z',
+    },
+    { now: FIXED_NOW + 800 },
+  );
+  assert.equal(tRecur.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 202,
+      title: `Audit follow-up (1/2) (${tRecur.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T02:00:00Z',
+      updatedAt: '2026-11-15T02:10:00Z',
+    },
+    { now: FIXED_NOW + 900 },
+  );
+  assert.equal(tRecur.status, 'review');
+
+  // 6. Prior completed (1/2)+(2/2) stack whose (2/2) later gets a comment/label updatedAt bump (and CLI flag-shape
+  //    new (1/2) without createdAt) still keeps a new follow-up (1/2) incomplete until its own (2/2) merges.
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 203,
+      title: `Audit follow-up (2/2) (${tRecur.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T02:05:00Z',
+      updatedAt: '2026-11-15T02:20:00Z',
+    },
+    { now: FIXED_NOW + 1000 },
+  );
+  assert.equal(tRecur.status, 'done');
+
+  // Open new stack C (1/2), then bump old #203 (2/2) updatedAt via post-merge comment/label, then merge C (1/2).
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 210,
+      title: `Second stack (1/2) (${tRecur.key})`,
+      state: 'open',
+      draft: false,
+      createdAt: '2026-11-15T03:00:00Z',
+      updatedAt: '2026-11-15T03:00:00Z',
+    },
+    { now: FIXED_NOW + 1100 },
+  );
+  assert.equal(tRecur.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 203,
+      title: `Audit follow-up (2/2) (${tRecur.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T02:05:00Z',
+      updatedAt: '2026-11-15T03:05:00Z',
+    },
+    { now: FIXED_NOW + 1200 },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 210,
+      title: `Second stack (1/2) (${tRecur.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T03:00:00Z',
+      updatedAt: '2026-11-15T03:10:00Z',
+    },
+    { now: FIXED_NOW + 1300 },
+  );
+  assert.equal(tRecur.status, 'review');
+
+  // Also verify timestamp-less CLI shape on a reopened task with a pre-existing merged (2/2).
+  applyTaskPatch(state.data, t1.id, { status: 'review' }, { now: FIXED_NOW + 1400 });
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 150,
+      title: `CLI flag stack (1/2) (${t1.key})`,
+      state: 'merged',
+      merged: true,
+    },
+    { now: FIXED_NOW + 1400 },
+  );
+  assert.equal(t1.status, 'review');
+
+  // Backfilling a prior cycle's (2/2) without timestamps after a new follow-up (1/2) is already open
+  // does not synthesize a fake mergedAt that prematurely completes the follow-up (1/2) on merge.
+  const tBackfill = createTask(state.data, { project: pid.id, title: 'Backfill order guard', status: 'todo' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 303,
+      title: `Follow-up (1/2) (${tBackfill.key})`,
+      state: 'open',
+      draft: false,
+      createdAt: '2026-11-15T03:00:00Z',
+      updatedAt: '2026-11-15T03:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T12:00:00Z') },
+  );
+  assert.equal(tBackfill.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 302,
+      title: `Prior cycle (2/2) (${tBackfill.key})`,
+      state: 'merged',
+      merged: true,
+    },
+    { now: Date.parse('2026-11-15T12:00:20Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 303,
+      title: `Follow-up (1/2) (${tBackfill.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T03:00:00Z',
+      updatedAt: '2026-11-15T03:10:00Z',
+    },
+    { now: Date.parse('2026-11-15T12:00:40Z') },
+  );
+  assert.equal(tBackfill.status, 'review');
+
+  // 7. Stale webhook redelivery after a newer body edit unlinked KEY-123 does not re-link the PR or flip status.
+  const tUnlink = createTask(state.data, { project: pid.id, title: 'Unlink redelivery guard', status: 'todo' }, { now: FIXED_NOW });
+  const openWithKey = {
+    repo: 'fitchmultz/pi-durable',
+    number: 401,
+    title: 'Refactor router',
+    body: `Closes ${tUnlink.key}`,
+    state: 'open',
+    draft: false,
+    updatedAt: '2026-11-15T01:00:00Z',
+  };
+  syncGitHubPullRequests(state.data, openWithKey, { now: FIXED_NOW + 2000 });
+  assert.equal(tUnlink.status, 'review');
+  assert.equal(tUnlink.prs.length, 1);
+
+  syncGitHubPullRequests(state.data, { ...openWithKey, body: 'Removed accidental task ref', updatedAt: '2026-11-15T01:05:00Z' }, { now: FIXED_NOW + 2100 });
+  assert.equal(tUnlink.prs.length, 0);
+  applyTaskPatch(state.data, tUnlink.id, { status: 'todo' }, { now: FIXED_NOW + 2200 });
+
+  const staleRedelivery = syncGitHubPullRequests(state.data, openWithKey, { now: FIXED_NOW + 2300 });
+  assert.equal(staleRedelivery.changed, false);
+  assert.equal(tUnlink.prs.length, 0);
+  assert.equal(tUnlink.status, 'todo');
+
+  // 8. Re-syncing a timestamp-less prior (2/2) with a late updatedAt does not turn it into a new stack's completion;
+  //    and syncing same-stack #4 (2/2) merged without timestamps before #3 (1/2) merges still completes the stack.
+  const tLate = createTask(state.data, { project: pid.id, title: 'Late updatedAt guard', status: 'todo' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'fitchmultz/pi-durable', number: 2, title: `Prior (2/2) (${tLate.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-14T10:00:00Z') },
+  );
+  assert.equal(tLate.status, 'done');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 3,
+      title: `Follow-up (1/2) (${tLate.key})`,
+      state: 'open',
+      draft: false,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T01:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T01:00:00Z') },
+  );
+  assert.equal(tLate.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 2,
+      title: `Prior (2/2) (${tLate.key})`,
+      state: 'merged',
+      merged: true,
+      updatedAt: '2026-11-15T02:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T02:00:00Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 3,
+      title: `Follow-up (1/2) (${tLate.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T02:30:00Z',
+    },
+    { now: Date.parse('2026-11-15T02:30:00Z') },
+  );
+  assert.equal(tLate.status, 'review');
+  // Backfilling the prior PR's historical mergedAt (< follow-up createdAt) after the follow-up (1/2) merged stays review.
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 2,
+      title: `Prior (2/2) (${tLate.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: '2026-11-14T10:00:00Z',
+      updatedAt: '2026-11-15T03:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T03:00:00Z') },
+  );
+  assert.equal(tLate.status, 'review');
+
+  // Out-of-order same-cycle #6 (2/2) synced merged without timestamps while #5 (1/2) is open completes when #5 merges.
+  const tOutOrder = createTask(state.data, { project: pid.id, title: 'Out-of-order (2/2) first', status: 'todo' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 5,
+      title: `Stack part A (1/2) (${tOutOrder.key})`,
+      state: 'open',
+      draft: false,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T01:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T01:00:00Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'fitchmultz/pi-durable', number: 6, title: `Stack part B (2/2) (${tOutOrder.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-15T02:00:00Z') },
+  );
+  assert.equal(tOutOrder.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 5,
+      title: `Stack part A (1/2) (${tOutOrder.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T03:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T03:00:00Z') },
+  );
+  assert.equal(tOutOrder.status, 'done');
+
+  // Current-cycle cross-repo (2/2) first synced without timestamps and later re-synced with real mergedAt >= (1/2) createdAt completes the stack.
+  const tCross = createTask(state.data, { project: pid.id, title: 'Cross-repo mergedAt backfill', status: 'todo' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/front',
+      number: 10,
+      title: `Feature UI (1/2) (${tCross.key})`,
+      state: 'open',
+      draft: false,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T01:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T01:00:00Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/back', number: 20, title: `Feature API (2/2) (${tCross.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-15T02:00:00Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/front',
+      number: 10,
+      title: `Feature UI (1/2) (${tCross.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T03:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T03:00:00Z') },
+  );
+  assert.equal(tCross.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/back',
+      number: 20,
+      title: `Feature API (2/2) (${tCross.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: '2026-11-15T02:30:00Z',
+      updatedAt: '2026-11-15T04:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T04:00:00Z') },
+  );
+  assert.equal(tCross.status, 'done');
+
+  // Cross-repo stack whose (1/2) was synced merged without timestamps at 03:00 completes when (2/2) syncs at 03:05 with mergedAt 02:30.
+  const tCrossCli = createTask(state.data, { project: pid.id, title: 'Cross-repo timestamp-less partial', status: 'todo' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/front', number: 30, title: `Feature UI (1/2) (${tCrossCli.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-15T03:00:00Z') },
+  );
+  assert.equal(tCrossCli.status, 'progress');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/back',
+      number: 40,
+      title: `Feature API (2/2) (${tCrossCli.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: '2026-11-15T02:30:00Z',
+      updatedAt: '2026-11-15T02:31:00Z',
+    },
+    { now: Date.parse('2026-11-15T03:05:00Z') },
+  );
+  assert.equal(tCrossCli.status, 'done');
+
+  // Cross-repo stack whose (1/2) opens without timestamps, (2/2) merges while (1/2) is open, then (1/2) merges without timestamps reaches done.
+  const tCrossOpenCli = createTask(state.data, { project: pid.id, title: 'Cross-repo open CLI partial', status: 'todo' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/front', number: 50, title: `Feature UI (1/2) (${tCrossOpenCli.key})`, state: 'open', draft: false },
+    { now: Date.parse('2026-11-15T03:10:00Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/back', number: 60, title: `Feature API (2/2) (${tCrossOpenCli.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-15T03:15:00Z') },
+  );
+  assert.equal(tCrossOpenCli.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/front', number: 50, title: `Feature UI (1/2) (${tCrossOpenCli.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-15T03:20:00Z') },
+  );
+  assert.equal(tCrossOpenCli.status, 'done');
+
+  // Timestamp-less cross-repo backfill of a prior (2/2) after a timestamped follow-up (1/2) merged stays review until a real mergedAt >= createdAt arrives.
+  const tCrossBackfill = createTask(state.data, { project: pid.id, title: 'Cross-repo timestamp-less backfill guard', status: 'todo' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/front',
+      number: 70,
+      title: `Follow-up UI (1/2) (${tCrossBackfill.key})`,
+      state: 'open',
+      draft: false,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T01:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T01:00:00Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/front',
+      number: 70,
+      title: `Follow-up UI (1/2) (${tCrossBackfill.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T01:00:00Z',
+      mergedAt: '2026-11-15T02:00:00Z',
+      updatedAt: '2026-11-15T02:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T02:00:00Z') },
+  );
+  assert.equal(tCrossBackfill.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/back', number: 5, title: `Prior cycle (2/2) (${tCrossBackfill.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-15T03:00:00Z') },
+  );
+  assert.equal(tCrossBackfill.status, 'review');
+
+  // Timestamp-less cross-repo (1/2) opened and merged on 11-15 stays review when a prior-cycle (2/2) with 11-14 mergedAt is linked afterward.
+  const tCrossPrior = createTask(
+    state.data,
+    { project: pid.id, title: 'Cross-repo prior mergedAt guard', status: 'todo', recur: 'Weekly', due: '2026-11-18' },
+    { now: FIXED_NOW },
+  );
+  const tasksBefore = state.data.tasks.length;
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/front', number: 80, title: `Feature UI (1/2) (${tCrossPrior.key})`, state: 'open', draft: false },
+    { now: Date.parse('2026-11-15T03:00:00Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'acme/front', number: 80, title: `Feature UI (1/2) (${tCrossPrior.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-15T03:05:00Z') },
+  );
+  assert.equal(tCrossPrior.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/back',
+      number: 8,
+      title: `Prior cycle (2/2) (${tCrossPrior.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: '2026-11-14T10:00:00Z',
+      updatedAt: '2026-11-15T03:10:00Z',
+    },
+    { now: Date.parse('2026-11-15T03:15:00Z') },
+  );
+  assert.equal(tCrossPrior.status, 'review');
+  assert.equal(state.data.tasks.length, tasksBefore);
+});

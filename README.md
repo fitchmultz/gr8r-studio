@@ -133,6 +133,11 @@ cd server && GR8R_TOKEN=<secret> npm start    # app + sync API on 127.0.0.1:4180
   `/api/search`, `/api/activity`) apply single-entity mutations atomically on
   the server using the same domain invariants as the browser UI, advancing the
   workspace revision and notifying connected SSE clients.
+- GitHub PR auto-linking (`POST /api/github/pull-requests` with `GR8R_TOKEN` or
+  `POST /api/webhooks/github` signed with `GR8R_GITHUB_WEBHOOK_SECRET`) links
+  PRs referencing `KEY-123` in their title, branch, or `Closes`/`Refs` clauses
+  and transitions task status (`progress` on draft, `review` when ready, `done`
+  when merged).
 
 ### Docker
 
