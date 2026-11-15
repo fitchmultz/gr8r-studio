@@ -99,4 +99,7 @@ gr8r task update PID-202 --add-dep PID-201 --due 2026-11-18 --append-desc - <<'E
 
 Confirmed SSE updates land immediately.
 EOF
+
+# Link or sync a GitHub PR to KEY-123 tasks (also runs automatically every 60s on Alienarchy)
+gr8r pr-sync --repo fitchmultz/pi-durable --pr 447 --title "feat: autofix (PID-206)" --state open
 ```

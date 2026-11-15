@@ -30,6 +30,7 @@ import {
   resolveProject,
   resolveTask,
   searchWorkspace,
+  syncGitHubPullRequests,
   updateProject,
   updateSubtask,
 } from '../src/core/domain.js';
@@ -164,6 +165,30 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
       const merged = baseRev !== cur.rev || rekeyed;
       const committed = commitState(draft);
       return send(res, 200, { rev: committed.rev, merged, ...(merged ? { state: committed.state } : {}) });
+    }
+
+    // POST /api/github/pull-requests — idempotently link PRs to KEY-123 tasks & transition status
+    if (segments.length === 2 && segments[0] === 'github' && segments[1] === 'pull-requests' && method === 'POST') {
+      const body = parseJsonBody(await readBody(req));
+      const rawList = Array.isArray(body.pullRequests) ? body.pullRequests : body.pullRequest ? [body.pullRequest] : [body];
+      if (!rawList.length) {
+        const cur = getStore();
+        return send(res, 200, { rev: cur.rev, changed: false, updated: [] });
+      }
+      const cur = getStore();
+      if (!cur.state) {
+        return send(res, 409, { error: 'uninitialized', rev: cur.rev });
+      }
+      const draft = structuredClone(cur.state);
+      const { changed, updatedTasks } = syncGitHubPullRequests(draft.data, rawList, {
+        by: resolveActor(draft.data, body.by),
+      });
+      const rev = changed ? commitState(draft).rev : cur.rev;
+      return send(res, 200, {
+        rev,
+        changed,
+        updated: updatedTasks.map(t => formatTaskForApi(draft.data, t)),
+      });
     }
 
     // GET /api/search?q=...

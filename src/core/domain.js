@@ -472,6 +472,31 @@ function normalizeSubtaskInput(data, raw) {
   return out;
 }
 
+export function normalizeTaskPrLink(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const repo = String(raw.repo ?? '').trim();
+  const number = Number(raw.number);
+  if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo) || !Number.isInteger(number) || number <= 0) return null;
+  const rawUrl = String(raw.url ?? '').trim();
+  const url = /^https?:\/\/\S+$/i.test(rawUrl) ? rawUrl : `https://github.com/${repo}/pull/${number}`;
+  const state = raw.merged || raw.state === 'merged' ? 'merged' : raw.state === 'closed' ? 'closed' : 'open';
+  const out = {
+    repo,
+    number,
+    title: String(raw.title ?? '').trim(),
+    url,
+    headRef: String(raw.headRef ?? '').trim(),
+    state,
+    draft: state === 'open' ? !!raw.draft : false,
+    closing: raw.closing !== undefined ? !!raw.closing : true,
+    updatedAt: typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt) ? raw.updatedAt : 0,
+  };
+  if (typeof raw.createdAt === 'number' && Number.isFinite(raw.createdAt) && raw.createdAt > 0) {
+    out.createdAt = raw.createdAt;
+  }
+  return out;
+}
+
 export function createTask(data, fields = {}, opts = {}) {
   const now = opts.now ?? Date.now();
   const by = opts.by ?? data.me;
@@ -488,6 +513,7 @@ export function createTask(data, fields = {}, opts = {}) {
   const labels = fields.labels ? validateLabels(fields.labels) : [];
   const recur = validateRecur(fields.recur);
   const subtasks = Array.isArray(fields.subtasks) ? fields.subtasks.map(s => normalizeSubtaskInput(data, s)) : [];
+  const prs = Array.isArray(fields.prs) ? fields.prs.map(normalizeTaskPrLink).filter(Boolean) : [];
   const deps = fields.deps ? resolveDepIds(data, p.id, fields.id, fields.deps) : [];
   const desc = resolveDescInput(fields) ?? '';
   const maxO = Math.max(0, ...data.tasks.map(t => t.order || 0));
@@ -503,6 +529,7 @@ export function createTask(data, fields = {}, opts = {}) {
     start,
     labels,
     subtasks,
+    prs,
     attachments: Array.isArray(fields.attachments) ? fields.attachments : [],
     deps,
     desc,
@@ -541,6 +568,7 @@ export function duplicateTask(data, taskOrRef, opts = {}) {
         id: uid('s'),
         assignee: validMemberId(data, s.assignee),
       })),
+      prs: [],
       deps: opts.deps !== undefined ? opts.deps : activeProjectDeps(data, targetProject.id, src.deps, src.id),
       created: now,
       updated: now,
@@ -614,6 +642,10 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
   if (rawPatch.subtasks !== undefined) {
     if (!Array.isArray(rawPatch.subtasks)) throw new DomainError('subtasks must be an array');
     patch.subtasks = rawPatch.subtasks.map(s => normalizeSubtaskInput(data, s));
+  }
+  if (rawPatch.prs !== undefined) {
+    if (!Array.isArray(rawPatch.prs)) throw new DomainError('prs must be an array');
+    patch.prs = rawPatch.prs.map(normalizeTaskPrLink).filter(Boolean);
   }
   const resolvedDesc = resolveDescInput(rawPatch);
   if (resolvedDesc !== undefined) patch.desc = resolvedDesc;
@@ -931,7 +963,16 @@ export function queryTasks(data, filters = {}, opts = {}) {
   if (filters.q) {
     const q = String(filters.q).trim().toLowerCase();
     if (q) {
-      out = out.filter(t => t.key.toLowerCase().includes(q) || t.title.toLowerCase().includes(q) || stripHtml(t.desc).toLowerCase().includes(q));
+      out = out.filter(
+        t =>
+          t.key.toLowerCase().includes(q) ||
+          t.title.toLowerCase().includes(q) ||
+          stripHtml(t.desc).toLowerCase().includes(q) ||
+          (t.prs || []).some(
+            pr =>
+              `${pr.repo}#${pr.number}`.toLowerCase().includes(q) || (pr.title || '').toLowerCase().includes(q) || (pr.headRef || '').toLowerCase().includes(q),
+          ),
+      );
     }
   }
 
@@ -973,7 +1014,10 @@ export function searchWorkspace(data, query, opts = {}) {
   const has = s => (s || '').toLowerCase().includes(q);
   return {
     tasks: allTasksOf(data, actor)
-      .filter(t => has(t.title) || has(t.key) || has(stripHtml(t.desc)))
+      .filter(
+        t =>
+          has(t.title) || has(t.key) || has(stripHtml(t.desc)) || (t.prs || []).some(pr => has(`${pr.repo}#${pr.number}`) || has(pr.title) || has(pr.headRef)),
+      )
       .slice(0, 30),
     projects: visibleProjectsOf(data, actor).filter(p => has(p.name) || has(p.key) || has(p.desc)),
     people: (data.members || []).filter(m => has(m.name) || has(m.email) || has(m.title)),
@@ -1573,4 +1617,221 @@ export function applyWorkspacePatch(targetState, patch) {
   if (patch.collapsed !== undefined) targetState.collapsed = Boolean(patch.collapsed);
 
   return { state: targetState, rekeyed };
+}
+
+/* =====================================================================
+   GITHUB PULL REQUEST AUTO-LINKING
+   ===================================================================== */
+function parseTimestampMs(val) {
+  if (typeof val === 'number' && Number.isFinite(val) && val > 0) return val;
+  if (typeof val === 'string' && val.trim()) {
+    const ms = Date.parse(val);
+    if (Number.isFinite(ms) && ms > 0) return ms;
+  }
+  return 0;
+}
+
+function stripCodeAndComments(markdown) {
+  return String(markdown ?? '')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/(?:```|~~~)[\s\S]*?(?:```|~~~)/g, ' ')
+    .replace(/`[^`\n]*`/g, ' ');
+}
+
+function parseStackPart(title) {
+  const m = /\((\d+)\s*(?:\/|of)\s*(\d+)\)/i.exec(String(title ?? ''));
+  if (!m) return null;
+  const index = Number(m[1]);
+  const total = Number(m[2]);
+  if (!Number.isInteger(index) || !Number.isInteger(total) || index < 1 || total < 2 || index > total) return null;
+  return { index, total };
+}
+
+export function normalizeIncomingPullRequest(raw) {
+  if (!isPlainObject(raw)) throw new DomainError('Pull request payload must be an object', 400);
+  const pr = isPlainObject(raw.pull_request) ? raw.pull_request : raw;
+  const repo = String(
+    raw.repo ?? pr.repo ?? raw.repository?.full_name ?? raw.repository?.nameWithOwner ?? pr.repository?.nameWithOwner ?? pr.base?.repo?.full_name ?? '',
+  ).trim();
+  const number = Number(pr.number ?? raw.number);
+  if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo) || !Number.isInteger(number) || number <= 0) {
+    throw new DomainError('Pull request requires valid repo ("owner/name") and positive integer number', 400);
+  }
+  const stateRaw = String(pr.state ?? raw.state ?? 'open')
+    .trim()
+    .toLowerCase();
+  const merged = Boolean(pr.merged || raw.merged || pr.mergedAt || pr.merged_at || stateRaw === 'merged');
+  const state = merged ? 'merged' : stateRaw === 'closed' ? 'closed' : 'open';
+  const draft = state === 'open' ? Boolean(pr.draft ?? pr.isDraft ?? raw.draft) : false;
+  const rawUrl = String(pr.url && !pr.url.includes('api.github.com/') ? pr.url : pr.html_url || pr.htmlUrl || raw.url || raw.htmlUrl || '').trim();
+  const url = /^https?:\/\/\S+$/i.test(rawUrl) ? rawUrl : `https://github.com/${repo}/pull/${number}`;
+  const bodyProvided = pr.body !== undefined || raw.body !== undefined;
+  const body = String(pr.body ?? raw.body ?? '');
+  return {
+    repo,
+    number,
+    title: String(pr.title ?? raw.title ?? '').trim(),
+    body,
+    bodyProvided,
+    headRef: String(pr.headRef ?? pr.headRefName ?? pr.head?.ref ?? raw.headRef ?? '').trim(),
+    url,
+    state,
+    merged,
+    draft,
+    updatedAt: parseTimestampMs(pr.updatedAt ?? pr.updated_at ?? raw.updatedAt),
+    createdAt: parseTimestampMs(pr.createdAt ?? pr.created_at ?? raw.createdAt),
+  };
+}
+
+export function extractPullRequestTaskRefs(data, pr) {
+  const refs = new Map();
+  const keys = [...new Set((data.projects || []).map(p => p.key).filter(Boolean))].sort((a, b) => b.length - a.length);
+  if (!keys.length) return refs;
+  const keyAlt = keys.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const tokenRe = new RegExp(`(?<![A-Za-z0-9])(${keyAlt})-(\\d+)(?![A-Za-z0-9])`, 'gi');
+
+  const record = (rawKey, closing) => {
+    const t = resolveTask(data, rawKey.toUpperCase());
+    if (!t) return;
+    const prev = refs.get(t.id);
+    refs.set(t.id, { closing: Boolean(prev?.closing || closing) });
+  };
+
+  for (const src of [pr.title, pr.headRef]) {
+    for (const m of String(src ?? '').matchAll(tokenRe)) {
+      record(`${m[1]}-${m[2]}`, true);
+    }
+  }
+
+  if (pr.body) {
+    const cleanBody = stripCodeAndComments(pr.body);
+    const listChunk = `(?:(?:${keyAlt})-\\d+(?:\\s*(?:,|and|&)\\s*)?)+`;
+    const closingClauseRe = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|complete[sd]?)\\s*:?\\s+(${listChunk})`, 'gi');
+    const refClauseRe = new RegExp(`\\b(?:refs?|references?|part\\s+of|relates?\\s+to|task|issue|tracks?)\\s*:?\\s+(${listChunk})`, 'gi');
+    for (const clause of cleanBody.matchAll(closingClauseRe)) {
+      for (const m of clause[1].matchAll(tokenRe)) record(`${m[1]}-${m[2]}`, true);
+    }
+    for (const clause of cleanBody.matchAll(refClauseRe)) {
+      for (const m of clause[1].matchAll(tokenRe)) record(`${m[1]}-${m[2]}`, false);
+    }
+  }
+
+  return refs;
+}
+
+function isIncompleteStackMerge(taskPrs, mergedLink) {
+  const part = parseStackPart(mergedLink.title);
+  if (!part || part.index >= part.total) return false;
+  return !taskPrs.some(other => {
+    if (other.state !== 'merged' || !other.closing) return false;
+    const otherPart = parseStackPart(other.title);
+    if (!otherPart) return true;
+    return otherPart.total === part.total && otherPart.index >= part.total;
+  });
+}
+
+export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const by = opts.by ?? data.me;
+  const list = Array.isArray(rawInputs) ? rawInputs : [rawInputs];
+  const normalized = list.map(normalizeIncomingPullRequest).sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0));
+
+  const touchedIds = new Set();
+  let changed = false;
+
+  for (const incoming of normalized) {
+    const refs = extractPullRequestTaskRefs(data, incoming);
+    const samePr = x => x.repo.toLowerCase() === incoming.repo.toLowerCase() && x.number === incoming.number;
+
+    if (incoming.bodyProvided) {
+      for (const t of data.tasks) {
+        if (!Array.isArray(t.prs) || !t.prs.length || refs.has(t.id)) continue;
+        const prev = t.prs.find(samePr);
+        if (!prev) continue;
+        if (prev.updatedAt > 0 && incoming.updatedAt > 0 && incoming.updatedAt < prev.updatedAt) continue;
+        t.prs = t.prs.filter(x => !samePr(x));
+        t.updated = Math.max(t.updated || 0, now);
+        touchedIds.add(t.id);
+        changed = true;
+      }
+    }
+
+    for (const [taskId, refInfo] of refs.entries()) {
+      const t = findTask(data, taskId);
+      if (!t) continue;
+      t.prs = Array.isArray(t.prs) ? t.prs : [];
+      const prev = t.prs.find(samePr) || null;
+      if (prev && prev.updatedAt > 0 && incoming.updatedAt > 0 && incoming.updatedAt < prev.updatedAt) continue;
+
+      const nextLink = normalizeTaskPrLink({
+        repo: incoming.repo,
+        number: incoming.number,
+        title: incoming.title,
+        url: incoming.url,
+        headRef: incoming.headRef,
+        state: incoming.state,
+        draft: incoming.draft,
+        closing: refInfo.closing,
+        updatedAt: incoming.updatedAt,
+        createdAt: incoming.createdAt || prev?.createdAt,
+      });
+      if (!nextLink || deepEqual(prev, nextLink)) continue;
+
+      const idx = t.prs.findIndex(samePr);
+      if (idx >= 0) t.prs[idx] = nextLink;
+      else t.prs.push(nextLink);
+
+      const prLabel = `${nextLink.repo}#${nextLink.number}`;
+      if (!prev || prev.state !== nextLink.state || prev.draft !== nextLink.draft) {
+        if (nextLink.state === 'merged') logActivity(data, 'merged PR on', t, prLabel, { by, now });
+        else if (nextLink.state === 'closed' && prev) logActivity(data, 'closed PR on', t, prLabel, { by, now });
+        else if (!prev) logActivity(data, 'linked PR to', t, prLabel, { by, now });
+        else if (prev.draft && !nextLink.draft) logActivity(data, 'marked PR ready on', t, prLabel, { by, now });
+      }
+
+      const becameOpenDraft = nextLink.state === 'open' && nextLink.draft && (!prev || prev.state !== 'open');
+      const becameOpenReady =
+        nextLink.state === 'open' && !nextLink.draft && (!prev || prev.state !== 'open' || prev.draft || (!prev.closing && nextLink.closing));
+      const becameMerged = nextLink.state === 'merged' && (!prev || prev.state !== 'merged' || (!prev.closing && nextLink.closing));
+      const becameClosedUnmerged = nextLink.state === 'closed' && prev?.state === 'open';
+
+      if (becameOpenDraft) {
+        if (t.status === 'backlog' || t.status === 'todo') applyTaskPatch(data, t, { status: 'progress' }, { by, now });
+      } else if (becameOpenReady) {
+        if (nextLink.closing) {
+          const reopenCompleted =
+            t.status === 'done' && (prev?.state === 'closed' || (nextLink.createdAt && t.completedAt && nextLink.createdAt > t.completedAt));
+          if (['backlog', 'todo', 'progress'].includes(t.status) || reopenCompleted) {
+            applyTaskPatch(data, t, { status: 'review' }, { by, now });
+          }
+        } else if (t.status === 'backlog' || t.status === 'todo') {
+          applyTaskPatch(data, t, { status: 'progress' }, { by, now });
+        }
+      } else if (becameMerged && nextLink.closing) {
+        const hasOpenPr = t.prs.some(x => x.state === 'open');
+        if (!hasOpenPr) {
+          if (isIncompleteStackMerge(t.prs, nextLink)) {
+            if (t.status === 'backlog' || t.status === 'todo') applyTaskPatch(data, t, { status: 'progress' }, { by, now });
+          } else if (t.status !== 'done') {
+            applyTaskPatch(data, t, { status: 'done' }, { by, now });
+          }
+        }
+      } else if (becameClosedUnmerged) {
+        const hasReadyOpen = t.prs.some(x => x.state === 'open' && !x.draft);
+        const hasMergedClosing = t.prs.some(x => x.state === 'merged' && x.closing);
+        if (t.status === 'review' && !hasReadyOpen && !hasMergedClosing) {
+          applyTaskPatch(data, t, { status: 'progress' }, { by, now });
+        }
+      }
+
+      t.updated = Math.max(t.updated || 0, now);
+      touchedIds.add(t.id);
+      changed = true;
+    }
+  }
+
+  return {
+    changed,
+    updatedTasks: [...touchedIds].map(id => findTask(data, id)).filter(Boolean),
+  };
 }

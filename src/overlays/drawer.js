@@ -74,6 +74,30 @@ export function drawerHtml(t) {
         ${prop('repeat', 'Repeat', `<button class="pillbtn ${t.recur ? '' : 'empty'}" data-a="pop" data-pop="recur" data-id="${t.id}">${ic('repeat', 13)}${t.recur || 'Does not repeat'}</button>`)}
         ${prop('timer', 'Estimate', `<button class="pillbtn ${t.estimate ? '' : 'empty'}" data-a="pop" data-pop="estimate" data-id="${t.id}">${ic('timer', 13)}${t.estimate ? esc(t.estimate) : 'Add estimate'}</button>`)}
         ${prop('git-branch', 'Blocked by', `<button class="pillbtn ${t.deps.length ? '' : 'empty'}" data-a="pop" data-pop="deps" data-id="${t.id}" style="height:auto;min-height:26px;flex-wrap:wrap">${t.deps.length ? t.deps.map(d => (task(d) ? `<span class="depchip mono" style="font-size:11px;padding:1px 5px;border-radius:4px;background:var(--surface-3)">${task(d).key}</span><span class="trunc" style="max-width:160px">${esc(task(d).title)}</span>` : '')).join('') : ic('git-branch', 13) + 'None'}</button>`)}
+        ${
+          t.prs?.length
+            ? prop(
+                'git-pull-request',
+                'Pull requests',
+                `<div class="row" style="gap:6px;flex-wrap:wrap">${t.prs
+                  .map(pr => {
+                    const icon =
+                      pr.state === 'merged'
+                        ? 'git-merge'
+                        : pr.state === 'closed'
+                          ? 'git-pull-request-closed'
+                          : pr.draft
+                            ? 'git-pull-request-draft'
+                            : 'git-pull-request';
+                    const color =
+                      pr.state === 'merged' ? 'var(--purple, #8b5cf6)' : pr.state === 'closed' ? 'var(--text-3)' : pr.draft ? 'var(--text-2)' : 'var(--green)';
+                    const href = /^https?:\/\/\S+$/i.test(pr.url || '') ? esc(pr.url) : '#';
+                    return `<a class="pillbtn" href="${href}" target="_blank" rel="noopener noreferrer" title="${esc(pr.title || `${pr.repo}#${pr.number}`)}" style="height:auto;min-height:24px;padding:2px 7px;gap:5px;text-decoration:none"><span style="color:${color};display:inline-flex">${ic(icon, 13)}</span><span class="mono" style="font-size:11.5px">${esc(pr.repo.split('/').pop() || pr.repo)}#${Number(pr.number)}</span></a>`;
+                  })
+                  .join('')}</div>`,
+              )
+            : ''
+        }
       </dl>
 
       <div class="dsec"><div class="dsec-h"><h3 id="d-desc-l">Description</h3><div class="rte-tb" role="toolbar" aria-label="Formatting" aria-controls="d-desc">

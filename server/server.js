@@ -3,14 +3,15 @@
 
    GR8R_TOKEN=<secret> npm start
    Environment: PORT (4180), HOST (127.0.0.1), GR8R_TOKEN (required),
-   GR8R_TRUST_BOOTSTRAP (tailnet | none | always), GR8R_DATA (state file),
-   DIST (static directory). */
+   GR8R_TRUST_BOOTSTRAP (tailnet | none | always), GR8R_GITHUB_WEBHOOK_SECRET (optional),
+   GR8R_DATA (state file), DIST (static directory). */
 import { createServer } from 'node:http';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { DomainError, formatTaskForApi, syncGitHubPullRequests } from '../src/core/domain.js';
 import { handleDomainApi } from './api.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -137,9 +138,25 @@ function writeStore(file, store) {
   fs.renameSync(tmp, file);
 }
 
-export function startServer({ port = 0, host = '127.0.0.1', token, dataFile, distDir, trustBootstrap = process.env.GR8R_TRUST_BOOTSTRAP || 'tailnet' }) {
+function verifyGitHubSignature(rawBuf, sigHeader, secret) {
+  if (!secret || typeof sigHeader !== 'string' || !/^sha256=[0-9a-f]{64}$/i.test(sigHeader)) return false;
+  const expected = createHmac('sha256', secret).update(rawBuf).digest();
+  const actual = Buffer.from(sigHeader.slice(7), 'hex');
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+export function startServer({
+  port = 0,
+  host = '127.0.0.1',
+  token,
+  dataFile,
+  distDir,
+  trustBootstrap = process.env.GR8R_TRUST_BOOTSTRAP || 'tailnet',
+  webhookSecret = process.env.GR8R_GITHUB_WEBHOOK_SECRET || '',
+}) {
   if (!token) throw new Error('startServer: token is required');
   const trustMode = normalizeTrustBootstrap(trustBootstrap);
+  const ghWebhookSecret = String(webhookSecret || '').trim();
   const tokenKey = createHash('sha256').update(token).digest();
   const matchesToken = candidate =>
     typeof candidate === 'string' && candidate.length > 0 && timingSafeEqual(createHash('sha256').update(candidate).digest(), tokenKey);
@@ -175,7 +192,7 @@ export function startServer({ port = 0, host = '127.0.0.1', token, dataFile, dis
     res.writeHead(code, { 'content-type': type, 'content-length': buf.length, ...extra });
     res.end(buf);
   };
-  const readBody = req =>
+  const readRawBody = req =>
     new Promise((resolve, reject) => {
       let n = 0;
       const chunks = [];
@@ -188,9 +205,10 @@ export function startServer({ port = 0, host = '127.0.0.1', token, dataFile, dis
         }
         chunks.push(c);
       });
-      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      req.on('end', () => resolve(Buffer.concat(chunks)));
       req.on('error', reject);
     });
+  const readBody = req => readRawBody(req).then(buf => buf.toString('utf8'));
 
   async function api(req, res, url) {
     /* On loopback and private Tailscale Serve routes, /api/config bootstraps
@@ -217,6 +235,38 @@ export function startServer({ port = 0, host = '127.0.0.1', token, dataFile, dis
       const ok = authorized(req) || matchesToken(body?.token);
       if (!ok) return send(res, 401, { error: 'unauthorized' }, 'application/json', { 'cache-control': 'no-store' });
       return send(res, 200, { ok: true }, 'application/json', { 'cache-control': 'no-store' });
+    }
+    if (url.pathname === '/api/webhooks/github') {
+      if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' });
+      if (!ghWebhookSecret) return send(res, 503, { error: 'github webhook is not configured' });
+      const rawBuf = await readRawBody(req);
+      if (!verifyGitHubSignature(rawBuf, req.headers['x-hub-signature-256'], ghWebhookSecret)) {
+        return send(res, 401, { error: 'invalid signature' });
+      }
+      const event = String(req.headers['x-github-event'] || '').trim();
+      if (event === 'ping') return send(res, 200, { ok: true, event: 'ping' });
+      if (event !== 'pull_request') return send(res, 202, { accepted: false, event });
+      let payload;
+      try {
+        payload = JSON.parse(rawBuf.toString('utf8'));
+      } catch {
+        return send(res, 400, { error: 'invalid body' });
+      }
+      if (!store.state) return send(res, 202, { accepted: false, reason: 'uninitialized', rev: store.rev });
+      try {
+        const draft = structuredClone(store.state);
+        const { changed, updatedTasks } = syncGitHubPullRequests(draft.data, [payload]);
+        const rev = changed ? commitState(draft).rev : store.rev;
+        return send(res, 200, {
+          ok: true,
+          changed,
+          rev,
+          updated: updatedTasks.map(t => formatTaskForApi(draft.data, t)),
+        });
+      } catch (err) {
+        if (err instanceof DomainError) return send(res, err.status || 400, { error: err.message });
+        throw err;
+      }
     }
     if (!authorized(req)) return send(res, 401, { error: 'unauthorized' });
     if (url.pathname === '/api/events' && req.method === 'GET') {

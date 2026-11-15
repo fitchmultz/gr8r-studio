@@ -564,3 +564,85 @@ test('PATCH /api/workspace merges concurrent browser deltas with domain API writ
   assert.equal(delHttp.status, 200);
   assert.deepEqual(await delHttp.json(), { rev: 6, merged: false });
 });
+
+test('POST /api/github/pull-requests and HMAC POST /api/webhooks/github link PRs idempotently', async t => {
+  const { createHmac } = await import('node:crypto');
+  const unconfigured = await withServer(t);
+  const res503 = await fetch(unconfigured.base + '/api/webhooks/github', { method: 'POST', body: '{}' });
+  assert.equal(res503.status, 503);
+
+  const secret = 'whsec_test_secret';
+  const { base } = await withServer(t, { webhookSecret: secret });
+
+  await fetch(base + '/api/projects', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Pi Durable', key: 'PID' }),
+  });
+  await fetch(base + '/api/tasks', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ project: 'PID', title: 'PR Autofix Loop', status: 'progress' }),
+  });
+
+  // Invalid HMAC signature is rejected with 401.
+  const badSig = await fetch(base + '/api/webhooks/github', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-github-event': 'pull_request', 'x-hub-signature-256': 'sha256=' + '0'.repeat(64) },
+    body: '{}',
+  });
+  assert.equal(badSig.status, 401);
+
+  // Valid signed webhook with Unicode payload links PID-201 and moves progress -> review.
+  const whBody = JSON.stringify({
+    action: 'opened',
+    repository: { full_name: 'fitchmultz/pi-durable' },
+    pull_request: {
+      number: 447,
+      title: 'feat(personal): closed-loop PR autofix 🚀 (PID-201)',
+      body: 'Closes PID-201',
+      html_url: 'https://github.com/fitchmultz/pi-durable/pull/447',
+      state: 'open',
+      merged: false,
+      draft: false,
+      updated_at: '2026-11-15T02:00:00Z',
+      head: { ref: 'feat/pr-autofix-loop' },
+    },
+  });
+  const sig = 'sha256=' + createHmac('sha256', secret).update(Buffer.from(whBody, 'utf8')).digest('hex');
+  const okWh = await fetch(base + '/api/webhooks/github', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-github-event': 'pull_request', 'x-hub-signature-256': sig },
+    body: whBody,
+  });
+  assert.equal(okWh.status, 200);
+  const whJson = await okWh.json();
+  assert.equal(whJson.changed, true);
+  assert.equal(whJson.updated[0].status, 'review');
+  const revAfterOpen = whJson.rev;
+
+  // Re-sending identical PR via POST /api/github/pull-requests is idempotent and does not bump rev.
+  const repeatRes = await (
+    await fetch(base + '/api/github/pull-requests', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        pullRequests: [
+          {
+            repo: 'fitchmultz/pi-durable',
+            number: 447,
+            title: 'feat(personal): closed-loop PR autofix 🚀 (PID-201)',
+            body: 'Closes PID-201',
+            url: 'https://github.com/fitchmultz/pi-durable/pull/447',
+            headRef: 'feat/pr-autofix-loop',
+            state: 'open',
+            draft: false,
+            updatedAt: '2026-11-15T02:00:00Z',
+          },
+        ],
+      }),
+    })
+  ).json();
+  assert.equal(repeatRes.changed, false);
+  assert.equal(repeatRes.rev, revAfterOpen);
+});

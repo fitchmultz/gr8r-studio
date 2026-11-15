@@ -454,3 +454,129 @@ test('diffWorkspacePatch and applyWorkspacePatch merge concurrent field, subtask
   assert.equal(renameOut.rekeyed, false);
   assert.equal(svServer.data.savedViews.find(v => v.id === 'sv_1')?.name, 'Bug Triage');
 });
+
+test('syncGitHubPullRequests handles draft/ready/merge, stacked (1/n) PRs, Refs vs Closes, prose safety, and idempotency', async () => {
+  const { createDefaultState, createProject, createTask, duplicateTask, searchWorkspace, syncGitHubPullRequests } = await import('../../src/core/domain.js');
+  const state = createDefaultState(FIXED_NOW);
+  const pid = createProject(state.data, { name: 'Pi Durable', key: 'PID', status: 'active' }, { now: FIXED_NOW });
+  const t1 = createTask(state.data, { project: pid.id, title: 'Slice 1', status: 'backlog' }, { now: FIXED_NOW });
+  const t2 = createTask(state.data, { project: pid.id, title: 'Slice 2 (untouched)', status: 'todo' }, { now: FIXED_NOW });
+  const t3 = createTask(state.data, { project: pid.id, title: 'Slice 3 (referenced)', status: 'backlog' }, { now: FIXED_NOW });
+
+  // 1. Draft PR on branch feat/pid-201-part1 moves backlog -> progress; prose/code mentions of PID-202 are ignored; Refs PID-203 links non-closing.
+  const r1 = syncGitHubPullRequests(
+    state.data,
+    [
+      {
+        repo: 'fitchmultz/pi-durable',
+        number: 101,
+        title: 'Ledger schema (1/2)',
+        headRef: 'feat/pid-201-ledger',
+        body: 'Avoids colliding with PID-202.\n```\nCloses PID-202\n```\nRefs PID-203',
+        state: 'OPEN',
+        draft: true,
+        updatedAt: '2026-11-15T01:00:00Z',
+      },
+    ],
+    { now: FIXED_NOW + 100 },
+  );
+  assert.equal(r1.changed, true);
+  assert.equal(t1.status, 'progress');
+  assert.equal(t2.status, 'todo');
+  assert.equal(t2.prs.length, 0);
+  assert.equal(t3.status, 'progress');
+  assert.equal(t3.prs[0].closing, false);
+
+  // Repeated identical sync is a strict no-op.
+  const noop = syncGitHubPullRequests(
+    state.data,
+    [
+      {
+        repo: 'fitchmultz/pi-durable',
+        number: 101,
+        title: 'Ledger schema (1/2)',
+        headRef: 'feat/pid-201-ledger',
+        body: 'Avoids colliding with PID-202.\n```\nCloses PID-202\n```\nRefs PID-203',
+        state: 'open',
+        draft: true,
+        updatedAt: '2026-11-15T01:00:00Z',
+      },
+    ],
+    { now: FIXED_NOW + 200 },
+  );
+  assert.equal(noop.changed, false);
+
+  // 2. Marking PR #101 ready moves PID-201 to review; stale older event is ignored.
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 101,
+      title: 'Ledger schema (1/2)',
+      headRef: 'feat/pid-201-ledger',
+      body: 'Refs PID-203',
+      state: 'open',
+      draft: false,
+      updatedAt: '2026-11-15T01:05:00Z',
+    },
+    { now: FIXED_NOW + 300 },
+  );
+  assert.equal(t1.status, 'review');
+
+  const stale = syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 101,
+      title: 'Ledger schema (1/2)',
+      headRef: 'feat/pid-201-ledger',
+      body: 'Refs PID-203',
+      state: 'open',
+      draft: true,
+      updatedAt: '2026-11-15T01:01:00Z',
+    },
+    { now: FIXED_NOW + 350 },
+  );
+  assert.equal(stale.changed, false);
+  assert.equal(t1.prs[0].draft, false);
+
+  // 3. Merging part (1/2) alone keeps PID-201 in review (incomplete stack) and keeps Refs-only PID-203 open.
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 101,
+      title: 'Ledger schema (1/2)',
+      headRef: 'feat/pid-201-ledger',
+      body: 'Refs PID-203',
+      state: 'MERGED',
+      merged: true,
+      updatedAt: '2026-11-15T01:10:00Z',
+    },
+    { now: FIXED_NOW + 400 },
+  );
+  assert.equal(t1.status, 'review');
+  assert.equal(t3.status, 'progress');
+
+  // 4. Merging part (2/2) completes the stack and marks PID-201 done; duplicating PID-201 does not copy PR links.
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 102,
+      title: 'Ledger UI (2/2) (PID-201)',
+      headRef: 'feat/ledger-ui',
+      body: '',
+      state: 'merged',
+      merged: true,
+      updatedAt: '2026-11-15T01:15:00Z',
+    },
+    { now: FIXED_NOW + 500 },
+  );
+  assert.equal(t1.status, 'done');
+  assert.equal(t1.prs.length, 2);
+  assert.equal(searchWorkspace(state.data, 'pi-durable#102').tasks[0]?.id, t1.id);
+
+  const dup = duplicateTask(state.data, t1.id, { now: FIXED_NOW + 600 });
+  assert.deepEqual(dup.prs, []);
+});
