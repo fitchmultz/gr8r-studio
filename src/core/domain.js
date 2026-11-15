@@ -1735,16 +1735,15 @@ function isIncompleteStackMerge(taskPrs, mergedLink, preExistingMergedKeys = new
   return !taskPrs.some(other => {
     if (other.state !== 'merged' || !other.closing) return false;
     const otherPart = parseStackPart(other.title);
-    if (!otherPart) return false;
-    if (otherPart.total !== part.total || otherPart.index < part.total) return false;
+    if (!otherPart || otherPart.total !== part.total || otherPart.index < part.total) return false;
+    if (other.repo.toLowerCase() === mergedLink.repo.toLowerCase()) {
+      if (other.number > mergedLink.number) return true;
+      return Boolean(other.mergedAt && mergedLink.createdAt && other.mergedAt >= mergedLink.createdAt);
+    }
     const otherKey = `${other.repo.toLowerCase()}#${other.number}`;
     if (!mergedLink.createdAt && preExistingMergedKeys.has(otherKey)) return false;
-    if (other.mergedAt) {
-      return !mergedStart || other.mergedAt >= mergedStart;
-    }
-    if (preExistingMergedKeys.has(otherKey)) return false;
-    if (other.repo.toLowerCase() === mergedLink.repo.toLowerCase() && other.number < mergedLink.number) return false;
-    return true;
+    if (other.mergedAt) return !mergedStart || other.mergedAt >= mergedStart;
+    return !preExistingMergedKeys.has(otherKey);
   });
 }
 
@@ -1804,7 +1803,9 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
         firstSeenAt: prev?.firstSeenAt || incoming.createdAt || now,
         mergedAt:
           incoming.state === 'merged'
-            ? (prev?.state === 'merged' && prev?.mergedAt) || incoming.mergedAt || incoming.updatedAt || (prev?.state === 'open' ? now : undefined)
+            ? prev?.state === 'merged'
+              ? prev.mergedAt || incoming.mergedAt || undefined
+              : incoming.mergedAt || incoming.updatedAt || (prev?.state === 'open' ? now : undefined)
             : undefined,
       });
       if (!nextLink || deepEqual(prev, nextLink)) continue;
@@ -1824,7 +1825,8 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
       const becameOpenDraft = nextLink.state === 'open' && nextLink.draft && (!prev || prev.state !== 'open');
       const becameOpenReady =
         nextLink.state === 'open' && !nextLink.draft && (!prev || prev.state !== 'open' || prev.draft || (!prev.closing && nextLink.closing));
-      const becameMerged = nextLink.state === 'merged' && (!prev || prev.state !== 'merged' || (!prev.closing && nextLink.closing));
+      const gainedMergedAt = nextLink.state === 'merged' && prev?.state === 'merged' && !prev.mergedAt && !!nextLink.mergedAt;
+      const becameMerged = nextLink.state === 'merged' && (!prev || prev.state !== 'merged' || (!prev.closing && nextLink.closing) || gainedMergedAt);
       const becameClosedUnmerged = nextLink.state === 'closed' && prev?.state === 'open';
 
       if (becameOpenDraft) {

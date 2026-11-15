@@ -773,4 +773,90 @@ test('syncGitHubPullRequests handles draft/ready/merge, stacked (1/n) PRs, Refs 
   assert.equal(staleRedelivery.changed, false);
   assert.equal(tUnlink.prs.length, 0);
   assert.equal(tUnlink.status, 'todo');
+
+  // 8. Re-syncing a timestamp-less prior (2/2) with a late updatedAt does not turn it into a new stack's completion;
+  //    and syncing same-stack #4 (2/2) merged without timestamps before #3 (1/2) merges still completes the stack.
+  const tLate = createTask(state.data, { project: pid.id, title: 'Late updatedAt guard', status: 'todo' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'fitchmultz/pi-durable', number: 2, title: `Prior (2/2) (${tLate.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-14T10:00:00Z') },
+  );
+  assert.equal(tLate.status, 'done');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 3,
+      title: `Follow-up (1/2) (${tLate.key})`,
+      state: 'open',
+      draft: false,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T01:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T01:00:00Z') },
+  );
+  assert.equal(tLate.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 2,
+      title: `Prior (2/2) (${tLate.key})`,
+      state: 'merged',
+      merged: true,
+      updatedAt: '2026-11-15T02:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T02:00:00Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 3,
+      title: `Follow-up (1/2) (${tLate.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T02:30:00Z',
+    },
+    { now: Date.parse('2026-11-15T02:30:00Z') },
+  );
+  assert.equal(tLate.status, 'review');
+
+  // Out-of-order same-cycle #6 (2/2) synced merged without timestamps while #5 (1/2) is open completes when #5 merges.
+  const tOutOrder = createTask(state.data, { project: pid.id, title: 'Out-of-order (2/2) first', status: 'todo' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 5,
+      title: `Stack part A (1/2) (${tOutOrder.key})`,
+      state: 'open',
+      draft: false,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T01:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T01:00:00Z') },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    { repo: 'fitchmultz/pi-durable', number: 6, title: `Stack part B (2/2) (${tOutOrder.key})`, state: 'merged', merged: true },
+    { now: Date.parse('2026-11-15T02:00:00Z') },
+  );
+  assert.equal(tOutOrder.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 5,
+      title: `Stack part A (1/2) (${tOutOrder.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T01:00:00Z',
+      updatedAt: '2026-11-15T03:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T03:00:00Z') },
+  );
+  assert.equal(tOutOrder.status, 'done');
 });
