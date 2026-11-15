@@ -2,13 +2,14 @@
 import { MOD, ago, esc } from '../core/utils.js';
 import { ic } from '../core/icons.js';
 import { D, S, commentsOf, mem, pColor, proj, task } from '../core/store.js';
-import { av, empty, fmtComment } from '../ui/helpers.js';
+import { agentBadge, av, empty, fmtComment } from '../ui/helpers.js';
 import { cellAssignee, cellDue, cellPrio, cellStatus } from '../components/task-list.js';
 import { commentHtml } from '../overlays/drawer.js';
 
 export function pageInbox() {
   const cats = [
     ['all', 'All'],
+    ['blocker', 'Needs You'],
     ['mention', 'Mentions'],
     ['assign', 'Assignments'],
     ['comment', 'Comments'],
@@ -42,11 +43,13 @@ export function notifText(n) {
   const t = n.task ? task(n.task) : null;
   const p = n.project ? proj(n.project) : t ? proj(t.project) : null;
   const who = n.by ? `<b style="font-weight:600">${esc(mem(n.by)?.name)}</b>` : '';
+  const bot = n.agent ? ` ${agentBadge(n.agent)}` : '';
   if (!n.by && p && !t) return `<b style="font-weight:600">${esc(n.text)}</b>`;
   if (!n.by && t) return `<b style="font-weight:600">${esc(t.title)}</b> <span class="muted">${esc(n.text)}</span>`;
-  return `${who} <span class="muted">${esc(n.text)}</span> ${t ? `<b style="font-weight:500">${esc(t.title)}</b>` : ''}`;
+  return `${who}${bot} <span class="muted">${esc(n.text)}</span> ${t ? `<b style="font-weight:500">${esc(t.title)}</b>` : ''}`;
 }
 export function notifIcon(n) {
+  if (n.type === 'blocker') return `<span class="av md" style="--c:var(--red)">${ic('octagon-alert', 13)}</span>`;
   if (n.by) return av(n.by, 'md', false);
   const i = n.type === 'update' && n.project ? 'triangle-alert' : 'clock';
   return `<span class="av md" style="--c:${n.project ? 'var(--red)' : 'var(--amber)'}">${ic(i, 13)}</span>`;
@@ -54,7 +57,7 @@ export function notifIcon(n) {
 export function inboxItem(n, on) {
   const t = n.task ? task(n.task) : null;
   const p = n.project ? proj(n.project) : t ? proj(t.project) : null;
-  const typeIc = { mention: 'at-sign', assign: 'user-plus', comment: 'message-square', update: 'refresh-cw' }[n.type];
+  const typeIc = { blocker: 'octagon-alert', mention: 'at-sign', assign: 'user-plus', comment: 'message-square', update: 'refresh-cw' }[n.type] || 'bell';
   return `<div class="row" style="align-items:flex-start;gap:10px;padding:12px var(--gutter);border-bottom:1px solid var(--divider);cursor:pointer;position:relative;${on ? 'background:var(--surface-2);' : ''}" data-a="selNotif" data-id="${n.id}" role="button" tabindex="0">
     ${!n.read ? '<span style="position:absolute;left:6px;top:22px;width:6px;height:6px;border-radius:50%;background:var(--accent)" aria-label="Unread"></span>' : ''}
     ${notifIcon(n)}
@@ -70,11 +73,11 @@ export function inboxPreview(n) {
   const t = n.task ? task(n.task) : null;
   const p = n.project ? proj(n.project) : t ? proj(t.project) : null;
   if (!t)
-    return `<div style="padding:24px 28px"><button class="btn btn-sm btn-ghost" data-a="set" data-k="inboxSel" data-v="" style="margin:-4px 0 12px -8px">${ic('arrow-left', 14)}Back</button><div class="alert danger">${ic('triangle-alert', 16)}<div><b>${esc(n.text)}</b><div class="muted" style="margin-top:2px">${esc(n.snippet)}</div></div></div><div style="margin-top:14px"><button class="btn btn-secondary" data-a="go" data-r="project" data-id="${p.id}" data-tab="overview">Open project</button></div></div>`;
+    return `<div style="padding:24px 28px"><button class="btn btn-sm btn-ghost" data-a="set" data-k="inboxSel" data-v="" style="margin:-4px 0 12px -8px">${ic('arrow-left', 14)}Back</button><div class="alert danger">${ic('triangle-alert', 16)}<div><b>${esc(n.text)}</b><div class="muted" style="margin-top:2px">${esc(n.snippet)}</div></div></div>${p ? `<div style="margin-top:14px"><button class="btn btn-secondary" data-a="go" data-r="project" data-id="${p.id}" data-tab="overview">Open project</button></div>` : ''}</div>`;
   const cs = commentsOf(t.id).slice(-4);
   return `<div class="row" style="height:46px;padding:0 16px;border-bottom:1px solid var(--border);gap:8px;flex-shrink:0">
       <button class="ibtn ibtn-sm" data-a="set" data-k="inboxSel" data-v="" aria-label="Back">${ic('arrow-left', 15)}</button>
-      <span class="pdot" style="--c:${pColor(p)}"></span><span class="muted" style="font-size:12.5px">${esc(p.name)}</span><span class="faint mono">${t.key}</span><span class="sp"></span>
+      ${p ? `<span class="pdot" style="--c:${pColor(p)}"></span><span class="muted" style="font-size:12.5px">${esc(p.name)}</span>` : ''}<span class="faint mono">${t.key}</span><span class="sp"></span>
       <button class="btn btn-sm btn-secondary" data-a="openTask" data-id="${t.id}">${ic('panel-right-open', 14)}Open task</button></div>
     <div style="padding:24px 28px;max-width:720px;width:100%">
       <h2 style="font-size:var(--fs-xl);margin:0 0 10px;font-weight:600;letter-spacing:-.015em">${esc(t.title)}</h2>

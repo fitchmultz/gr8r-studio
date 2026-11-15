@@ -47,6 +47,7 @@ gr8r tasks -p PID -s open
 gr8r tasks -p PID --ready
 gr8r task view PID-201
 gr8r search "UsageDoc"
+gr8r inbox --unread
 gr8r activity -p PID --limit 20
 ```
 
@@ -122,4 +123,11 @@ EOF
 
 # Link or sync a GitHub PR to KEY-123 tasks (also runs automatically every 60s on Alienarchy)
 gr8r pr-sync --repo fitchmultz/pi-durable --pr 447 --title "feat: autofix (PID-206)" --state open
+
+# Escalate a blocker or decision directly to the owner's Inbox
+gr8r comment add PID-201 "Need approval before rotating production webhook secret." --needs-owner
+
+# Triage and clear Inbox notifications
+gr8r inbox --unread
+gr8r inbox read --all -p PID
 ```

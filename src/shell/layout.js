@@ -78,7 +78,7 @@ export function sItem(route, label, icon, opt = {}) {
 export function renderSidebar() {
   const u = S.ui,
     d = D();
-  const unreadInbox = d.notifs.filter(n => !n.read && n.type !== 'update').length;
+  const unreadInbox = d.notifs.filter(n => !n.read).length;
   const unreadAll = d.notifs.filter(n => !n.read).length;
   const myOpen = allTasks().filter(t => t.assignee === d.me && !isClosedStatus(t.status) && t.due && diffD(parse(t.due), TODAY) <= 0).length;
   const projs = visibleProjects().filter(p => p.status !== 'complete');
@@ -201,7 +201,7 @@ export function renderTopbar() {
 }
 export function renderBottomNav() {
   const r = S.ui.route;
-  const unread = D().notifs.some(n => !n.read && n.type !== 'update');
+  const unread = D().notifs.some(n => !n.read);
   const b = (route, label, icon, extra = '') =>
     `<button class="${r === route ? 'on' : ''}" data-a="go" data-r="${route}">${ic(icon, 19)}<span>${label}</span>${extra}</button>`;
   return `<nav class="bottomnav" aria-label="Primary">

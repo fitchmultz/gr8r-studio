@@ -260,4 +260,11 @@ test('gr8r CLI guides user to GR8R_TOKEN when /api/config bootstrap is disabled,
   assert.match(viewWithAgent.stdout, /Claimed by: pi:worker-a/);
   assert.match(viewWithAgent.stdout, /\[pi:abcdef12-3456-7890-abcd-ef1234567890\]/);
   await invoke(['task', 'release', 'PID-202', '--status', 'todo'], { env: autoEnv });
+
+  await invoke(['comment', 'add', 'PID-202', 'Need owner sign-off on schema', '--needs-owner'], { env: autoEnv });
+  const inboxUnread = await invoke(['inbox', '--unread', '--type', 'blocker'], { env: autoEnv });
+  assert.match(inboxUnread.stdout, /Inbox \([1-9]\d* unread\)/);
+  assert.match(inboxUnread.stdout, /blocker\s+PID-202/);
+  const markRead = await invoke(['inbox', 'read', '--all', '-p', 'PID'], { env: autoEnv });
+  assert.match(markRead.stdout, /0 unread remaining/);
 });

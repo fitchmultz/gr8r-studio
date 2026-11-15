@@ -17,6 +17,7 @@ import {
   createTask,
   deleteComment,
   deleteLabel,
+  deleteNotif,
   deleteProject,
   deleteTasks,
   ensureLabels,
@@ -24,11 +25,15 @@ import {
   findMember,
   findProject,
   findTask,
+  formatNotifForApi,
   formatProjectForApi,
   formatTaskForApi,
   isWorkspacePatchEmpty,
+  markAllNotifsRead,
   normalizeAgentName,
   promoteSubtask,
+  pushNotif,
+  queryInbox,
   queryTasks,
   releaseTask,
   removeSubtask,
@@ -38,6 +43,7 @@ import {
   resolveProject,
   resolveTask,
   searchWorkspace,
+  setNotifRead,
   syncGitHubPullRequests,
   updateLabel,
   updateProject,
@@ -151,6 +157,7 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
         initialized,
         ws: d.ws,
         me: d.me,
+        unreadInboxCount: (d.notifs || []).filter(n => !n.read).length,
         members: d.members,
         teams: ensureTeams(d),
         projects: orderedProjects.filter(p => !p.archived).map(p => formatProjectForApi(d, p)),
@@ -280,6 +287,69 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
       return send(res, 200, { rev, activity: items });
     }
 
+    // /api/inbox
+    if (segments[0] === 'inbox') {
+      if (segments.length === 1 && method === 'GET') {
+        const { rev, state } = readView();
+        const d = state.data;
+        const filters = Object.fromEntries(url.searchParams.entries());
+        const list = queryInbox(d, filters).map(n => formatNotifForApi(d, n));
+        const unreadCount = (d.notifs || []).filter(n => !n.read).length;
+        return send(res, 200, { rev, unreadCount, notifications: list });
+      }
+      if (segments.length === 1 && method === 'POST') {
+        const result = await mutate((data, body) => {
+          const by = resolveActor(data, body.by);
+          const agent = resolveRequestAgent(req, body);
+          const taskObj = body.task ? requireTask(data, body.task) : null;
+          const projObj = body.project ? requireProject(data, body.project) : null;
+          const n = pushNotif(data, {
+            type: body.type || (body.needsOwner ? 'blocker' : 'update'),
+            by,
+            agent,
+            task: taskObj,
+            project: projObj,
+            text: body.text || (body.needsOwner ? 'needs your input on' : 'updated'),
+            snippet: body.snippet || '',
+          });
+          return { notification: formatNotifForApi(data, n) };
+        });
+        if (result) send(res, 201, result);
+        return;
+      }
+      if (segments.length === 2 && segments[1] === 'read-all' && method === 'POST') {
+        const result = await mutate((data, body) => {
+          const marked = markAllNotifsRead(data, {
+            project: body.project,
+            task: body.task,
+            type: body.type,
+          });
+          return { marked, unreadCount: (data.notifs || []).filter(n => !n.read).length };
+        });
+        if (result) send(res, 200, result);
+        return;
+      }
+      if (segments.length === 2) {
+        const notifId = segments[1];
+        if (method === 'PATCH') {
+          const result = await mutate((data, body) => {
+            const n = setNotifRead(data, notifId, body.read !== undefined ? !!body.read : true);
+            return { notification: formatNotifForApi(data, n), unreadCount: (data.notifs || []).filter(x => !x.read).length };
+          });
+          if (result) send(res, 200, result);
+          return;
+        }
+        if (method === 'DELETE') {
+          const result = await mutate(data => {
+            const removed = deleteNotif(data, notifId);
+            return { deleted: removed.id, unreadCount: (data.notifs || []).filter(x => !x.read).length };
+          });
+          if (result) send(res, 200, result);
+          return;
+        }
+      }
+    }
+
     // /api/projects
     if (segments[0] === 'projects') {
       if (segments.length === 1 && method === 'GET') {
@@ -343,11 +413,15 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
           if (Array.isArray(body.tasks)) {
             if (!body.tasks.length) throw new DomainError('tasks array cannot be empty');
             const created = body.tasks.map(item =>
-              createTask(data, mapApiTaskInput({ ...(body.project ? { project: body.project } : {}), ...item }), { by, agent }),
+              createTask(data, mapApiTaskInput({ ...(body.project ? { project: body.project } : {}), ...item }), {
+                by,
+                agent,
+                needsOwner: !!(item.needsOwner ?? body.needsOwner),
+              }),
             );
             return { tasks: created.map(t => formatTaskForApi(data, t)) };
           }
-          const t = createTask(data, mapApiTaskInput(body), { by, agent });
+          const t = createTask(data, mapApiTaskInput(body), { by, agent, needsOwner: !!body.needsOwner });
           return { task: formatTaskForApi(data, t) };
         });
         if (result) send(res, 201, result);
@@ -402,6 +476,8 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
             const out = applyTaskPatch(data, ref, mapApiTaskInput(body), {
               by: resolveActor(data, body.by),
               agent: resolveRequestAgent(req, body),
+              needsOwner: !!body.needsOwner,
+              skipNeedsOwnerNotif: !!body.skipNeedsOwnerNotif,
             });
             return {
               task: formatTaskForApi(data, out.task),
@@ -514,6 +590,7 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
             const c = addComment(data, taskRef, body.text, {
               by: resolveActor(data, body.by),
               agent: resolveRequestAgent(req, body),
+              needsOwner: !!body.needsOwner,
             });
             const t = requireTask(data, taskRef);
             return { comment: enrichComment(data, c), task: formatTaskForApi(data, t) };
