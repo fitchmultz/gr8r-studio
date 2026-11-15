@@ -823,6 +823,21 @@ test('syncGitHubPullRequests handles draft/ready/merge, stacked (1/n) PRs, Refs 
     { now: Date.parse('2026-11-15T02:30:00Z') },
   );
   assert.equal(tLate.status, 'review');
+  // Backfilling the prior PR's historical mergedAt (< follow-up createdAt) after the follow-up (1/2) merged stays review.
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 2,
+      title: `Prior (2/2) (${tLate.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: '2026-11-14T10:00:00Z',
+      updatedAt: '2026-11-15T03:00:00Z',
+    },
+    { now: Date.parse('2026-11-15T03:00:00Z') },
+  );
+  assert.equal(tLate.status, 'review');
 
   // Out-of-order same-cycle #6 (2/2) synced merged without timestamps while #5 (1/2) is open completes when #5 merges.
   const tOutOrder = createTask(state.data, { project: pid.id, title: 'Out-of-order (2/2) first', status: 'todo' }, { now: FIXED_NOW });

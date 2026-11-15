@@ -1825,8 +1825,7 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
       const becameOpenDraft = nextLink.state === 'open' && nextLink.draft && (!prev || prev.state !== 'open');
       const becameOpenReady =
         nextLink.state === 'open' && !nextLink.draft && (!prev || prev.state !== 'open' || prev.draft || (!prev.closing && nextLink.closing));
-      const gainedMergedAt = nextLink.state === 'merged' && prev?.state === 'merged' && !prev.mergedAt && !!nextLink.mergedAt;
-      const becameMerged = nextLink.state === 'merged' && (!prev || prev.state !== 'merged' || (!prev.closing && nextLink.closing) || gainedMergedAt);
+      const becameMerged = nextLink.state === 'merged' && (!prev || prev.state !== 'merged' || (!prev.closing && nextLink.closing));
       const becameClosedUnmerged = nextLink.state === 'closed' && prev?.state === 'open';
 
       if (becameOpenDraft) {
