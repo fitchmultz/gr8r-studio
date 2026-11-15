@@ -1097,7 +1097,7 @@ export async function runCli(argv, io = {}) {
 
   if (cmd === 'attach') {
     let targetRef = null;
-    let filePath = null;
+    let filePath;
     if (pos.length >= 3) {
       targetRef = pos[1];
       filePath = pos[2];

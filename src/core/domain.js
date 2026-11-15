@@ -1968,9 +1968,7 @@ export function searchWorkspace(data, query, opts = {}) {
     projects: visibleProjectsOf(data, actor).filter(p => has(p.name) || has(p.key) || has(p.desc)),
     people: (data.members || []).filter(m => has(m.name) || has(m.email) || has(m.title)),
     files: (data.files || []).filter(f => has(f.name) && canSeeProject(data, findProject(data, f.project), actor)),
-    docs: (data.docs || []).filter(
-      doc => (has(doc.title) || has(doc.slug) || has(doc.body)) && canSeeProject(data, findProject(data, doc.project), actor),
-    ),
+    docs: (data.docs || []).filter(doc => (has(doc.title) || has(doc.slug) || has(doc.body)) && canSeeProject(data, findProject(data, doc.project), actor)),
     comments: (data.comments || []).filter(c => {
       if (!has(c.text)) return false;
       const t = findTask(data, c.task);

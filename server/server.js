@@ -296,9 +296,10 @@ export function startServer({
         .toLowerCase();
       const forceDownload = url.searchParams.get('download') === '1' || !SAFE_INLINE_BLOB_MIMES.has(rawMime);
       const requestedName = url.searchParams.get('name');
-      const safeName = String(requestedName || meta.name || blobId)
-        .replace(/[/\\"\r\n]/g, '_')
-        .trim() || blobId;
+      const safeName =
+        String(requestedName || meta.name || blobId)
+          .replace(/[/\\"\r\n]/g, '_')
+          .trim() || blobId;
       const headers = {
         'content-type': meta.mime || 'application/octet-stream',
         'cache-control': 'private, max-age=31536000, immutable',
