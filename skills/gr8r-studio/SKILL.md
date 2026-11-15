@@ -9,19 +9,23 @@ Use the zero-dependency `gr8r` CLI to inspect and update Gr8r Studio workspaces 
 
 ## Running the CLI
 
-Run `gr8r` directly if it is on `PATH`, or invoke the bundled script relative to this skill directory:
+Run `gr8r` directly (installed at `~/.local/bin/gr8r`), or invoke the bundled script relative to this skill directory if `~/.local/bin` is not on `PATH`:
 
 ```bash
+gr8r status
+# Fallback when ~/.local/bin is not on PATH:
 node <SKILL_DIR>/../../cli/gr8r.js status
 ```
 
+In cloud `pi-durable` chats (which are not directly on the tailnet), run `gr8r` through `local_device` (`action: "execute"`, `tool: "bash"`, `args: { command: "gr8r ..." }`) on an online personal device (`alienarchy`, `m1-mbp`, or `mitchs-m5-mbp`).
+
 ## Endpoint, Auth, and Tailscale Proxy Resolution
 
-`gr8r` resolves connection settings automatically:
+Gr8r Studio runs on Alienarchy and is served privately across the tailnet via Tailscale Serve at `https://alienarchy.tail854973.ts.net:8443` (do not target `127.0.0.1:4180` from client devices). `gr8r` resolves connection settings automatically:
 
-1. **Server URL:** `--url <url>`, `GR8R_URL`, `~/.config/gr8r/config.json` (`"url"`), or `http://127.0.0.1:4180`.
-2. **Token:** `--token`, `GR8R_TOKEN`, `~/.config/gr8r/config.json`, or fetched automatically from `GET <url>/api/config` on private loopback / Tailscale Serve routes (refreshing once on `401`). Non-Tailscale routes withhold `/api/config` bootstrap and require `GR8R_TOKEN` or `--token`.
-3. **Proxy:** `--proxy`, `GR8R_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, or `~/.config/gr8r/config.json` (`"proxy"`), routed through Node's built-in `http.Agent` / `https.Agent` `proxyEnv` support. When a `*.ts.net` hostname cannot resolve directly (for example `https://alienarchy.tail854973.ts.net:8443` on split-Tailscale machines), `gr8r` automatically falls back to `http://127.0.0.1:1055`.
+1. **Server URL:** `--url <url>`, `GR8R_URL`, `~/.config/gr8r/config.json` (`"url"`), or `https://alienarchy.tail854973.ts.net:8443`.
+2. **Token:** `--token`, `GR8R_TOKEN`, `~/.config/gr8r/config.json`, or fetched automatically from `GET <url>/api/config` on private Tailscale Serve / loopback routes (refreshing once on `401`). Non-Tailscale routes withhold `/api/config` bootstrap and require `GR8R_TOKEN` or `--token`.
+3. **Proxy:** `--proxy`, `GR8R_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, or `~/.config/gr8r/config.json` (`"proxy"`), routed through Node's built-in `http.Agent` / `https.Agent` `proxyEnv` support. When a `*.ts.net` hostname cannot connect directly (for example on split-Tailscale machines running `ts-personal`), `gr8r` automatically falls back to `http://127.0.0.1:1055`.
 
 Check connectivity and configured defaults at any time:
 
