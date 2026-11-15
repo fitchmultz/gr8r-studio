@@ -1473,8 +1473,15 @@ test('live inbox fires on --needs-owner, @mentions, agent comments, and PR/agent
   addComment(state.data, t, 'Ping @owner.', { agent: 'pi:worker-1', now: FIXED_NOW + 35 });
   createTask(state.data, { project: p.id, title: 'Muted assign', assignee: state.data.me }, { agent: 'pi:worker-1', now: FIXED_NOW + 36 });
   assert.equal(queryInbox(state.data, { type: 'mention', unread: true }).length, 1);
+  assert.equal(queryInbox(state.data, { type: 'comment' }).length, 0);
   assert.equal(queryInbox(state.data, { type: 'assign' }).length, 0);
   state.data.notifPrefs = { ...state.data.notifPrefs, push_mention: true, push_assign: true };
+
+  // Claiming an unassigned ready task does not emit spurious "assigned you" notifications.
+  createTask(state.data, { project: p.id, title: 'Ready slice', assignee: null }, { now: FIXED_NOW + 37 });
+  const claimed = claimNextReadyTask(state.data, { project: p.id, assignee: 'none' }, { agent: 'pi:worker-2', now: FIXED_NOW + 38 });
+  assert.equal(claimed.claimedBy, 'pi:worker-2');
+  assert.equal(queryInbox(state.data, { type: 'assign' }).length, 0);
 
   // Explicit --needs-owner creates a blocker notification.
   addComment(state.data, t, 'Blocked on production DNS approval', { agent: 'pi:worker-1', needsOwner: true, now: FIXED_NOW + 40 });
@@ -1494,8 +1501,8 @@ test('live inbox fires on --needs-owner, @mentions, agent comments, and PR/agent
 
   // Marking individual and all notifications read updates unread counts; deleting the task cascades its notifications.
   setNotifRead(state.data, blockers[0].id, true);
-  assert.equal(queryInbox(state.data, { unread: true }).length, 4);
-  assert.equal(markAllNotifsRead(state.data, { project: p.id }), 4);
+  assert.equal(queryInbox(state.data, { unread: true }).length, 3);
+  assert.equal(markAllNotifsRead(state.data, { project: p.id }), 3);
   assert.equal(queryInbox(state.data, { unread: true }).length, 0);
   deleteTasks(
     state.data,

@@ -407,7 +407,6 @@ export const NOTIF_TYPES = ['blocker', 'mention', 'assign', 'comment', 'update']
 
 export function mentionsWorkspaceOwner(data, rawText) {
   const np = data.notifPrefs || {};
-  if (np.push_mention === false) return false;
   if (np.mention_all === false && !np.mention_ws && np.mention_team === false) return false;
   const stripped = stripCodeAndComments(String(rawText ?? ''));
   const tokens = [...stripped.matchAll(/(?:^|[^\w])@([a-z0-9._-]+)/gi)].map(m => m[1].replace(/[._-]+$/, '').toLowerCase()).filter(Boolean);
@@ -917,7 +916,9 @@ export function createTask(data, fields = {}, opts = {}) {
     } else if (isExternalCreate) {
       const descMd = htmlToMarkdown(t.desc || '');
       if (descMd && mentionsWorkspaceOwner(data, descMd)) {
-        pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: stripHtml(t.desc) || t.title }, { now });
+        if (data.notifPrefs?.push_mention !== false) {
+          pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: stripHtml(t.desc) || t.title }, { now });
+        }
       } else if (assignee && assignee === data.me && data.notifPrefs?.assign_self !== false && data.notifPrefs?.push_assign !== false) {
         pushNotif(data, { type: 'assign', by, agent, task: t, text: 'assigned you', snippet: t.title }, { now });
       }
@@ -1141,14 +1142,28 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
       logActivity(data, nv ? 'claimed' : 'released', t, nv ? `(${nv})` : '', { by, agent: nv || agent, now });
     } else if (k === 'assignee') {
       logActivity(data, 'assigned', t, nv ? `to ${findMember(data, nv)?.name}` : '(unassigned)', { by, agent, now });
-      if (isExternalActor && nv && nv === data.me && data.notifPrefs?.assign_self !== false && data.notifPrefs?.push_assign !== false && !opts.needsOwner) {
+      if (
+        isExternalActor &&
+        !opts.skipAssignNotif &&
+        nv &&
+        nv === data.me &&
+        data.notifPrefs?.assign_self !== false &&
+        data.notifPrefs?.push_assign !== false &&
+        !opts.needsOwner
+      ) {
         pushNotif(data, { type: 'assign', by, agent, task: t, text: 'assigned you', snippet: t.title }, { now });
       }
     } else if (k === 'desc') {
       const prevMd = htmlToMarkdown(old || '');
       const nextMd = htmlToMarkdown(nv || '');
       const nextPlain = stripHtml(nv || '');
-      if (isExternalActor && !opts.needsOwner && !mentionsWorkspaceOwner(data, prevMd) && mentionsWorkspaceOwner(data, nextMd)) {
+      if (
+        isExternalActor &&
+        !opts.needsOwner &&
+        data.notifPrefs?.push_mention !== false &&
+        !mentionsWorkspaceOwner(data, prevMd) &&
+        mentionsWorkspaceOwner(data, nextMd)
+      ) {
         pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: nextPlain }, { now });
       }
     } else if (k === 'priority') logActivity(data, 'changed priority of', t, `to ${PR[nv].name}`, { by, agent, now });
@@ -1228,13 +1243,14 @@ export function claimTask(data, taskOrRef, opts = {}) {
   } else if (t.status === 'backlog' || t.status === 'todo' || (isClosedStatus(t.status) && opts.force)) {
     patch.status = 'progress';
   }
+  const autoAssigned = opts.assignee === undefined && !t.assignee;
   if (opts.assignee !== undefined) {
     patch.assignee = opts.assignee;
   } else if (!t.assignee) {
     patch.assignee = validMemberId(data, by) || data.me;
   }
   if (Object.keys(patch).length) {
-    applyTaskPatch(data, t, patch, { by, agent, now });
+    applyTaskPatch(data, t, patch, { by, agent, now, skipAssignNotif: autoAssigned });
   }
   t.claimedBy = agent;
   t.claimedAt = now;
@@ -1400,7 +1416,9 @@ export function addComment(data, taskOrRef, text, opts = {}) {
   if (needsOwner) {
     pushNotif(data, { type: 'blocker', by, agent, task: t, text: 'needs your input on', snippet: txt }, { now });
   } else if (isExternal && mentionsWorkspaceOwner(data, txt)) {
-    pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: txt }, { now });
+    if (data.notifPrefs?.push_mention !== false) {
+      pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: txt }, { now });
+    }
   } else if (isExternal && data.notifPrefs?.push_comment !== false && (Boolean(agent) || t.assignee === data.me)) {
     pushNotif(data, { type: 'comment', by, agent, task: t, text: 'commented on', snippet: txt }, { now });
   }
