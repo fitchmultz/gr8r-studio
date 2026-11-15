@@ -22,7 +22,7 @@
     "test": "node --test 'server/test/*.test.js'"
   },
   "engines": {
-    "node": ">=22.21.0"
+    "node": ">=24.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

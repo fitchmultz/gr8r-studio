@@ -10,7 +10,7 @@ UI framework and no runtime dependency.
 
 ## Getting started
 
-Requires Node.js 20.19+ or 22.12+ (`.nvmrc` pins 22).
+Requires Node.js 24+ (`.nvmrc` pins 24).
 
 ```bash
 npm install
