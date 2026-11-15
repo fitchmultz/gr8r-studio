@@ -456,7 +456,8 @@ test('diffWorkspacePatch and applyWorkspacePatch merge concurrent field, subtask
 });
 
 test('syncGitHubPullRequests handles draft/ready/merge, stacked (1/n) PRs, Refs vs Closes, prose safety, and idempotency', async () => {
-  const { createDefaultState, createProject, createTask, duplicateTask, searchWorkspace, syncGitHubPullRequests } = await import('../../src/core/domain.js');
+  const { applyTaskPatch, createDefaultState, createProject, createTask, duplicateTask, searchWorkspace, syncGitHubPullRequests } =
+    await import('../../src/core/domain.js');
   const state = createDefaultState(FIXED_NOW);
   const pid = createProject(state.data, { name: 'Pi Durable', key: 'PID', status: 'active' }, { now: FIXED_NOW });
   const t1 = createTask(state.data, { project: pid.id, title: 'Slice 1', status: 'backlog' }, { now: FIXED_NOW });
@@ -630,4 +631,79 @@ test('syncGitHubPullRequests handles draft/ready/merge, stacked (1/n) PRs, Refs 
     { now: FIXED_NOW + 900 },
   );
   assert.equal(tRecur.status, 'review');
+
+  // 6. Prior completed (1/2)+(2/2) stack whose (2/2) later gets a comment/label updatedAt bump (and CLI flag-shape
+  //    new (1/2) without createdAt) still keeps a new follow-up (1/2) incomplete until its own (2/2) merges.
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 203,
+      title: `Audit follow-up (2/2) (${tRecur.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T02:05:00Z',
+      updatedAt: '2026-11-15T02:20:00Z',
+    },
+    { now: FIXED_NOW + 1000 },
+  );
+  assert.equal(tRecur.status, 'done');
+
+  // Open new stack C (1/2), then bump old #203 (2/2) updatedAt via post-merge comment/label, then merge C (1/2).
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 210,
+      title: `Second stack (1/2) (${tRecur.key})`,
+      state: 'open',
+      draft: false,
+      createdAt: '2026-11-15T03:00:00Z',
+      updatedAt: '2026-11-15T03:00:00Z',
+    },
+    { now: FIXED_NOW + 1100 },
+  );
+  assert.equal(tRecur.status, 'review');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 203,
+      title: `Audit follow-up (2/2) (${tRecur.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T02:05:00Z',
+      updatedAt: '2026-11-15T03:05:00Z',
+    },
+    { now: FIXED_NOW + 1200 },
+  );
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 210,
+      title: `Second stack (1/2) (${tRecur.key})`,
+      state: 'merged',
+      merged: true,
+      createdAt: '2026-11-15T03:00:00Z',
+      updatedAt: '2026-11-15T03:10:00Z',
+    },
+    { now: FIXED_NOW + 1300 },
+  );
+  assert.equal(tRecur.status, 'review');
+
+  // Also verify timestamp-less CLI shape on a reopened task with a pre-existing merged (2/2).
+  applyTaskPatch(state.data, t1.id, { status: 'review' }, { now: FIXED_NOW + 1400 });
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'fitchmultz/pi-durable',
+      number: 150,
+      title: `CLI flag stack (1/2) (${t1.key})`,
+      state: 'merged',
+      merged: true,
+    },
+    { now: FIXED_NOW + 1400 },
+  );
+  assert.equal(t1.status, 'review');
 });

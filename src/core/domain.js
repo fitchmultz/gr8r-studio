@@ -494,6 +494,12 @@ export function normalizeTaskPrLink(raw) {
   if (typeof raw.createdAt === 'number' && Number.isFinite(raw.createdAt) && raw.createdAt > 0) {
     out.createdAt = raw.createdAt;
   }
+  if (typeof raw.firstSeenAt === 'number' && Number.isFinite(raw.firstSeenAt) && raw.firstSeenAt > 0) {
+    out.firstSeenAt = raw.firstSeenAt;
+  }
+  if (state === 'merged' && typeof raw.mergedAt === 'number' && Number.isFinite(raw.mergedAt) && raw.mergedAt > 0) {
+    out.mergedAt = raw.mergedAt;
+  }
   return out;
 }
 
@@ -1681,6 +1687,7 @@ export function normalizeIncomingPullRequest(raw) {
     draft,
     updatedAt: parseTimestampMs(pr.updatedAt ?? pr.updated_at ?? raw.updatedAt),
     createdAt: parseTimestampMs(pr.createdAt ?? pr.created_at ?? raw.createdAt),
+    mergedAt: parseTimestampMs(pr.mergedAt ?? pr.merged_at ?? raw.mergedAt),
   };
 }
 
@@ -1720,14 +1727,18 @@ export function extractPullRequestTaskRefs(data, pr) {
   return refs;
 }
 
-function isIncompleteStackMerge(taskPrs, mergedLink) {
+function isIncompleteStackMerge(taskPrs, mergedLink, preExistingMergedKeys = new Set()) {
   const part = parseStackPart(mergedLink.title);
   if (!part || part.index >= part.total) return false;
+  const mergedStart = mergedLink.createdAt || mergedLink.firstSeenAt || 0;
   return !taskPrs.some(other => {
     if (other.state !== 'merged' || !other.closing) return false;
     const otherPart = parseStackPart(other.title);
     if (!otherPart) return false;
-    if (mergedLink.createdAt && other.updatedAt && other.updatedAt < mergedLink.createdAt) return false;
+    const otherKey = `${other.repo.toLowerCase()}#${other.number}`;
+    if (!mergedLink.createdAt && preExistingMergedKeys.has(otherKey)) return false;
+    const otherMergedAt = other.mergedAt || other.updatedAt || 0;
+    if (mergedStart && otherMergedAt && otherMergedAt < mergedStart) return false;
     return otherPart.total === part.total && otherPart.index >= part.total;
   });
 }
@@ -1737,6 +1748,9 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
   const by = opts.by ?? data.me;
   const list = Array.isArray(rawInputs) ? rawInputs : [rawInputs];
   const normalized = list.map(normalizeIncomingPullRequest).sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0));
+  const preExistingMergedByTask = new Map(
+    (data.tasks || []).map(t => [t.id, new Set((t.prs || []).filter(p => p.state === 'merged').map(p => `${p.repo.toLowerCase()}#${p.number}`))]),
+  );
 
   const touchedIds = new Set();
   let changed = false;
@@ -1776,6 +1790,8 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
         closing: refInfo.closing,
         updatedAt: incoming.updatedAt,
         createdAt: incoming.createdAt || prev?.createdAt,
+        firstSeenAt: prev?.firstSeenAt || incoming.createdAt || now,
+        mergedAt: incoming.state === 'merged' ? (prev?.state === 'merged' && prev?.mergedAt) || incoming.mergedAt || incoming.updatedAt || now : undefined,
       });
       if (!nextLink || deepEqual(prev, nextLink)) continue;
 
@@ -1812,7 +1828,8 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
       } else if (becameMerged && nextLink.closing) {
         const hasOpenPr = t.prs.some(x => x.state === 'open');
         if (!hasOpenPr) {
-          if (isIncompleteStackMerge(t.prs, nextLink)) {
+          const preMerged = !prev ? preExistingMergedByTask.get(t.id) : new Set();
+          if (isIncompleteStackMerge(t.prs, nextLink, preMerged)) {
             if (t.status === 'backlog' || t.status === 'todo') applyTaskPatch(data, t, { status: 'progress' }, { by, now });
           } else if (t.status !== 'done') {
             applyTaskPatch(data, t, { status: 'done' }, { by, now });
