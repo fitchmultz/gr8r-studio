@@ -1179,6 +1179,46 @@ test('canceled status excludes tasks from open/overdue counts and progress denom
   assert.equal(tReopened.status, 'todo');
   assert.equal(state.data.tasks.length, countBeforeResync);
 
+  // Two-PR canceled task: closing PR #80 merges after canceledAt while sibling PR #81 is still open;
+  // once #81 closes unmerged, the deferred post-cancel merge completes the task deterministically.
+  const tSibling = createTask(state.data, { project: p.id, title: 'Sibling PR slice', status: 'progress' }, { now: FIXED_NOW });
+  syncGitHubPullRequests(
+    state.data,
+    [
+      { repo: 'acme/app', number: 80, title: `feat: attempt A (${tSibling.key})`, state: 'open' },
+      { repo: 'acme/app', number: 81, title: `feat: attempt B (${tSibling.key})`, state: 'open' },
+    ],
+    { now: FIXED_NOW + 500 },
+  );
+  applyTaskPatch(state.data, tSibling, { status: 'canceled' }, { now: FIXED_NOW + 1000 });
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/app',
+      number: 80,
+      title: `feat: attempt A (${tSibling.key})`,
+      state: 'merged',
+      merged: true,
+      mergedAt: new Date(FIXED_NOW + 1800).toISOString(),
+      updatedAt: new Date(FIXED_NOW + 2000).toISOString(),
+    },
+    { now: FIXED_NOW + 2000 },
+  );
+  assert.equal(tSibling.status, 'canceled');
+  syncGitHubPullRequests(
+    state.data,
+    {
+      repo: 'acme/app',
+      number: 81,
+      title: `feat: attempt B (${tSibling.key})`,
+      state: 'closed',
+      merged: false,
+      updatedAt: new Date(FIXED_NOW + 3000).toISOString(),
+    },
+    { now: FIXED_NOW + 3000 },
+  );
+  assert.equal(tSibling.status, 'done');
+
   syncGitHubPullRequests(
     state.data,
     {
