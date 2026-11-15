@@ -33,12 +33,14 @@ let auth = TOKEN ? { authorization: 'Bearer ' + TOKEN } : {};
 const syncOn = !!BASE;
 let authWarned = false;
 let promptShown = false;
+let awaitingManualToken = false;
 
 const isTokenModalOpen = () => S.ui.modals.some(m => m.id === 'sync-auth');
 
 function setToken(tok) {
   TOKEN = tok || '';
   auth = TOKEN ? { authorization: 'Bearer ' + TOKEN } : {};
+  if (TOKEN) awaitingManualToken = false;
 }
 
 function notifySignInNeeded(msg = 'Sync is paused until you sign in.') {
@@ -138,8 +140,10 @@ async function loadConfig({ fromUserSave = false } = {}) {
     if (!r.ok) return false;
     const j = await r.json();
     if (j.authRequired && !j.token) {
+      if (TOKEN !== sentToken) return !!TOKEN;
       if (sentToken && readSavedToken() === sentToken) writeSavedToken('');
       setToken('');
+      awaitingManualToken = true;
       requestTokenIfNeeded({ fromUserSave });
       return false;
     }
@@ -277,9 +281,11 @@ async function connectEvents() {
   } finally {
     if (eventAbort === ctrl) {
       eventAbort = null;
-      const wait = retryDelay;
-      retryDelay = Math.min(5000, retryDelay * 2);
-      eventRetryT = setTimeout(connectEvents, wait);
+      if (!awaitingManualToken) {
+        const wait = retryDelay;
+        retryDelay = Math.min(5000, retryDelay * 2);
+        eventRetryT = setTimeout(connectEvents, wait);
+      }
     }
   }
 }
