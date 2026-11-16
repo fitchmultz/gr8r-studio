@@ -38,6 +38,7 @@ import {
   formatTaskForApi,
   isWorkspacePatchEmpty,
   markAllNotifsRead,
+  mentionsWorkspaceOwner,
   normalizeAgentName,
   promoteSubtask,
   pushNotif,
@@ -101,6 +102,9 @@ function resolveRequestAgent(req, body) {
 
 function mapApiTaskInput(body) {
   if (!body || typeof body !== 'object') return body;
+  if (Array.isArray(body.dep) && body.addDeps === undefined && body.deps === undefined) {
+    body = { ...body, addDeps: body.dep };
+  }
   if (body.desc !== undefined && body.descMarkdown === undefined && body.descHtml === undefined) {
     const { desc, ...rest } = body;
     return { ...rest, descMarkdown: desc };
@@ -152,6 +156,11 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
     }
     const draft = cur.state ? structuredClone(cur.state) : createDefaultState();
     const out = fn(draft.data, body, draft);
+    if (out?.__unchanged && cur.state) {
+      const rest = { ...out };
+      delete rest.__unchanged;
+      return { rev: cur.rev, ...rest };
+    }
     const committed = commitState(draft);
     return { rev: committed.rev, ...out };
   };
@@ -594,15 +603,38 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
         }
         if (method === 'PATCH') {
           const result = await mutate((data, body) => {
-            const out = applyTaskPatch(data, ref, mapApiTaskInput(body), {
-              by: resolveActor(data, body.by),
-              agent: resolveRequestAgent(req, body),
+            const { comment: rawComment, ...patchBody } = body;
+            const hasComment = rawComment !== undefined;
+            if (hasComment && (typeof rawComment !== 'string' || !rawComment.trim())) {
+              throw new DomainError('Comment text cannot be empty', 400);
+            }
+            const by = resolveActor(data, body.by);
+            const agent = resolveRequestAgent(req, body);
+            const notifsBeforePatch = (data.notifs || []).length;
+            const out = applyTaskPatch(data, ref, mapApiTaskInput(patchBody), {
+              by,
+              agent,
               needsOwner: !!body.needsOwner,
-              skipNeedsOwnerNotif: !!body.skipNeedsOwnerNotif,
+              skipNeedsOwnerNotif: hasComment ? true : !!body.skipNeedsOwnerNotif,
+              skipStatusNotif: hasComment ? Boolean(body.skipStatusNotif || data.notifPrefs?.push_comment !== false) : !!body.skipStatusNotif,
+              ...(hasComment ? { snippet: rawComment.trim() } : {}),
             });
+            const statusEmittedNotif = (data.notifs || []).length > notifsBeforePatch;
+            const comment = hasComment
+              ? enrichComment(
+                  data,
+                  addComment(data, out.task, rawComment, {
+                    by,
+                    agent,
+                    needsOwner: !!body.needsOwner,
+                    skipNotif: statusEmittedNotif && !body.needsOwner && !mentionsWorkspaceOwner(data, rawComment),
+                  }),
+                )
+              : undefined;
             return {
               task: formatTaskForApi(data, out.task),
               spawned: out.spawned ? formatTaskForApi(data, out.spawned) : null,
+              ...(comment ? { comment } : {}),
             };
           });
           if (result) send(res, 200, result);
@@ -624,19 +656,24 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
         const result = await mutate((data, body) => {
           const by = resolveActor(data, body.by);
           const agent = resolveRequestAgent(req, body);
-          const t = isClaim
-            ? claimTask(data, taskRef, {
-                by,
-                agent,
-                force: !!body.force,
-                status: body.status,
-                assignee: body.assignee,
-              })
-            : releaseTask(data, taskRef, {
-                by,
-                agent,
-                status: body.status,
-              });
+          if (isClaim) {
+            const before = resolveTask(data, taskRef);
+            const beforeSnap = before ? JSON.stringify(before) : null;
+            const t = claimTask(data, taskRef, {
+              by,
+              agent,
+              force: !!body.force,
+              status: body.status,
+              assignee: body.assignee,
+            });
+            const unchanged = beforeSnap !== null && beforeSnap === JSON.stringify(t);
+            return { ...(unchanged ? { __unchanged: true } : {}), task: formatTaskForApi(data, t) };
+          }
+          const t = releaseTask(data, taskRef, {
+            by,
+            agent,
+            status: body.status,
+          });
           return { task: formatTaskForApi(data, t) };
         });
         if (result) send(res, 200, result);

@@ -1406,9 +1406,15 @@ test('agent claims, --ready queue ordering, dependency unblocking, and claim cle
   assert.equal(firstClaimed.claimedBy, 'pi:worker-1');
 
   // Idempotent re-claim by the same agent succeeds; competing agent gets 409 unless --force.
-  assert.equal(claimTask(state.data, urgentReady, { agent: 'pi:worker-1', now: FIXED_NOW + 30 }).claimedBy, 'pi:worker-1');
+  const actLenBeforeReclaim = state.data.activity.length;
+  const reclaimedSame = claimTask(state.data, urgentReady, { agent: 'pi:worker-1', now: FIXED_NOW + 30 });
+  assert.equal(reclaimedSame.claimedBy, 'pi:worker-1');
+  assert.equal(reclaimedSame.claimedAt, FIXED_NOW + 20);
+  assert.equal(reclaimedSame.updated, FIXED_NOW + 20);
+  assert.equal(state.data.activity.length, actLenBeforeReclaim);
   assert.throws(() => claimTask(state.data, urgentReady, { agent: 'pi:worker-2', now: FIXED_NOW + 40 }), DomainError);
   assert.equal(claimTask(state.data, urgentReady, { agent: 'pi:worker-2', force: true, now: FIXED_NOW + 50 }).claimedBy, 'pi:worker-2');
+  assert.equal(urgentReady.claimedAt, FIXED_NOW + 50);
 
   // Next worker gets blocker; third worker sees empty queue (null).
   const secondClaimed = claimNextReadyTask(state.data, { project: p.id }, { agent: 'pi:worker-3', now: FIXED_NOW + 60 });
@@ -1489,9 +1495,20 @@ test('live inbox fires on --needs-owner, @mentions, agent comments, and PR/agent
     { project: p.id, title: 'Assigned handoff', assignee: state.data.me, descMarkdown: 'Please review @owner.' },
     { agent: 'pi:worker-1', now: FIXED_NOW + 36.5 },
   );
-  assert.equal(queryInbox(state.data, { type: 'assign', task: assignedWithMention.id }).length, 1);
+  const assignNotifs = queryInbox(state.data, { type: 'assign', task: assignedWithMention.id });
+  assert.equal(assignNotifs.length, 1);
+  assert.equal(assignNotifs[0].snippet, '');
   deleteTasks(state.data, [assignedWithMention.id]);
   state.data.notifPrefs = { ...state.data.notifPrefs, push_mention: true, push_assign: true };
+
+  // skipStatusNotif suppresses status update notification; default done/canceled omit redundant snippets.
+  const tNoStatusNotif = createTask(state.data, { project: p.id, title: 'Atomic comment close' }, { now: FIXED_NOW + 36.7 });
+  applyTaskPatch(state.data, tNoStatusNotif, { status: 'done' }, { agent: 'pi:worker-1', skipStatusNotif: true, now: FIXED_NOW + 36.8 });
+  assert.equal(queryInbox(state.data, { task: tNoStatusNotif.id }).length, 0);
+  const tCleanDone = createTask(state.data, { project: p.id, title: 'Clean done snippet' }, { now: FIXED_NOW + 36.85 });
+  applyTaskPatch(state.data, tCleanDone, { status: 'done' }, { agent: 'pi:worker-1', now: FIXED_NOW + 36.9 });
+  assert.equal(queryInbox(state.data, { task: tCleanDone.id })[0].snippet, '');
+  deleteTasks(state.data, [tNoStatusNotif.id, tCleanDone.id]);
 
   // Claiming an unassigned ready task does not emit spurious "assigned you" notifications.
   createTask(state.data, { project: p.id, title: 'Ready slice', assignee: null }, { now: FIXED_NOW + 37 });
@@ -1539,6 +1556,7 @@ test('persisted attachment records and Markdown Project Docs round-trip, search,
     { task: t.key, name: 'qa-shot.png', blobId: sha, sizeBytes: 4096, mime: 'image/png', url: 'blob:http://localhost/dead' },
     { agent: 'pi:qa-agent', now: FIXED_NOW + 10 },
   );
+  assert.equal(state.data.activity[0].extra, '“qa-shot.png”');
   assert.equal(fileRec.url, `/api/blobs/${sha}?name=qa-shot.png&mime=image%2Fpng`);
   assert.equal(t.attachments.length, 1);
   assert.equal(t.attachments[0].blobId, sha);
@@ -1548,7 +1566,15 @@ test('persisted attachment records and Markdown Project Docs round-trip, search,
   assert.equal(localOnly.url, undefined);
 
   deleteWorkspaceFile(state.data, fileRec.id, { now: FIXED_NOW + 20 });
+  assert.equal(state.data.activity[0].extra, '“qa-shot.png”');
   assert.equal(t.attachments.length, 0);
+
+  // formatTaskForApi exposes reverse dependency keys via blocksKeys for non-archived dependents.
+  const blocker = createTask(state.data, { project: p.id, title: 'Blocker task' }, { now: FIXED_NOW + 21 });
+  const dependent = createTask(state.data, { project: p.id, title: 'Blocked task', deps: [blocker.id] }, { now: FIXED_NOW + 22 });
+  assert.deepEqual(formatTaskForApi(state.data, blocker).blocksKeys, [dependent.key]);
+  applyTaskPatch(state.data, dependent, { archived: true }, { now: FIXED_NOW + 23 });
+  assert.deepEqual(formatTaskForApi(state.data, blocker).blocksKeys, []);
 
   const notesDoc = createDoc(state.data, { project: p.id, title: 'Notes', bodyMarkdown: 'Existing base doc' }, { now: FIXED_NOW + 25 });
   const snapBeforeDoc = structuredClone(state);

@@ -281,6 +281,59 @@ test('domain API applies atomic project, task, subtask, comment, search, and act
   assert.equal(promoted.json.task.key, 'PID-203');
   assert.equal(promoted.json.parentTask.subtaskCount, 0);
 
+  // Atomic PATCH /tasks/:ref with comment bumps rev once, emits only one inbox notif, and validates empty comments.
+  const badComment = await call('PATCH', '/api/tasks/PID-202', { status: 'done', comment: '   ' });
+  assert.equal(badComment.status, 400);
+  assert.equal(badComment.json.error, 'Comment text cannot be empty');
+
+  const revBeforePatch = (await call('GET', '/api/tasks/PID-202')).json.rev;
+  const atomicDone = await fetch(base + '/api/tasks/PID-202', {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json', 'x-gr8r-agent': 'pi:atomic-worker' },
+    body: JSON.stringify({ status: 'done', comment: 'Merged PR #77 and verified' }),
+  });
+  assert.equal(atomicDone.status, 200);
+  const atomicJson = await atomicDone.json();
+  assert.equal(atomicJson.rev, revBeforePatch + 1);
+  assert.equal(atomicJson.task.status, 'done');
+  assert.equal(atomicJson.task.commentCount, 1);
+  assert.equal(atomicJson.comment.text, 'Merged PR #77 and verified');
+  const pid202Inbox = await call('GET', `/api/inbox?task=PID-202`);
+  assert.equal(pid202Inbox.json.notifications.length, 1);
+  assert.equal(pid202Inbox.json.notifications[0].type, 'comment');
+  assert.equal(pid202Inbox.json.notifications[0].snippet, 'Merged PR #77 and verified');
+
+  // needsOwner + comment in one PATCH emits a single blocker notification with the comment snippet.
+  const atomicBlocker = await fetch(base + '/api/tasks/PID-203', {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json', 'x-gr8r-agent': 'pi:atomic-worker' },
+    body: JSON.stringify({ status: 'progress', needsOwner: true, comment: 'Need API key rotation sign-off' }),
+  });
+  assert.equal(atomicBlocker.status, 200);
+  const pid203Inbox = await call('GET', '/api/inbox?task=PID-203');
+  assert.equal(pid203Inbox.json.notifications.length, 1);
+  assert.equal(pid203Inbox.json.notifications[0].type, 'blocker');
+  assert.equal(pid203Inbox.json.notifications[0].snippet, 'Need API key rotation sign-off');
+
+  // Idempotent POST /api/tasks/:ref/claim does not bump rev on identical re-claim.
+  const claimFirst = await fetch(base + '/api/tasks/PID-203/claim', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json', 'x-gr8r-agent': 'pi:claimer' },
+    body: JSON.stringify({}),
+  });
+  assert.equal(claimFirst.status, 200);
+  const claimFirstJson = await claimFirst.json();
+  const claimSecond = await fetch(base + '/api/tasks/PID-203/claim', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json', 'x-gr8r-agent': 'pi:claimer' },
+    body: JSON.stringify({}),
+  });
+  assert.equal(claimSecond.status, 200);
+  const claimSecondJson = await claimSecond.json();
+  assert.equal(claimSecondJson.rev, claimFirstJson.rev);
+  assert.equal(claimSecondJson.task.claimedAt, claimFirstJson.task.claimedAt);
+  assert.equal(claimSecondJson.task.updated, claimFirstJson.task.updated);
+
   const search = await call('GET', '/api/search?q=UsageDoc');
   assert.equal(search.status, 200);
   assert.deepEqual(
@@ -362,6 +415,28 @@ test('streams revision events over GET /api/events for both domain mutations and
     body: JSON.stringify({ project: 'SSE', title: 'Instant tab update' }),
   });
   assert.equal(await nextRev(), 2);
+
+  // Idempotent re-claim skips commitState and emits no SSE rev frame.
+  await fetch(base + '/api/tasks/SSE-201/claim', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json', 'x-gr8r-agent': 'pi:sse-worker' },
+    body: JSON.stringify({}),
+  });
+  assert.equal(await nextRev(), 3);
+  const noopClaim = await (
+    await fetch(base + '/api/tasks/SSE-201/claim', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json', 'x-gr8r-agent': 'pi:sse-worker' },
+      body: JSON.stringify({}),
+    })
+  ).json();
+  assert.equal(noopClaim.rev, 3);
+  await fetch(base + '/api/tasks', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ project: 'SSE', title: 'After noop claim' }),
+  });
+  assert.equal(await nextRev(), 4);
 });
 
 test('archived project detail and project-scoped task queries keep summary counts and task list aligned', async t => {

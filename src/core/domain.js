@@ -829,9 +829,9 @@ export function attachFileRecord(data, fields = {}, opts = {}) {
   if (taskObj) {
     taskObj.attachments = Array.isArray(taskObj.attachments) ? taskObj.attachments : [];
     taskObj.attachments.push({ ...base });
-    logActivity(data, 'added a file to', taskObj, name, { by, agent, now });
+    logActivity(data, 'added a file to', taskObj, `“${name}”`, { by, agent, now });
   } else {
-    logActivity(data, 'uploaded file', null, name, { by, agent, projectId: projObj.id, now });
+    logActivity(data, 'uploaded file', null, `“${name}”`, { by, agent, projectId: projObj.id, now });
   }
   return fileRec;
 }
@@ -879,7 +879,7 @@ export function deleteWorkspaceFile(data, fileId, opts = {}) {
     const t = findTask(data, removed.task);
     if (t && Array.isArray(t.attachments)) {
       t.attachments = t.attachments.filter(a => a.id !== removed.id && (a.id || a.name !== removed.name));
-      logActivity(data, 'removed a file from', t, removed.name, { by, agent, now });
+      logActivity(data, 'removed a file from', t, `“${removed.name}”`, { by, agent, now });
     }
   }
   return removed;
@@ -1273,7 +1273,7 @@ export function createTask(data, fields = {}, opts = {}) {
       if (data.notifPrefs?.push_mention !== false && descMd && mentionsWorkspaceOwner(data, descMd)) {
         pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: stripHtml(t.desc) || t.title }, { now });
       } else if (assignee && assignee === data.me && data.notifPrefs?.assign_self !== false && data.notifPrefs?.push_assign !== false) {
-        pushNotif(data, { type: 'assign', by, agent, task: t, text: 'assigned you', snippet: t.title }, { now });
+        pushNotif(data, { type: 'assign', by, agent, task: t, text: 'assigned you', snippet: '' }, { now });
       }
     }
   }
@@ -1465,13 +1465,13 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
         if (old === 'canceled') t.canceledAt = null;
         logActivity(data, 'moved', t, `from ${ST[old].name} to ${ST[nv].name}`, { by, agent, now });
       }
-      if (isExternalActor && data.notifPrefs?.assign_status !== false && !opts.needsOwner) {
+      if (isExternalActor && data.notifPrefs?.assign_status !== false && !opts.needsOwner && !opts.skipStatusNotif) {
         if (nv === 'review') {
           pushNotif(data, { type: 'update', by, agent, task: t, text: 'moved to In Review:', snippet: opts.snippet || 'Ready for review' }, { now });
         } else if (nv === 'done') {
-          pushNotif(data, { type: 'update', by, agent, task: t, text: 'completed', snippet: opts.snippet || 'Marked done' }, { now });
+          pushNotif(data, { type: 'update', by, agent, task: t, text: 'completed', snippet: opts.snippet || '' }, { now });
         } else if (nv === 'canceled') {
-          pushNotif(data, { type: 'update', by, agent, task: t, text: 'canceled', snippet: opts.snippet || 'Canceled' }, { now });
+          pushNotif(data, { type: 'update', by, agent, task: t, text: 'canceled', snippet: opts.snippet || '' }, { now });
         }
       }
       if (nv === 'done' && t.recur && t.due) {
@@ -1522,7 +1522,7 @@ export function applyTaskPatch(data, taskOrRef, rawPatch = {}, opts = {}) {
         data.notifPrefs?.push_assign !== false &&
         !opts.needsOwner
       ) {
-        pushNotif(data, { type: 'assign', by, agent, task: t, text: 'assigned you', snippet: t.title }, { now });
+        pushNotif(data, { type: 'assign', by, agent, task: t, text: 'assigned you', snippet: '' }, { now });
       }
     } else if (k === 'desc') {
       const prevMd = htmlToMarkdown(old || '');
@@ -1623,8 +1623,12 @@ export function claimTask(data, taskOrRef, opts = {}) {
   } else if (!t.assignee) {
     patch.assignee = validMemberId(data, by) || data.me;
   }
-  if (Object.keys(patch).length) {
-    applyTaskPatch(data, t, patch, { by, agent, now, skipAssignNotif: autoAssigned });
+  if (prevClaim === agent && !opts.force && !Object.keys(patch).length) {
+    return t;
+  }
+  const patchRes = Object.keys(patch).length ? applyTaskPatch(data, t, patch, { by, agent, now, skipAssignNotif: autoAssigned }) : { changed: false };
+  if (prevClaim === agent && !opts.force && !patchRes.changed) {
+    return t;
   }
   t.claimedBy = agent;
   t.claimedAt = now;
@@ -1787,14 +1791,16 @@ export function addComment(data, taskOrRef, text, opts = {}) {
   data.comments.push(c);
   logActivity(data, 'commented on', t, '', { by, agent, now });
   const isExternal = Boolean(agent) || by !== data.me;
-  if (needsOwner) {
-    pushNotif(data, { type: 'blocker', by, agent, task: t, text: 'needs your input on', snippet: txt }, { now });
-  } else if (isExternal && mentionsWorkspaceOwner(data, txt)) {
-    if (data.notifPrefs?.push_mention !== false) {
-      pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: txt }, { now });
+  if (!opts.skipNotif) {
+    if (needsOwner) {
+      pushNotif(data, { type: 'blocker', by, agent, task: t, text: 'needs your input on', snippet: txt }, { now });
+    } else if (isExternal && mentionsWorkspaceOwner(data, txt)) {
+      if (data.notifPrefs?.push_mention !== false) {
+        pushNotif(data, { type: 'mention', by, agent, task: t, text: 'mentioned you in', snippet: txt }, { now });
+      }
+    } else if (isExternal && data.notifPrefs?.push_comment !== false && (Boolean(agent) || t.assignee === data.me)) {
+      pushNotif(data, { type: 'comment', by, agent, task: t, text: 'commented on', snippet: txt }, { now });
     }
-  } else if (isExternal && data.notifPrefs?.push_comment !== false && (Boolean(agent) || t.assignee === data.me)) {
-    pushNotif(data, { type: 'comment', by, agent, task: t, text: 'commented on', snippet: txt }, { now });
   }
   return c;
 }
@@ -1839,6 +1845,7 @@ export function formatTaskForApi(data, t) {
     projectName: p?.name || null,
     assigneeName: findMember(data, t.assignee)?.name || null,
     depKeys: (t.deps || []).map(id => findTask(data, id)?.key).filter(Boolean),
+    blocksKeys: (data.tasks || []).filter(other => !other.archived && (other.deps || []).includes(t.id)).map(other => other.key),
     descMarkdown: htmlToMarkdown(t.desc),
     subtaskDoneCount: (t.subtasks || []).filter(s => s.done).length,
     subtaskCount: (t.subtasks || []).length,
@@ -3014,12 +3021,13 @@ export function syncGitHubPullRequests(data, rawInputs, opts = {}) {
       else t.prs.push(nextLink);
 
       const prLabel = `${nextLink.repo}#${nextLink.number}`;
+      const quotedPrLabel = `“${prLabel}”`;
       const prSnippet = nextLink.title ? `${prLabel}: ${nextLink.title}` : prLabel;
       if (!prev || prev.state !== nextLink.state || prev.draft !== nextLink.draft) {
-        if (nextLink.state === 'merged') logActivity(data, 'merged PR on', t, prLabel, { by, now });
-        else if (nextLink.state === 'closed' && prev) logActivity(data, 'closed PR on', t, prLabel, { by, now });
-        else if (!prev) logActivity(data, 'linked PR to', t, prLabel, { by, now });
-        else if (prev.draft && !nextLink.draft) logActivity(data, 'marked PR ready on', t, prLabel, { by, now });
+        if (nextLink.state === 'merged') logActivity(data, 'merged PR on', t, quotedPrLabel, { by, now });
+        else if (nextLink.state === 'closed' && prev) logActivity(data, 'closed PR on', t, quotedPrLabel, { by, now });
+        else if (!prev) logActivity(data, 'linked PR to', t, quotedPrLabel, { by, now });
+        else if (prev.draft && !nextLink.draft) logActivity(data, 'marked PR ready on', t, quotedPrLabel, { by, now });
       }
 
       const becameOpenDraft = nextLink.state === 'open' && nextLink.draft && (!prev || prev.state !== 'open');

@@ -108,6 +108,9 @@ gr8r task create "Sub-slice: Schema migration" -p PID --parent PID-201
 gr8r tasks -p PID --parent PID-201
 gr8r tasks -p PID --parent none
 
+# Create a task with initial dependencies (`--dep`, `--add-dep`, or `--deps` all work on `task create`)
+gr8r task create "Follow-up slice" -p PID --dep PID-201
+
 # Record PR/deploy verification in comments and complete the task
 gr8r task done PID-201 --comment "Merged PR #42 (sha abc1234) and verified live."
 

@@ -132,8 +132,33 @@ function resolveDefaultAgent(explicitAgent, env = process.env) {
   if (env.GR8R_AGENT !== undefined) return nullableOpt(env.GR8R_AGENT);
   const sessionName = String(env.PI_SESSION_NAME || '').trim();
   if (sessionName) return `pi:${sessionName}`;
+  const sessionFile = String(env.PI_SESSION_FILE || '').trim();
+  if (sessionFile) {
+    try {
+      const lines = fs.readFileSync(sessionFile, 'utf8').split(/\r?\n/);
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        let entry;
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (entry?.type === 'session_info' && typeof entry.name === 'string') {
+          const name = entry.name.trim();
+          if (name) return `pi:${name}`;
+        }
+      }
+    } catch {
+      /* ignore unreadable PI_SESSION_FILE */
+    }
+  }
   const sessionId = String(env.PI_SESSION_ID || '').trim();
-  if (sessionId) return `pi:${sessionId}`;
+  if (sessionId) {
+    const shortId = /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(sessionId) ? sessionId.slice(0, 8) : sessionId;
+    return `pi:${shortId}`;
+  }
   return null;
 }
 
@@ -294,6 +319,13 @@ function pad(str, width) {
   return s.length >= width ? s : s + ' '.repeat(width - s.length);
 }
 
+function clipText(str, max = 110) {
+  const s = String(str ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
 function formatTable(rows, columns) {
   if (!rows.length) return '(none)';
   const widths = columns.map(([header, getter]) => Math.min(68, Math.max(header.length, ...rows.map(r => String(getter(r) ?? '').length))));
@@ -324,6 +356,9 @@ function formatTaskDetail(payload) {
     const openSuffix = t.openDepKeys?.length ? ` (open: ${t.openDepKeys.join(', ')})` : ' (all resolved)';
     lines.push(`Blocked by: ${t.depKeys.join(', ')}${openSuffix}`);
   }
+  if (t.blocksKeys?.length) {
+    lines.push(`Blocks: ${t.blocksKeys.join(', ')}`);
+  }
   if (t.prs?.length) {
     lines.push('Pull requests:');
     for (const pr of t.prs) {
@@ -332,7 +367,11 @@ function formatTaskDetail(payload) {
     }
   }
   if (t.attachments?.length) {
-    lines.push(`Attachments (${t.attachments.length}): ${t.attachments.map(a => `${a.name} (${a.size}${a.blobId ? ', persisted' : ''})`).join(', ')}`);
+    lines.push(
+      `Attachments (${t.attachments.length}): ${t.attachments
+        .map(a => `${a.id ? `[${a.id}] ` : ''}${a.name} (${a.size}${a.blobId ? ', persisted' : ''})`)
+        .join(', ')}`,
+    );
   }
   if (t.descMarkdown) lines.push('', '--- Description ---', t.descMarkdown);
   if (subIssues.length) {
@@ -381,7 +420,7 @@ Commands:
 
   tasks [-p PROJECT] [--ready] ...          List/filter tasks (--ready: unblocked & unclaimed)
   task view <key-or-id>                     Inspect a task, Markdown description, subtasks, comments
-  task create <title> -p PROJECT ...        Create a task (--desc - reads Markdown from stdin)
+  task create <title> -p PROJECT ...        Create a task (--dep, --desc - reads Markdown from stdin)
   task update <ref> [flags]                 Atomically update task fields
   task claim <ref> [--force] [--agent NAME] Atomically claim a task for an agent session
   task claim --next [-p PROJECT] [-l LABEL] Atomically claim highest-priority ready task
@@ -423,6 +462,181 @@ Commands:
   activity [-p PROJECT] [-t TASK] [--limit] Show recent workspace activity
 `;
 
+const GLOBAL_FLAGS = new Set(['help', 'json', 'url', 'token', 'proxy', 'agent']);
+
+const TASK_UPDATE_FLAGS = [
+  'title',
+  'priority',
+  'assignee',
+  'project',
+  'parent',
+  'due',
+  'start',
+  'estimate',
+  'label',
+  'labels',
+  'add-label',
+  'remove-label',
+  'deps',
+  'dep',
+  'add-dep',
+  'remove-dep',
+  'desc',
+  'desc-file',
+  'append-desc',
+  'recur',
+  'fav',
+  'no-fav',
+  'archive',
+  'restore',
+  'needs-owner',
+  'if-rev',
+  'comment',
+];
+
+const COMMAND_FLAGS = {
+  status: [],
+  workspace: [],
+  projects: ['archived'],
+  labels: [],
+  tasks: ['project', 'parent', 'status', 'priority', 'assignee', 'label', 'labels', 'due', 'query', 'sort', 'dir', 'limit', 'archived', 'ready', 'claimed'],
+  attach: ['name', 'task', 'project'],
+  files: ['project', 'task', 'type'],
+  docs: ['project'],
+  'pr-sync': ['repo', 'pr', 'merged', 'state', 'draft', 'title', 'head', 'pr-url', 'merged-at', 'body', 'body-file', 'file'],
+  search: ['query'],
+  activity: ['project', 'task', 'limit'],
+  config: {
+    '': [],
+    show: [],
+    set: ['clear-token', 'clear-proxy', 'url', 'token', 'proxy'],
+  },
+  project: {
+    view: ['archived'],
+    get: ['archived'],
+    show: ['archived'],
+    create: ['name', 'key', 'desc', 'desc-file', 'status', 'color', 'icon', 'lead', 'team', 'start', 'due', 'fav', 'private', 'add-milestone'],
+    update: [
+      'name',
+      'desc',
+      'desc-file',
+      'status',
+      'color',
+      'icon',
+      'lead',
+      'team',
+      'start',
+      'due',
+      'fav',
+      'no-fav',
+      'archive',
+      'restore',
+      'remove-milestone',
+      'add-milestone',
+      'if-rev',
+    ],
+    delete: ['yes'],
+  },
+  label: {
+    create: ['name', 'id', 'color'],
+    add: ['name', 'id', 'color'],
+    update: ['name', 'color'],
+    delete: ['yes'],
+    remove: ['yes'],
+  },
+  task: {
+    view: [],
+    get: [],
+    show: [],
+    create: [
+      'title',
+      'project',
+      'parent',
+      'status',
+      'priority',
+      'assignee',
+      'due',
+      'start',
+      'estimate',
+      'label',
+      'labels',
+      'deps',
+      'dep',
+      'add-dep',
+      'desc',
+      'desc-file',
+      'subtask',
+      'recur',
+      'fav',
+      'needs-owner',
+    ],
+    claim: ['next', 'force', 'project', 'parent', 'label', 'labels', 'priority', 'assignee', 'status'],
+    release: ['status'],
+    update: ['status', ...TASK_UPDATE_FLAGS],
+    reopen: ['status', ...TASK_UPDATE_FLAGS],
+    start: TASK_UPDATE_FLAGS,
+    done: TASK_UPDATE_FLAGS,
+    cancel: TASK_UPDATE_FLAGS,
+    delete: ['yes'],
+  },
+  subtask: {
+    add: ['title', 'note', 'due', 'assignee', 'done'],
+    update: ['done', 'undone', 'title', 'note', 'due', 'assignee'],
+    done: ['done', 'undone', 'title', 'note', 'due', 'assignee'],
+    undone: ['done', 'undone', 'title', 'note', 'due', 'assignee'],
+    promote: [],
+    remove: [],
+    delete: [],
+  },
+  comment: {
+    list: [],
+    add: ['body', 'body-file', 'needs-owner'],
+    delete: [],
+    remove: [],
+  },
+  inbox: {
+    '': ['unread', 'project', 'task', 'type', 'limit'],
+    list: ['unread', 'project', 'task', 'type', 'limit'],
+    read: ['all', 'project', 'task', 'type'],
+    unread: [],
+  },
+  file: {
+    download: ['output'],
+    delete: ['yes'],
+    remove: ['yes'],
+  },
+  doc: {
+    view: ['project'],
+    get: ['project'],
+    show: ['project'],
+    create: ['title', 'project', 'slug', 'pinned', 'body', 'desc', 'body-file', 'desc-file'],
+    update: ['project', 'title', 'slug', 'pinned', 'unpinned', 'body', 'desc', 'body-file', 'desc-file', 'append', 'append-desc'],
+    delete: ['project', 'yes'],
+    remove: ['project', 'yes'],
+  },
+};
+
+function validateCommandFlags(cmd, sub, opts) {
+  const entry = Object.hasOwn(COMMAND_FLAGS, cmd) ? COMMAND_FLAGS[cmd] : null;
+  if (!entry) return;
+  let flagList;
+  let cmdLabel;
+  if (Array.isArray(entry)) {
+    flagList = entry;
+    cmdLabel = cmd;
+  } else {
+    const subKey = sub || '';
+    if (!Object.hasOwn(entry, subKey)) return;
+    flagList = entry[subKey];
+    cmdLabel = subKey ? `${cmd} ${subKey}` : cmd;
+  }
+  const allowed = new Set(flagList);
+  for (const flag of Object.keys(opts)) {
+    if (opts[flag] === undefined || GLOBAL_FLAGS.has(flag) || allowed.has(flag)) continue;
+    throw new Error(`Flag --${flag} is not supported for "${cmdLabel}"`);
+  }
+}
+
 export async function runCli(argv, io = {}) {
   const stdout = io.stdout || (s => process.stdout.write(s + '\n'));
   const stderr = io.stderr || (s => process.stderr.write(s + '\n'));
@@ -453,6 +667,7 @@ export async function runCli(argv, io = {}) {
       'add-label': { type: 'string', multiple: true },
       'remove-label': { type: 'string', multiple: true },
       deps: { type: 'string' },
+      dep: { type: 'string', multiple: true },
       'add-dep': { type: 'string', multiple: true },
       'remove-dep': { type: 'string', multiple: true },
       due: { type: 'string' },
@@ -528,6 +743,7 @@ export async function runCli(argv, io = {}) {
 
   const cmd = pos[0];
   const sub = pos[1];
+  validateCommandFlags(cmd, sub, opts);
 
   if (cmd === 'config') {
     if (!sub || sub === 'show') {
@@ -826,10 +1042,12 @@ export async function runCli(argv, io = {}) {
       if (opts.due !== undefined) body.due = nullableOpt(opts.due);
       if (opts.start !== undefined) body.start = nullableOpt(opts.start);
       if (opts.estimate !== undefined) body.estimate = nullableOpt(opts.estimate);
-      const lbls = splitCsvList(opts.label || opts.labels);
-      if (lbls) body.labels = lbls;
-      const deps = splitCsvList(opts.deps);
-      if (deps) body.deps = deps;
+      const labelValues = [opts.labels, ...(opts.label || [])].filter(v => v !== undefined);
+      const lbls = labelValues.length ? [...new Set(splitCsvList(labelValues))] : undefined;
+      if (lbls?.length) body.labels = lbls;
+      const depValues = [opts.deps, ...(opts.dep || []), ...(opts['add-dep'] || [])].filter(v => v !== undefined);
+      const deps = depValues.length ? [...new Set(splitCsvList(depValues))] : undefined;
+      if (deps?.length) body.deps = deps;
       if (opts.desc !== undefined || opts['desc-file'] !== undefined) body.desc = resolveTextArg(opts.desc, opts['desc-file'], readStdin);
       if (opts.subtask?.length) body.subtasks = opts.subtask;
       if (opts.recur !== undefined) body.recur = nullableOpt(opts.recur);
@@ -911,7 +1129,8 @@ export async function runCli(argv, io = {}) {
       if (opts['add-label']) body.addLabels = splitCsvList(opts['add-label']);
       if (opts['remove-label']) body.removeLabels = splitCsvList(opts['remove-label']);
       if (opts.deps !== undefined) body.deps = opts.deps === 'none' || opts.deps === '' ? [] : splitCsvList(opts.deps);
-      if (opts['add-dep']) body.addDeps = splitCsvList(opts['add-dep']);
+      const addDepValues = [...(opts.dep || []), ...(opts['add-dep'] || [])];
+      if (addDepValues.length) body.addDeps = [...new Set(splitCsvList(addDepValues))];
       if (opts['remove-dep']) body.removeDeps = splitCsvList(opts['remove-dep']);
       if (opts.desc !== undefined || opts['desc-file'] !== undefined) body.desc = resolveTextArg(opts.desc, opts['desc-file'], readStdin);
       if (opts['append-desc'] !== undefined) body.appendDesc = opts['append-desc'] === '-' ? readStdin() : opts['append-desc'];
@@ -920,23 +1139,17 @@ export async function runCli(argv, io = {}) {
       if (opts['no-fav']) body.fav = false;
       if (opts.archive) body.archived = true;
       if (opts.restore) body.archived = false;
-      if (opts['needs-owner']) {
-        body.needsOwner = true;
-        if (commentText) body.skipNeedsOwnerNotif = true;
+      if (opts['needs-owner']) body.needsOwner = true;
+      if (commentText) {
+        body.comment = commentText;
+        body.needsOwner = !!opts['needs-owner'];
       }
       if (opts['if-rev'] !== undefined) {
         const rev = Number(opts['if-rev']);
         if (!Number.isInteger(rev) || rev < 0) throw new Error(`Invalid --if-rev "${opts['if-rev']}": expected non-negative integer`);
         body.ifRev = rev;
       }
-      let res = await client.request('PATCH', `/tasks/${encodeURIComponent(ref)}`, body);
-      if (commentText) {
-        const cmt = await client.request('POST', `/tasks/${encodeURIComponent(res.task.id)}/comments`, {
-          text: commentText,
-          needsOwner: !!opts['needs-owner'],
-        });
-        res = { ...res, rev: cmt.rev, task: cmt.task, comment: cmt.comment };
-      }
+      const res = await client.request('PATCH', `/tasks/${encodeURIComponent(ref)}`, body);
       if (opts.json) return outJson(res);
       stdout(`Updated ${res.task.key} -> ${res.task.status}: ${res.task.title} [rev ${res.rev}]`);
       if (res.spawned) stdout(`Spawned next occurrence ${res.spawned.key} (due ${res.spawned.due})`);
@@ -1089,7 +1302,16 @@ export async function runCli(argv, io = {}) {
         ['TYPE', n => n.type],
         ['TASK', n => n.taskKey || n.projectKey || '-'],
         ['FROM', n => (n.agent ? `${n.byName || n.by || '-'} [${n.agent}]` : n.byName || n.by || '-')],
-        ['SUMMARY', n => `${n.text}${n.snippet ? ' — ' + n.snippet : ''}`],
+        [
+          'SUMMARY',
+          n => {
+            const snippet = String(n.snippet ?? '')
+              .replace(/\s+/g, ' ')
+              .trim();
+            const raw = snippet ? `${n.text} — ${snippet}` : String(n.text ?? '');
+            return clipText(raw, 110);
+          },
+        ],
       ]),
     );
     return 0;
@@ -1353,11 +1575,17 @@ export async function runCli(argv, io = {}) {
     }
     if (res.files?.length) {
       stdout(`Files (${res.files.length}):`);
-      for (const f of res.files) stdout(`  ${f.name}${f.project ? ` (${f.project})` : ''}`);
+      for (const f of res.files) {
+        const projLabel = f.projectKey || f.project;
+        stdout(`  ${f.name}${projLabel ? ` (${projLabel})` : ''}`);
+      }
     }
     if (res.docs?.length) {
       stdout(`Docs (${res.docs.length}):`);
-      for (const d of res.docs) stdout(`  [${d.slug}] ${d.title}${d.project ? ` (${d.project})` : ''}`);
+      for (const d of res.docs) {
+        const projLabel = d.projectKey || d.project;
+        stdout(`  [${d.slug}] ${d.title}${projLabel ? ` (${projLabel})` : ''}`);
+      }
     }
     if (res.comments.length) {
       stdout(`Comments (${res.comments.length}):`);
@@ -1379,8 +1607,9 @@ export async function runCli(argv, io = {}) {
       return 0;
     }
     for (const a of res.activity) {
+      const who = `${a.byName || a.by || '-'}${a.agent ? ` [${a.agent}]` : ''}`;
       const target = a.taskKey ? `${a.taskKey} (${a.taskTitle})` : a.projectName || '';
-      stdout(`${new Date(a.at).toISOString()}  ${a.byName || a.by} ${a.verb} ${target}${a.extra ? ' ' + a.extra : ''}`);
+      stdout(`${new Date(a.at).toISOString()}  ${who} ${a.verb} ${target}${a.extra ? ' ' + a.extra : ''}`);
     }
     return 0;
   }
