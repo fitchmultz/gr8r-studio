@@ -188,8 +188,17 @@
 /* files */
 .fgrid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(180px, 280px));
   gap: 12px;
+}
+@media (max-width: 640px) {
+  .fgrid {
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  }
+}
+.docs-grid > div > div > .row:first-child {
+  flex-wrap: wrap;
+  row-gap: 6px;
 }
 .fcard {
   border: 1px solid var(--border);

@@ -6,7 +6,7 @@ import { ic } from '../core/icons.js';
 import { openDepsOfTask } from '../core/domain.js';
 import { isClosedStatus } from '../core/constants.js';
 import { D, S, childrenOf, commentsOf, isOver, mem, pColor, proj, task } from '../core/store.js';
-import { FT, agentBadge, av, filePrev, fileType, fmtComment, lbl, progBar, stIcon } from '../ui/helpers.js';
+import { FT, agentBadge, av, filePrev, fileType, fmtComment, formatAgentLabel, lbl, progBar, stIcon } from '../ui/helpers.js';
 import { fxc } from '../shell/render.js';
 import { cellAssignee, cellDue, cellPrio, cellProject, cellStatus } from '../components/task-list.js';
 import { modalHtml } from './modals.js';
@@ -69,7 +69,7 @@ export function drawerHtml(t) {
         ? subtaskHtml(t, sub)
         : `
       ${t.status === 'done' ? `<div class="alert ok" style="margin-bottom:12px">${ic('circle-check', 15)}<span>Completed ${t.completedAt ? ago(t.completedAt) : ''}. <button class="link" data-a="toggleDone" data-id="${t.id}">Reopen task</button></span></div>` : t.status === 'canceled' ? `<div class="alert" style="margin-bottom:12px">${ic('circle-slash', 15)}<span>Canceled ${t.canceledAt ? ago(t.canceledAt) : ''}. <button class="link" data-a="toggleDone" data-id="${t.id}">Reopen task</button></span></div>` : isOver(t) ? `<div class="alert danger" style="margin-bottom:12px">${ic('clock-alert', 15)}<span>Overdue by ${-diffD(parse(t.due), TODAY)} day${-diffD(parse(t.due), TODAY) > 1 ? 's' : ''}. <button class="link" data-a="pop" data-pop="date" data-field="due" data-id="${t.id}">Reschedule</button></span></div>` : ''}
-      ${t.claimedBy ? `<div class="alert info" style="margin-bottom:12px">${ic('bot', 15)}<span>Claimed by <code class="mono">${esc(t.claimedBy)}</code>${t.claimedAt ? ` · ${ago(t.claimedAt)}` : ''}. <button class="link" data-a="releaseTaskClaim" data-id="${t.id}">Release claim</button></span></div>` : openDeps.length ? `<div class="alert" style="margin-bottom:12px">${ic('lock', 15)}<span>Blocked by ${openDeps.map(d => `<button class="link mono" data-a="openTask" data-id="${d.id}">${d.key}</button>`).join(', ')}.</span></div>` : ''}
+      ${t.claimedBy ? `<div class="alert info" style="margin-bottom:12px">${ic('bot', 15)}<span>Claimed by <code class="mono" title="${esc(t.claimedBy)}">${esc(formatAgentLabel(t.claimedBy))}</code>${t.claimedAt ? ` · ${ago(t.claimedAt)}` : ''}. <button class="link" data-a="releaseTaskClaim" data-id="${t.id}">Release claim</button></span></div>` : openDeps.length ? `<div class="alert" style="margin-bottom:12px">${ic('lock', 15)}<span>Blocked by ${openDeps.map(d => `<button class="link mono" data-a="openTask" data-id="${d.id}">${d.key}</button>`).join(', ')}.</span></div>` : ''}
       <textarea class="ttl-edit" id="d-title" rows="1" data-autosize data-blur="commitDrawerTitle" data-key-enter="blur" data-id="${t.id}" aria-label="Task title">${esc(t.title)}</textarea>
       <dl class="kv" style="margin-top:12px;${u.drawerFull ? 'grid-template-columns:112px minmax(0,1fr) 112px minmax(0,1fr)' : ''}">
         ${prop('circle-dot', 'Status', cellStatus(t))}

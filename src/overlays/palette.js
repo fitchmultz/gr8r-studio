@@ -140,6 +140,21 @@ export function paletteItems() {
       name: 'People',
       items: r.people.slice(0, lim).map(m => ({ html: av(m.id, 'sm', false), name: m.name, sub: m.title, run: () => go('member', { id: m.id }) })),
     });
+  if (sc === 'all' || sc === 'docs')
+    groups.push({
+      name: 'Docs',
+      items: (r.docs || []).slice(0, lim).map(doc => ({
+        icon: 'file-text',
+        name: doc.title,
+        sub: proj(doc.project)?.name || '',
+        r: doc.slug,
+        run: () => {
+          S.ui.docSel = S.ui.docSel || {};
+          S.ui.docSel[doc.project] = doc.id;
+          go('project', { id: doc.project, tab: 'docs', doc: doc.id });
+        },
+      })),
+    });
   if (sc === 'all' || sc === 'files')
     groups.push({
       name: 'Files',
@@ -185,7 +200,8 @@ export function paletteHtml() {
   pl._flat = flat;
   pl.hl = clamp(pl.hl, 0, Math.max(flat.length - 1, 0));
   let idx = 0;
-  const ph = pl.mode === 'search' ? 'Search tasks, projects, people, files, comments…' : pl.mode === 'ws' ? 'Find a workspace…' : 'Type a command or search…';
+  const ph =
+    pl.mode === 'search' ? 'Search tasks, projects, people, docs, files, comments…' : pl.mode === 'ws' ? 'Find a workspace…' : 'Type a command or search…';
   return `<div class="palette" role="dialog" aria-modal="true" aria-label="Command menu">
     <div class="pal-in">${ic(pl.mode === 'search' ? 'search' : 'command', 17)}${pl.mode !== 'cmd' ? `<span class="badge" style="flex-shrink:0">${pl.mode === 'search' ? 'Search' : 'Workspace'}</span>` : ''}<input id="pal-in" data-in="palQ" value="${esc(pl.q)}" placeholder="${ph}" autocomplete="off" role="combobox" aria-expanded="true" aria-controls="pal-list" aria-activedescendant="pi-${pl.hl}"><kbd>Esc</kbd></div>
     ${
@@ -195,6 +211,7 @@ export function paletteHtml() {
             ['tasks', 'Tasks', 'circle-check'],
             ['projects', 'Projects', 'folder'],
             ['people', 'People', 'users'],
+            ['docs', 'Docs', 'file-text'],
             ['files', 'Files', 'paperclip'],
             ['comments', 'Comments', 'message-square'],
           ]

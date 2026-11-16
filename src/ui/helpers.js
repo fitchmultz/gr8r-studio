@@ -3,6 +3,7 @@ import { TODAY, diffD, esc, parse, relDate } from '../core/utils.js';
 import { ic } from '../core/icons.js';
 import { LB, PR, PSTAT, ST, isClosedStatus } from '../core/constants.js';
 import { buildAttachmentBlobUrl, fileTypeFromName, formatByteSize } from '../core/domain.js';
+import { matchBareUrlAt } from '../core/markdown.js';
 import { D, S, labelOf, mem, pColor } from '../core/store.js';
 
 export function av(id, cls = '', tip = true) {
@@ -50,9 +51,18 @@ export const lbl = id => {
   const l = labelOf(id) || LB[id];
   return l ? `<span class="lbl" style="--c:${l.c}"><i></i>${esc(l.name)}</span>` : '';
 };
+export function formatAgentLabel(agent) {
+  if (!agent) return '';
+  const s = String(agent).trim();
+  const prefixedUuid = /^([a-z0-9_-]+:)([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.exec(s);
+  if (prefixedUuid) return `${prefixedUuid[1]}${prefixedUuid[2]}`;
+  const bareUuid = /^([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.exec(s);
+  if (bareUuid) return bareUuid[1];
+  return s.length > 28 ? s.slice(0, 27) + '…' : s;
+}
 export const agentBadge = agent =>
   agent
-    ? `<span class="badge" style="gap:4px;font-family:var(--mono);font-size:10.5px;height:18px;padding:0 6px" title="Agent: ${esc(agent)}">${ic('bot', 11)}${esc(agent)}</span>`
+    ? `<span class="badge" style="gap:4px;font-family:var(--mono);font-size:10.5px;height:18px;padding:0 6px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="Agent: ${esc(agent)}">${ic('bot', 11)}<span class="trunc">${esc(formatAgentLabel(agent))}</span></span>`
     : '';
 export const pIcon = (p, cls = '', s = 15) => `<span class="picon ${cls}" style="--c:${pColor(p)}">${ic(p.icon, s)}</span>`;
 export const pStatus = s => `<span class="pstatus" style="--c:${PSTAT[s].c}"><i></i>${PSTAT[s].name}</span>`;
@@ -74,12 +84,33 @@ export function hl(text, q) {
   if (i < 0) return esc(text);
   return esc(text.slice(0, i)) + '<mark>' + esc(text.slice(i, i + q.length)) + '</mark>' + esc(text.slice(i + q.length));
 }
-export function fmtComment(txt) {
-  let h = esc(txt);
+function escWithMentions(seg) {
+  let h = esc(seg);
   D().members.forEach(m => {
     h = h.split('@' + esc(m.name)).join(`<span class="mention">@${esc(m.name)}</span>`);
   });
   return h;
+}
+export function fmtComment(txt) {
+  const s = String(txt ?? '');
+  let out = '';
+  let i = 0;
+  let plainStart = 0;
+  while (i < s.length) {
+    if (s[i] === 'h' || s[i] === 'H') {
+      const url = matchBareUrlAt(s, i);
+      if (url) {
+        if (i > plainStart) out += escWithMentions(s.slice(plainStart, i));
+        out += `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" class="link">${esc(url)}</a>`;
+        i += url.length;
+        plainStart = i;
+        continue;
+      }
+    }
+    i++;
+  }
+  if (plainStart < s.length) out += escWithMentions(s.slice(plainStart));
+  return out;
 }
 export const FT = {
   fig: { c: '#8662C9', i: 'pen-tool', n: 'Figma' },
@@ -105,10 +136,11 @@ export function filePrev(f) {
   const t = FT[f.type] || FT.other;
   const blobUrl = resolveAttachmentPreviewUrl(f);
   let art;
+  const imgFallbackSvg = `<svg viewBox="0 0 100 60" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%"><path d="M0 60 L30 28 L52 46 L70 32 L100 58 L100 60Z" fill="color-mix(in srgb,${t.c} 45%,var(--surface))"/><circle cx="76" cy="16" r="7" fill="color-mix(in srgb,${t.c} 30%,var(--surface))"/></svg>`;
   if (f.type === 'img' && blobUrl)
-    art = `<div class="art" style="padding:0;overflow:hidden;background:var(--surface-2)"><img src="${esc(blobUrl)}" alt="${esc(f.name)}" loading="lazy" style="width:100%;height:100%;object-fit:cover;display:block"></div>`;
+    art = `<div class="art" style="padding:0;overflow:hidden;background:linear-gradient(135deg,color-mix(in srgb,${t.c} 35%,var(--surface)),color-mix(in srgb,${t.c} 10%,var(--surface)))">${imgFallbackSvg}<img src="${esc(blobUrl)}" alt="${esc(f.name)}" loading="lazy" data-fprev-img style="position:relative;z-index:1;width:100%;height:100%;object-fit:cover;display:block;background:var(--surface-2)"></div>`;
   else if (f.type === 'img')
-    art = `<div class="art" style="padding:0;overflow:hidden;background:linear-gradient(135deg,color-mix(in srgb,${t.c} 35%,var(--surface)),color-mix(in srgb,${t.c} 10%,var(--surface)))"><svg viewBox="0 0 100 60" preserveAspectRatio="none" style="width:100%;height:100%"><path d="M0 60 L30 28 L52 46 L70 32 L100 58 L100 60Z" fill="color-mix(in srgb,${t.c} 45%,var(--surface))"/><circle cx="76" cy="16" r="7" fill="color-mix(in srgb,${t.c} 30%,var(--surface))"/></svg></div>`;
+    art = `<div class="art" style="padding:0;overflow:hidden;background:linear-gradient(135deg,color-mix(in srgb,${t.c} 35%,var(--surface)),color-mix(in srgb,${t.c} 10%,var(--surface)))">${imgFallbackSvg}</div>`;
   else if (f.type === 'sheet') art = `<div class="art" style="display:grid;grid-template-columns:repeat(4,1fr);gap:3px">${'<i></i>'.repeat(20)}</div>`;
   else if (f.type === 'fig')
     art = `<div class="art" style="flex-direction:row;gap:6px"><div style="flex:1;display:flex;flex-direction:column;gap:5px"><i class="h"></i><i></i><i style="width:70%"></i><i style="height:18px;background:color-mix(in srgb,${t.c} 20%,var(--surface))"></i></div><div style="width:34%;border-radius:3px;background:color-mix(in srgb,${t.c} 14%,var(--surface))"></div></div>`;

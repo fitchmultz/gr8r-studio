@@ -2,7 +2,7 @@
 import { diffWorkspacePatch, isWorkspacePatchEmpty } from './domain.js';
 import { S, adoptSyncedState, clearSyncedBase, getPendingSave, getRev, getSyncedBase, rebasePendingSave, setOnSave, stampRev } from './store.js';
 import { openModal } from '../overlays/modals.js';
-import { render } from '../shell/render.js';
+import { applyHashRoute, render } from '../shell/render.js';
 import { toast } from '../ui/toast.js';
 
 /* Sync config: VITE_SYNC_URL ('/api' when this server serves the app), unset →
@@ -35,6 +35,7 @@ const syncOn = !!BASE;
 let authWarned = false;
 let promptShown = false;
 let awaitingManualToken = false;
+let initialAdoptDone = false;
 
 export function isSyncEnabled() {
   return syncOn;
@@ -316,8 +317,11 @@ async function push() {
 
 async function pull() {
   if (!syncOn || pushing) return;
-  if (getPendingSave()) return push();
   try {
+    if (getPendingSave()) {
+      await push();
+      return;
+    }
     const r = await authedFetch('/state');
     if (!r) return;
     if (!r.ok) {
@@ -330,11 +334,22 @@ async function pull() {
     if (j.state && j.rev > getRev()) adopt(j.rev, j.state);
   } catch {
     /* offline: the next interval retries (and re-fetches the config if needed) */
+  } finally {
+    if (S.ui.loading) {
+      S.ui.loading = false;
+      if (location.hash) applyHashRoute({ initial: true });
+      render();
+    }
   }
 }
 
 function adopt(rev, state) {
   adoptSyncedState(rev, state);
+  if (!initialAdoptDone) {
+    initialAdoptDone = true;
+    if (location.hash) applyHashRoute({ initial: true });
+  }
+  S.ui.loading = false;
   render();
 }
 

@@ -2,6 +2,8 @@
    SHELL: render loop, router, sidebar, topbar, skeletons, filter engine
    ===================================================================== */
 import { $, $$ } from '../core/utils.js';
+import { TEAMS_SEED } from '../core/constants.js';
+import { canSeeProject, resolveProject, resolveTask } from '../core/domain.js';
 import { D, S, mem, proj, team } from '../core/store.js';
 import { applyPrefs } from '../core/theme.js';
 import { enhanceSelects, selectMenu } from '../ui/select.js';
@@ -54,12 +56,156 @@ export const ROUTE_ICONS = {
   archive: 'archive',
 };
 
+let programmaticHash = null;
+const safeSeg = s => encodeURIComponent(String(s ?? '')).replace(/%3A/gi, ':');
+
+function decodeSeg(seg) {
+  try {
+    return decodeURIComponent(seg);
+  } catch {
+    return seg;
+  }
+}
+
+export function buildRouteHash(route, params = {}, drawerRef = null, data = D()) {
+  if (drawerRef) {
+    const ref = typeof drawerRef === 'object' ? drawerRef.key || drawerRef.id : (data ? resolveTask(data, drawerRef)?.key : null) || String(drawerRef);
+    return `#/task/${safeSeg(ref)}`;
+  }
+  if (route === 'project') {
+    const p = params?.id && data ? resolveProject(data, params.id) : null;
+    const projRef = p?.key ? p.key.toLowerCase() : params?.id;
+    if (!projRef) return '#/projects';
+    const tab = params?.tab || 'board';
+    if (tab === 'docs') {
+      const pid = p?.id || params?.id;
+      const docRef = params?.doc || S?.ui?.docSel?.[pid] || '';
+      if (docRef) {
+        const docObj = (data?.docs || []).find(d => d.project === pid && (d.id === docRef || d.slug === docRef));
+        const docSeg = docObj?.slug || docObj?.id || docRef;
+        return `#/project/${safeSeg(projRef)}/docs/${safeSeg(docSeg)}`;
+      }
+      return `#/project/${safeSeg(projRef)}/docs`;
+    }
+    if (tab === 'board') return `#/project/${safeSeg(projRef)}`;
+    return `#/project/${safeSeg(projRef)}/${safeSeg(tab)}`;
+  }
+  if (route === 'member' && params?.id) return `#/member/${safeSeg(params.id)}`;
+  if (route === 'team' && params?.id) return `#/team/${safeSeg(params.id)}`;
+  if (route === 'settings' && params?.sec) return `#/settings/${safeSeg(params.sec)}`;
+  if (ROUTE_NAMES[route]) return `#/${route}`;
+  return '#/home';
+}
+
+export function parseRouteHash(hash, data = D()) {
+  const raw = String(hash ?? '').replace(/^#/, '');
+  if (!raw || raw === '/') return { empty: true, route: 'home', params: {}, drawer: null };
+  const parts = raw.replace(/^\/+/, '').split('/').filter(Boolean).map(decodeSeg);
+  if (!parts.length) return { empty: true, route: 'home', params: {}, drawer: null };
+  const [headRaw, arg1, arg2, arg3] = parts;
+  const head = headRaw.toLowerCase();
+
+  if (head === 'project') {
+    if (!arg1) return { route: 'projects', params: {}, drawer: null };
+    const p = resolveProject(data, arg1);
+    if (!p) return { route: '404', params: {}, drawer: null, unresolved: true };
+    const tab = arg2 || 'board';
+    const params = { id: p.id, tab };
+    if (tab === 'docs' && arg3) {
+      const doc = (data?.docs || []).find(d => d.project === p.id && (d.id === arg3 || d.slug === arg3));
+      params.doc = doc ? doc.id : arg3;
+    }
+    return { route: 'project', params, drawer: null };
+  }
+  if (head === 'task') {
+    if (!arg1) return { route: 'tasks', params: {}, drawer: null };
+    const t = resolveTask(data, arg1);
+    if (!t) return { route: '404', params: {}, drawer: null, unresolved: true };
+    const p = resolveProject(data, t.project);
+    const allowed = !p || canSeeProject(data, p, data?.me);
+    return { route: 'project', params: { id: t.project, tab: 'board' }, drawer: allowed ? t.id : null };
+  }
+  if (head === 'member') {
+    if (!arg1) return { route: 'members', params: {}, drawer: null };
+    const m = (data?.members || []).find(x => x.id === arg1);
+    if (!m) return { route: '404', params: {}, drawer: null, unresolved: true };
+    return { route: 'member', params: { id: m.id }, drawer: null };
+  }
+  if (head === 'team') {
+    if (!arg1) return { route: 'teams', params: {}, drawer: null };
+    const tm = (data?.teams || TEAMS_SEED).find(x => x.id === arg1);
+    if (!tm) return { route: '404', params: {}, drawer: null, unresolved: true };
+    return { route: 'team', params: { id: tm.id }, drawer: null };
+  }
+  if (head === 'settings') {
+    return { route: 'settings', params: arg1 ? { sec: arg1 } : {}, drawer: null };
+  }
+  if (ROUTE_NAMES[head] && !['project', 'member', 'team'].includes(head)) {
+    return { route: head, params: {}, drawer: null };
+  }
+  return { route: '404', params: {}, drawer: null, unresolved: true };
+}
+
+export function consumeProgrammaticHash(hash) {
+  return programmaticHash !== null && hash === programmaticHash;
+}
+
+export function syncHashToState(replace = false) {
+  const nextHash = buildRouteHash(S.ui.route, S.ui.params);
+  if (location.hash === nextHash) return;
+  if (replace) {
+    history.replaceState(null, '', nextHash);
+  } else {
+    programmaticHash = nextHash;
+    location.hash = nextHash;
+    setTimeout(() => {
+      if (programmaticHash === nextHash) programmaticHash = null;
+    }, 50);
+  }
+}
+
+export function applyHashRoute(opt = {}) {
+  if (opt.fromHash) programmaticHash = null;
+  const parsed = parseRouteHash(location.hash, D());
+  if (parsed.empty) {
+    S.ui.route = opt.initial ? S.prefs.home || 'home' : 'home';
+    S.ui.params = {};
+    if (opt.fromHash) {
+      S.ui.drawer = null;
+      S.ui.drawerFull = false;
+    }
+    return parsed;
+  }
+  S.ui.route = parsed.route;
+  S.ui.params = parsed.params;
+  if (parsed.route === 'project' && parsed.params.tab === 'docs' && parsed.params.doc) {
+    S.ui.docSel = S.ui.docSel || {};
+    S.ui.docSel[parsed.params.id] = parsed.params.doc;
+  }
+  if (parsed.drawer) {
+    S.ui.drawer = parsed.drawer;
+    S.ui.drawerFull = S.prefs.openTasks === 'full';
+  } else if (opt.fromHash) {
+    S.ui.drawer = null;
+    S.ui.drawerFull = false;
+  }
+  if (opt.fromHash) {
+    S.ui.mnav = false;
+    S.ui.pop = null;
+    S.ui.palette = null;
+    S.ui.modals = [];
+    S.ui.sel.clear();
+  }
+  return parsed;
+}
+
 export function go(route, params = {}, opt = {}) {
-  if (route === 'project' && !params.tab) params.tab = 'board';
-  if (!opt.back) S.ui.history.push({ route: S.ui.route, params: S.ui.params });
-  const same = S.ui.route === route && JSON.stringify(S.ui.params) === JSON.stringify(params);
+  const nextParams = { ...params };
+  if (route === 'project' && !nextParams.tab) nextParams.tab = 'board';
+  if (!opt.back && !opt.fromHash) S.ui.history.push({ route: S.ui.route, params: S.ui.params });
+  const same = S.ui.route === route && JSON.stringify(S.ui.params) === JSON.stringify(nextParams);
   S.ui.route = route;
-  S.ui.params = params;
+  S.ui.params = nextParams;
   S.ui.mnav = false;
   S.ui.sel.clear();
   S.ui.pop = null;
@@ -70,6 +216,7 @@ export function go(route, params = {}, opt = {}) {
   clearTimeout(go._t);
   S.ui.loading = false;
   if (!same) fxSet(opt.tab ? { tab: true, tabs: true } : { route: true, tabs: true });
+  if (!opt.fromHash) syncHashToState(!!opt.replaceHash);
   render();
   const c = $('.content');
   if (c && !same) c.scrollTop = 0;
