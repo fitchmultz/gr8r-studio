@@ -100,16 +100,43 @@ function resolveRequestAgent(req, body) {
   }
 }
 
-function mapApiTaskInput(body) {
+function normalizeDepList(val) {
+  if (Array.isArray(val)) return val;
+  if (typeof val === 'string') {
+    return val
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+  }
+  return undefined;
+}
+
+function mapApiTaskInput(body, { mode = 'patch' } = {}) {
   if (!body || typeof body !== 'object') return body;
-  if (Array.isArray(body.dep) && body.addDeps === undefined && body.deps === undefined) {
-    body = { ...body, addDeps: body.dep };
+  if (mode === 'create') {
+    const extraDeps = normalizeDepList(body.dep) ?? normalizeDepList(body.addDeps);
+    if (extraDeps !== undefined && body.deps === undefined) {
+      body = { ...body, deps: extraDeps };
+    } else if (typeof body.deps === 'string') {
+      body = { ...body, deps: normalizeDepList(body.deps) };
+    }
+  } else if (body.dep !== undefined && body.addDeps === undefined && body.deps === undefined) {
+    const depList = normalizeDepList(body.dep);
+    if (depList !== undefined) body = { ...body, addDeps: depList };
   }
   if (body.desc !== undefined && body.descMarkdown === undefined && body.descHtml === undefined) {
     const { desc, ...rest } = body;
     return { ...rest, descMarkdown: desc };
   }
   return body;
+}
+
+function commentWillPushNotif(data, taskAssignee, { by, agent, needsOwner, text }) {
+  if (needsOwner) return true;
+  const isExternal = Boolean(agent) || by !== data.me;
+  if (!isExternal) return false;
+  if (mentionsWorkspaceOwner(data, text)) return data.notifPrefs?.push_mention !== false;
+  return data.notifPrefs?.push_comment !== false && (Boolean(agent) || taskAssignee === data.me);
 }
 
 function parseJsonBody(raw) {
@@ -543,7 +570,7 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
           if (Array.isArray(body.tasks)) {
             if (!body.tasks.length) throw new DomainError('tasks array cannot be empty');
             const created = body.tasks.map(item =>
-              createTask(data, mapApiTaskInput({ ...(body.project ? { project: body.project } : {}), ...item }), {
+              createTask(data, mapApiTaskInput({ ...(body.project ? { project: body.project } : {}), ...item }, { mode: 'create' }), {
                 by,
                 agent,
                 needsOwner: !!(item.needsOwner ?? body.needsOwner),
@@ -551,7 +578,7 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
             );
             return { tasks: created.map(t => formatTaskForApi(data, t)) };
           }
-          const t = createTask(data, mapApiTaskInput(body), { by, agent, needsOwner: !!body.needsOwner });
+          const t = createTask(data, mapApiTaskInput(body, { mode: 'create' }), { by, agent, needsOwner: !!body.needsOwner });
           return { task: formatTaskForApi(data, t) };
         });
         if (result) send(res, 201, result);
@@ -612,12 +639,17 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
             const agent = resolveRequestAgent(req, body);
             const notifsBeforePatch = (data.notifs || []).length;
             const trimmedComment = hasComment ? rawComment.trim() : '';
+            const targetBefore = hasComment ? requireTask(data, ref) : null;
+            const effectiveAssignee =
+              hasComment && patchBody.assignee !== undefined ? resolveMember(data, patchBody.assignee) : (targetBefore?.assignee ?? null);
+            const willCommentNotify =
+              hasComment && commentWillPushNotif(data, effectiveAssignee, { by, agent, needsOwner: !!body.needsOwner, text: trimmedComment });
             const out = applyTaskPatch(data, ref, mapApiTaskInput(patchBody), {
               by,
               agent,
               needsOwner: !!body.needsOwner,
               skipNeedsOwnerNotif: hasComment ? true : !!body.skipNeedsOwnerNotif,
-              skipStatusNotif: hasComment ? Boolean(body.skipStatusNotif || data.notifPrefs?.push_comment !== false) : !!body.skipStatusNotif,
+              skipStatusNotif: hasComment ? Boolean(body.skipStatusNotif || willCommentNotify) : !!body.skipStatusNotif,
               ...(hasComment ? { snippet: trimmedComment } : {}),
             });
             const addedNotifs = (data.notifs || []).slice(0, (data.notifs || []).length - notifsBeforePatch);

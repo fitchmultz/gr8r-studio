@@ -332,6 +332,54 @@ test('domain API applies atomic project, task, subtask, comment, search, and act
     ],
   );
 
+  // POST /api/tasks accepts `dep` / `addDeps` (array or CSV string) just like PATCH /api/tasks/:ref.
+  const depCreate = await call('POST', '/api/tasks', { project: 'PID', title: 'REST dep alias create', dep: 'PID-204' });
+  assert.equal(depCreate.status, 201);
+  assert.deepEqual(depCreate.json.task.depKeys, ['PID-204']);
+
+  // When a status+comment PATCH's comment will NOT push its own notification (e.g. push_mention === false on an @owner comment,
+  // or non-agent member commenting on a task not assigned to owner), the status update notification is preserved with the comment snippet.
+  await call('PATCH', '/api/workspace', {
+    baseRev: depCreate.json.rev,
+    patch: { notifPrefs: { set: { push_mention: false }, deleted: [] } },
+  });
+  const mentionMutedDone = await fetch(base + `/api/tasks/${depCreate.json.task.key}`, {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json', 'x-gr8r-agent': 'pi:atomic-worker' },
+    body: JSON.stringify({ status: 'done', comment: '@Mitch finished and verified' }),
+  });
+  assert.equal(mentionMutedDone.status, 200);
+  const mutedInbox = await call('GET', `/api/inbox?task=${depCreate.json.task.key}`);
+  assert.deepEqual(
+    mutedInbox.json.notifications.map(n => [n.type, n.text, n.snippet]),
+    [['update', 'completed', '@Mitch finished and verified']],
+  );
+  const latestWs = await call('GET', '/api/workspace');
+  await call('PATCH', '/api/workspace', {
+    baseRev: latestWs.json.rev,
+    patch: {
+      notifPrefs: { set: { push_mention: true }, deleted: [] },
+      members: {
+        created: [{ id: 'm2', name: 'Alex Teammate', email: 'alex@example.com', role: 'Member', team: '', title: '', c: '#38A169', status: 'active' }],
+        updated: {},
+        deleted: [],
+      },
+    },
+  });
+
+  const nonAgentOther = await call('POST', '/api/tasks', { project: 'PID', title: 'Other member task', assignee: 'm2' });
+  const otherDone = await call('PATCH', `/api/tasks/${nonAgentOther.json.task.key}`, {
+    by: 'm2',
+    status: 'done',
+    comment: 'All green from teammate',
+  });
+  assert.equal(otherDone.status, 200);
+  const otherInbox = await call('GET', `/api/inbox?task=${nonAgentOther.json.task.key}`);
+  assert.deepEqual(
+    otherInbox.json.notifications.map(n => [n.type, n.text, n.snippet]),
+    [['update', 'completed', 'All green from teammate']],
+  );
+
   // Idempotent POST /api/tasks/:ref/claim does not bump rev on identical re-claim.
   const claimFirst = await fetch(base + '/api/tasks/PID-203/claim', {
     method: 'POST',
