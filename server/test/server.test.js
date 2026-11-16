@@ -315,6 +315,23 @@ test('domain API applies atomic project, task, subtask, comment, search, and act
   assert.equal(pid203Inbox.json.notifications[0].type, 'blocker');
   assert.equal(pid203Inbox.json.notifications[0].snippet, 'Need API key rotation sign-off');
 
+  // Assigning owner + plain comment in one PATCH preserves both the assign notification and the comment notification.
+  await call('POST', '/api/tasks', { project: 'PID', title: 'Assign plus comment slice', assignee: null });
+  const assignComment = await fetch(base + '/api/tasks/PID-204', {
+    method: 'PATCH',
+    headers: { ...auth, 'content-type': 'application/json', 'x-gr8r-agent': 'pi:atomic-worker' },
+    body: JSON.stringify({ assignee: 'me', comment: 'Please review the handoff diff' }),
+  });
+  assert.equal(assignComment.status, 200);
+  const pid204Inbox = await call('GET', '/api/inbox?task=PID-204');
+  assert.deepEqual(
+    pid204Inbox.json.notifications.map(n => [n.type, n.snippet]),
+    [
+      ['comment', 'Please review the handoff diff'],
+      ['assign', ''],
+    ],
+  );
+
   // Idempotent POST /api/tasks/:ref/claim does not bump rev on identical re-claim.
   const claimFirst = await fetch(base + '/api/tasks/PID-203/claim', {
     method: 'POST',

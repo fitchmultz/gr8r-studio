@@ -611,15 +611,18 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
             const by = resolveActor(data, body.by);
             const agent = resolveRequestAgent(req, body);
             const notifsBeforePatch = (data.notifs || []).length;
+            const trimmedComment = hasComment ? rawComment.trim() : '';
             const out = applyTaskPatch(data, ref, mapApiTaskInput(patchBody), {
               by,
               agent,
               needsOwner: !!body.needsOwner,
               skipNeedsOwnerNotif: hasComment ? true : !!body.skipNeedsOwnerNotif,
               skipStatusNotif: hasComment ? Boolean(body.skipStatusNotif || data.notifPrefs?.push_comment !== false) : !!body.skipStatusNotif,
-              ...(hasComment ? { snippet: rawComment.trim() } : {}),
+              ...(hasComment ? { snippet: trimmedComment } : {}),
             });
-            const statusEmittedNotif = (data.notifs || []).length > notifsBeforePatch;
+            const addedNotifs = (data.notifs || []).slice(0, (data.notifs || []).length - notifsBeforePatch);
+            const statusFoldedComment =
+              hasComment && addedNotifs.some(n => n.task === out.task.id && n.type === 'update' && n.snippet === trimmedComment.replace(/\s+/g, ' ').trim());
             const comment = hasComment
               ? enrichComment(
                   data,
@@ -627,7 +630,7 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
                     by,
                     agent,
                     needsOwner: !!body.needsOwner,
-                    skipNotif: statusEmittedNotif && !body.needsOwner && !mentionsWorkspaceOwner(data, rawComment),
+                    skipNotif: statusFoldedComment && !body.needsOwner && !mentionsWorkspaceOwner(data, rawComment),
                   }),
                 )
               : undefined;
