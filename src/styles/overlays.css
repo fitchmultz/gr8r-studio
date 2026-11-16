@@ -276,6 +276,12 @@
   padding: 0;
   background: none;
 }
+.rte-body a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
 .subt {
   display: flex;
   align-items: center;
@@ -363,8 +369,10 @@
 }
 .cmt .who {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+  row-gap: 4px;
   font-size: var(--fs-sm);
 }
 .cmt .who b {

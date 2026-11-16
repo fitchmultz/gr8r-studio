@@ -35,10 +35,10 @@ import {
 } from '../core/domain.js';
 import { isSyncEnabled, uploadBlobToServer } from '../core/sync.js';
 import { htmlToMarkdown, markdownToHtml } from '../core/markdown.js';
-import { fileType, fsize } from '../ui/helpers.js';
+import { fileType, formatAgentLabel, fsize } from '../ui/helpers.js';
 import { effectiveDark } from '../core/theme.js';
 import { mutate, toast } from '../ui/toast.js';
-import { autosize, focusKey, fxSet, go, render } from '../shell/render.js';
+import { autosize, buildRouteHash, focusKey, fxSet, go, render, syncHashToState } from '../shell/render.js';
 import { viewOf } from '../shell/view-engine.js';
 import { TEMPLATES, closeModal, openModal } from '../overlays/modals.js';
 import { closePop, openPop, tgt } from '../overlays/popovers.js';
@@ -456,6 +456,7 @@ A.closeDrawer = () => {
   S.ui.drawer = null;
   S.ui.drawerFull = false;
   S.ui.subOpen = null;
+  if (location.hash.startsWith('#/task/')) syncHashToState(true);
   render();
 };
 A.skipToContent = () => {
@@ -503,7 +504,7 @@ A.releaseTaskClaim = el => {
   if (!t || !t.claimedBy) return;
   const prevAgent = t.claimedBy;
   if (mutate(() => domainReleaseTask(D(), t))) {
-    toast(`Released claim from ${prevAgent}`);
+    toast(`Released claim from ${formatAgentLabel(prevAgent)}`);
   }
 };
 A.toggleFavTask = el => {
@@ -528,17 +529,19 @@ A.copyLink = el => {
   S.ui.pop = null;
   render();
   const d = el.dataset;
-  const path =
+  const fid = d.fid || (d.id && !task(d.id) && !proj(d.id) ? d.id : null);
+  const f = fid ? D().files.find(x => x.id === fid) : null;
+  const hash =
     d.id && task(d.id)
-      ? `task/${task(d.id).key}`
-      : d.pid
-        ? `project/${proj(d.pid).key.toLowerCase()}`
-        : d.fid
-          ? `file/${d.fid}`
+      ? buildRouteHash(null, {}, task(d.id))
+      : d.pid && proj(d.pid)
+        ? buildRouteHash('project', { id: d.pid })
+        : f && proj(f.project)
+          ? buildRouteHash('project', { id: f.project, tab: 'files' })
           : d.id && proj(d.id)
-            ? `project/${proj(d.id).key.toLowerCase()}`
-            : '';
-  copy(`https://gr8rstudio.com/${D().ws.url}/${path}`);
+            ? buildRouteHash('project', { id: d.id })
+            : buildRouteHash(S.ui.route, S.ui.params);
+  copy(`${location.origin}${location.pathname}${hash}`);
 };
 A.copyText = el => copy(el.dataset.text, 'Copied to clipboard');
 A.copyEmail = el => {
@@ -1242,7 +1245,9 @@ A.delView = el => {
 
 /* board column menu */
 A.toggleCol = el => {
-  delete S.ui.collapsedCols[el.dataset.ck];
+  const ck = el.dataset.ck;
+  const cur = S.ui.collapsedCols[ck] ?? el.classList?.contains('collapsed') ?? false;
+  S.ui.collapsedCols[ck] = !cur;
   render();
 };
 A.colCollapse = el => {
@@ -1674,7 +1679,12 @@ A.delFile = el => {
 A.selDoc = el => {
   S.ui.docSel = S.ui.docSel || {};
   S.ui.docSel[el.dataset.project] = el.dataset.id;
-  if (S.ui.params) delete S.ui.params.doc;
+  if (S.ui.route === 'project' && S.ui.params.id === el.dataset.project && S.ui.params.tab === 'docs') {
+    S.ui.params = { ...S.ui.params, doc: el.dataset.id };
+    syncHashToState(true);
+  } else if (S.ui.params) {
+    delete S.ui.params.doc;
+  }
   render();
 };
 A.openDocSearch = el => {
@@ -1699,6 +1709,10 @@ A.newDoc = el => {
         S.ui.docSel[pid] = created.id;
         S.ui.docEdit = S.ui.docEdit || {};
         S.ui.docEdit[created.id] = true;
+        if (S.ui.route === 'project' && S.ui.params.id === pid && S.ui.params.tab === 'docs') {
+          S.ui.params = { ...S.ui.params, doc: created.id };
+          syncHashToState(true);
+        }
         render();
         setTimeout(() => $('#doc-body')?.focus(), 0);
       }
@@ -1747,7 +1761,16 @@ A.deleteDoc = el => {
     danger: true,
     run: () => {
       const snap = snapshot();
-      if (mutate(() => domainDeleteDoc(D(), doc.id))) {
+      if (
+        mutate(() => {
+          domainDeleteDoc(D(), doc.id);
+          if (S.ui.docSel?.[doc.project] === doc.id) delete S.ui.docSel[doc.project];
+          if (S.ui.route === 'project' && S.ui.params.id === doc.project && S.ui.params.tab === 'docs') {
+            delete S.ui.params.doc;
+            syncHashToState(true);
+          }
+        })
+      ) {
         toast(`Deleted “${doc.title}”`, { action: 'Undo', onAction: () => restore(snap) });
       }
     },

@@ -6,7 +6,7 @@ import { ic } from '../core/icons.js';
 import { PR, ST, isClosedStatus } from '../core/constants.js';
 import { openDepsOfTask } from '../core/domain.js';
 import { D, S, childrenOf, commentsOf, isOver, mem, pColor, proj, task } from '../core/store.js';
-import { agentBadge, av, dueHtml, empty, lbl, prIcon, prPill, stIcon, stPill } from '../ui/helpers.js';
+import { agentBadge, av, dueHtml, empty, formatAgentLabel, lbl, prIcon, prPill, stIcon, stPill } from '../ui/helpers.js';
 import { fxc } from '../shell/render.js';
 
 /* ---------- shared list renderer ---------- */
@@ -63,7 +63,7 @@ export function taskRow(t, cols, tpl, opt = {}) {
       <span class="key">${t.key}</span>
       ${parentTask ? `<span class="meta-mini mono" data-tip="Sub-issue of ${esc(parentTask.key)}: ${esc(parentTask.title)}">↳ ${parentTask.key}</span>` : ''}
       ${editing ? `<input class="inline-in" id="edit-title" data-in="noop" data-blur="commitTitle" data-key-enter="commitTitle" data-id="${t.id}" value="${esc(t.title)}" aria-label="Task title">` : `<span class="tt">${esc(t.title)}</span>`}
-      ${t.claimedBy ? `<span class="meta-mini mono" data-tip="Claimed by ${esc(t.claimedBy)}">${ic('bot', 11)}${esc(t.claimedBy)}</span>` : ''}
+      ${t.claimedBy ? `<span class="meta-mini mono" data-tip="Claimed by ${esc(t.claimedBy)}" title="Claimed by ${esc(t.claimedBy)}" style="flex-shrink:0">${ic('bot', 11)}${esc(formatAgentLabel(t.claimedBy))}</span>` : ''}
       ${!isClosedStatus(t.status) && openDeps.length ? `<span class="meta-mini" data-tip="Blocked by ${esc(openDeps.map(d => d.key).join(', '))}" style="color:var(--amber)">${ic('lock', 11)}</span>` : ''}
       ${t.recur ? `<span class="meta-mini" data-tip="Repeats ${t.recur.toLowerCase()}">${ic('repeat', 11)}</span>` : ''}
       ${kids.length ? `<span class="meta-mini" data-tip="Sub-issues">${ic('git-fork', 11)}${doneKids}/${activeKids.length}</span>` : ''}

@@ -25,7 +25,42 @@ export function stripHtml(html) {
     .trim();
 }
 
-function inlineToHtml(text) {
+export function trimTrailingUrlPunct(raw) {
+  let url = String(raw ?? '');
+  while (url.length) {
+    const last = url[url.length - 1];
+    if (/[.,;:!?]/.test(last)) {
+      url = url.slice(0, -1);
+      continue;
+    }
+    if (last === ')') {
+      const opens = (url.match(/\(/g) || []).length;
+      const closes = (url.match(/\)/g) || []).length;
+      if (closes > opens) {
+        url = url.slice(0, -1);
+        continue;
+      }
+    }
+    if (last === ']') {
+      const opens = (url.match(/\[/g) || []).length;
+      const closes = (url.match(/\]/g) || []).length;
+      if (closes > opens) {
+        url = url.slice(0, -1);
+        continue;
+      }
+    }
+    break;
+  }
+  return /^https?:\/\/.+/i.test(url) ? url : '';
+}
+
+export function matchBareUrlAt(s, i) {
+  if (i > 0 && /[a-z0-9]/i.test(s[i - 1])) return '';
+  const m = /^https?:\/\/[^\s<>"']+/i.exec(s.slice(i));
+  return m ? trimTrailingUrlPunct(m[0]) : '';
+}
+
+function inlineToHtml(text, inLink = false) {
   let out = '';
   let i = 0;
   const s = String(text ?? '');
@@ -38,10 +73,10 @@ function inlineToHtml(text) {
         continue;
       }
     }
-    if (s[i] === '[') {
+    if (!inLink && s[i] === '[') {
       const m = /^\[([^\]]+)\]\((https?:\/\/[^\s)"']+)\)/.exec(s.slice(i));
       if (m) {
-        out += `<a href="${esc(m[2])}">${inlineToHtml(m[1])}</a>`;
+        out += `<a href="${esc(m[2])}">${inlineToHtml(m[1], true)}</a>`;
         i += m[0].length;
         continue;
       }
@@ -49,7 +84,7 @@ function inlineToHtml(text) {
     if (s.startsWith('**', i)) {
       const end = s.indexOf('**', i + 2);
       if (end > i + 2) {
-        out += `<b>${inlineToHtml(s.slice(i + 2, end))}</b>`;
+        out += `<b>${inlineToHtml(s.slice(i + 2, end), inLink)}</b>`;
         i = end + 2;
         continue;
       }
@@ -57,12 +92,20 @@ function inlineToHtml(text) {
     if (s[i] === '*' && s[i + 1] !== '*' && s[i + 1] !== ' ') {
       const end = s.indexOf('*', i + 1);
       if (end > i + 1) {
-        out += `<i>${inlineToHtml(s.slice(i + 1, end))}</i>`;
+        out += `<i>${inlineToHtml(s.slice(i + 1, end), inLink)}</i>`;
         i = end + 1;
         continue;
       }
     }
-    const nextSpecial = s.slice(i + 1).search(/[`[*]/);
+    if (!inLink && (s[i] === 'h' || s[i] === 'H')) {
+      const url = matchBareUrlAt(s, i);
+      if (url) {
+        out += `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`;
+        i += url.length;
+        continue;
+      }
+    }
+    const nextSpecial = s.slice(i + 1).search(inLink ? /[`*]/ : /[`[*]|https?:\/\//i);
     const chunk = nextSpecial === -1 ? s.slice(i) : s.slice(i, i + 1 + nextSpecial);
     out += esc(chunk);
     i += chunk.length;
@@ -147,7 +190,11 @@ function inlineHtmlToMd(html) {
   do {
     prev = s;
     s = s
-      .replace(/<a\b[^>]*href=["'](https?:\/\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_, href, label) => `[${inlineHtmlToMd(label)}](${unescapeHtml(href)})`)
+      .replace(/<a\b[^>]*href=["'](https?:\/\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_, href, label) => {
+        const decodedHref = unescapeHtml(href);
+        const mdLabel = inlineHtmlToMd(label);
+        return mdLabel === decodedHref ? decodedHref : `[${mdLabel}](${decodedHref})`;
+      })
       .replace(/<(?:b|strong)\b[^>]*>([\s\S]*?)<\/(?:b|strong)>/gi, (_, inner) => `**${inlineHtmlToMd(inner)}**`)
       .replace(/<(?:i|em)\b[^>]*>([\s\S]*?)<\/(?:i|em)>/gi, (_, inner) => `*${inlineHtmlToMd(inner)}*`);
   } while (s !== prev);

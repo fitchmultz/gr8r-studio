@@ -79,6 +79,20 @@ test('markdown <-> drawer HTML round-trips losslessly and escapes raw HTML', () 
   const escaped = markdownToHtml('Check <script>alert(1)</script> & `<b>literal</b>`');
   assert.equal(escaped, '<p>Check &lt;script&gt;alert(1)&lt;/script&gt; &amp; <code>&lt;b&gt;literal&lt;/b&gt;</code></p>');
   assert.equal(stripHtml(pidHtml).includes('Surface native UsageDoc'), true);
+
+  const bareMd =
+    'See https://example.com/spec?a=1&b=2. Also (https://en.wikipedia.org/wiki/Foo_(bar)) and `https://code.invalid`! Keep [https://label.example](https://target.example).';
+  const bareHtml = markdownToHtml(bareMd);
+  assert.equal(
+    bareHtml,
+    '<p>See <a href="https://example.com/spec?a=1&amp;b=2" target="_blank" rel="noopener noreferrer">https://example.com/spec?a=1&amp;b=2</a>. ' +
+      'Also (<a href="https://en.wikipedia.org/wiki/Foo_(bar)" target="_blank" rel="noopener noreferrer">https://en.wikipedia.org/wiki/Foo_(bar)</a>) ' +
+      'and <code>https://code.invalid</code>! Keep <a href="https://target.example">https://label.example</a>.</p>',
+  );
+  assert.equal(htmlToMarkdown(bareHtml), bareMd);
+
+  const nonBoundary = markdownToHtml('foohttps://example.com');
+  assert.equal(nonBoundary, '<p>foohttps://example.com</p>');
 });
 
 test('task creation enforces sequential keys, date clamping, validation, and markdown descriptions', () => {

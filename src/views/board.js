@@ -4,7 +4,7 @@ import { ic } from '../core/icons.js';
 import { PR, STATUSES, isClosedStatus } from '../core/constants.js';
 import { openDepsOfTask } from '../core/domain.js';
 import { D, S, childrenOf, commentsOf, pColor, proj, task } from '../core/store.js';
-import { av, dueHtml, lbl, prIcon, progBar, stIcon } from '../ui/helpers.js';
+import { av, dueHtml, formatAgentLabel, lbl, prIcon, progBar, stIcon } from '../ui/helpers.js';
 import { fxc } from '../shell/render.js';
 
 export function kcard(t, opt = {}) {
@@ -26,7 +26,7 @@ export function kcard(t, opt = {}) {
       <span class="key">${t.key}</span>
       ${parentTask ? `<span class="m mono" data-tip="Sub-issue of ${esc(parentTask.key)}: ${esc(parentTask.title)}" style="font-size:11px">↳ ${parentTask.key}</span>` : ''}
       ${kids.length ? `<span class="m num" data-tip="${doneKids}/${activeKids.length} sub-issues done">${ic('git-fork', 12)}${doneKids}/${activeKids.length}</span>` : ''}
-      ${t.claimedBy ? `<span class="m mono" data-tip="Claimed by ${esc(t.claimedBy)}" style="font-size:11px">${ic('bot', 12)}${esc(t.claimedBy)}</span>` : ''}
+      ${t.claimedBy ? `<span class="m mono" data-tip="Claimed by ${esc(t.claimedBy)}" title="Claimed by ${esc(t.claimedBy)}" style="font-size:11px;max-width:160px">${ic('bot', 12)}<span class="trunc">${esc(formatAgentLabel(t.claimedBy))}</span></span>` : ''}
       ${!isClosedStatus(t.status) && openDeps.length ? `<span class="m" data-tip="Blocked by ${esc(openDeps.map(d => d.key).join(', '))}" style="color:var(--amber)">${ic('lock', 12)}</span>` : ''}
       <button class="m" data-a="pop" data-pop="priority" data-id="${t.id}" data-tip="${PR[t.priority].name}" aria-label="Priority: ${PR[t.priority].name}">${prIcon(t.priority, 13)}</button>
       ${t.due ? `<button class="m" data-a="pop" data-pop="date" data-field="due" data-id="${t.id}" aria-label="Due date">${dueHtml(t)}</button>` : ''}
@@ -42,7 +42,8 @@ export function boardHtml(ts, key, opt = {}) {
   return `<div class="board" data-keep="board:${key}">${STATUSES.map(s => {
     const col = ts.filter(t => t.status === s.id).sort((a, b) => a.order - b.order);
     const ck = key + ':' + s.id;
-    if (S.ui.collapsedCols[ck])
+    const isCollapsed = S.ui.collapsedCols[ck] ?? (s.id === 'canceled' && col.length === 0);
+    if (isCollapsed)
       return `<div class="bcol collapsed" data-a="toggleCol" data-ck="${ck}" data-drop-col="${s.id}" data-key="${key}" role="button" aria-label="Expand ${s.name}" title="Expand">${stIcon(s.id)}<span class="vname">${s.name}<span class="faint">${col.length}</span></span></div>`;
     const comp = S.ui.composer && S.ui.composer.ctx === key && S.ui.composer.group === s.id;
     return `<section class="bcol" data-drop-col="${s.id}" data-key="${key}" aria-label="${s.name}">

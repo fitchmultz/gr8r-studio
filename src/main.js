@@ -53,10 +53,10 @@ import './features/archive.js';
 import './actions/teams.js';
 import './actions/subtasks.js';
 import './actions/archive.js';
-import { initSync } from './core/sync.js';
-import { S, D } from './core/store.js';
+import { initSync, isSyncEnabled } from './core/sync.js';
+import { S, D, getRev } from './core/store.js';
 import { A } from './actions/actions.js';
-import { ROUTE_NAMES, render, go } from './shell/render.js';
+import { applyHashRoute, buildRouteHash, consumeProgrammaticHash, go, render } from './shell/render.js';
 
 (function init() {
   document.documentElement.lang = 'en';
@@ -67,12 +67,49 @@ import { ROUTE_NAMES, render, go } from './shell/render.js';
     l.setAttribute('aria-live', 'polite');
     document.body.appendChild(l);
   }
-  const h = (location.hash || '').slice(1);
-  if (h && ROUTE_NAMES[h]) S.ui.route = h;
-  else S.ui.route = S.prefs.home || 'home';
+  const parsed = applyHashRoute({ initial: true });
+  if (parsed.empty) {
+    history.replaceState(null, '', buildRouteHash(S.ui.route, S.ui.params));
+  } else if (parsed.unresolved && isSyncEnabled() && getRev() === 0) {
+    S.ui.loading = true;
+  }
   render();
   initSync();
 })();
+
+window.addEventListener('hashchange', () => {
+  if (consumeProgrammaticHash(location.hash)) return;
+  applyHashRoute({ fromHash: true });
+  render();
+});
+
+document.addEventListener(
+  'error',
+  e => {
+    if (e.target instanceof HTMLImageElement && e.target.matches('img[data-fprev-img]')) {
+      e.target.style.display = 'none';
+    }
+  },
+  true,
+);
+
+document.addEventListener('click', e => {
+  if (e.button !== 0) return;
+  const a = e.target.closest?.('.rte-body a[href]');
+  if (!a) return;
+  const inEditor = !!a.closest('[contenteditable="true"]');
+  const modified = e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
+  if (!inEditor && modified) return;
+  const href = a.getAttribute('href') || '';
+  if (!/^https?:\/\//i.test(href)) {
+    e.preventDefault();
+    return;
+  }
+  const sel = window.getSelection?.();
+  if (sel && !sel.isCollapsed) return;
+  e.preventDefault();
+  window.open(href, '_blank', 'noopener,noreferrer');
+});
 
 // Dev-only handle for debugging and screenshot tooling; stripped from production builds.
 if (import.meta.env.DEV) window.__gr8r = { S, D, A, go, render };
