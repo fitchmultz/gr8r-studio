@@ -38,6 +38,7 @@ import {
   formatTaskForApi,
   isWorkspacePatchEmpty,
   markAllNotifsRead,
+  mentionsWorkspaceOwner,
   normalizeAgentName,
   promoteSubtask,
   pushNotif,
@@ -99,13 +100,43 @@ function resolveRequestAgent(req, body) {
   }
 }
 
-function mapApiTaskInput(body) {
+function normalizeDepList(val) {
+  if (Array.isArray(val)) return val;
+  if (typeof val === 'string') {
+    return val
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+  }
+  return undefined;
+}
+
+function mapApiTaskInput(body, { mode = 'patch' } = {}) {
   if (!body || typeof body !== 'object') return body;
+  if (mode === 'create') {
+    const extraDeps = normalizeDepList(body.dep) ?? normalizeDepList(body.addDeps);
+    if (extraDeps !== undefined && body.deps === undefined) {
+      body = { ...body, deps: extraDeps };
+    } else if (typeof body.deps === 'string') {
+      body = { ...body, deps: normalizeDepList(body.deps) };
+    }
+  } else if (body.dep !== undefined && body.addDeps === undefined && body.deps === undefined) {
+    const depList = normalizeDepList(body.dep);
+    if (depList !== undefined) body = { ...body, addDeps: depList };
+  }
   if (body.desc !== undefined && body.descMarkdown === undefined && body.descHtml === undefined) {
     const { desc, ...rest } = body;
     return { ...rest, descMarkdown: desc };
   }
   return body;
+}
+
+function commentWillPushNotif(data, taskAssignee, { by, agent, needsOwner, text }) {
+  if (needsOwner) return true;
+  const isExternal = Boolean(agent) || by !== data.me;
+  if (!isExternal) return false;
+  if (mentionsWorkspaceOwner(data, text)) return data.notifPrefs?.push_mention !== false;
+  return data.notifPrefs?.push_comment !== false && (Boolean(agent) || taskAssignee === data.me);
 }
 
 function parseJsonBody(raw) {
@@ -152,6 +183,11 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
     }
     const draft = cur.state ? structuredClone(cur.state) : createDefaultState();
     const out = fn(draft.data, body, draft);
+    if (out?.__unchanged && cur.state) {
+      const rest = { ...out };
+      delete rest.__unchanged;
+      return { rev: cur.rev, ...rest };
+    }
     const committed = commitState(draft);
     return { rev: committed.rev, ...out };
   };
@@ -534,7 +570,7 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
           if (Array.isArray(body.tasks)) {
             if (!body.tasks.length) throw new DomainError('tasks array cannot be empty');
             const created = body.tasks.map(item =>
-              createTask(data, mapApiTaskInput({ ...(body.project ? { project: body.project } : {}), ...item }), {
+              createTask(data, mapApiTaskInput({ ...(body.project ? { project: body.project } : {}), ...item }, { mode: 'create' }), {
                 by,
                 agent,
                 needsOwner: !!(item.needsOwner ?? body.needsOwner),
@@ -542,7 +578,7 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
             );
             return { tasks: created.map(t => formatTaskForApi(data, t)) };
           }
-          const t = createTask(data, mapApiTaskInput(body), { by, agent, needsOwner: !!body.needsOwner });
+          const t = createTask(data, mapApiTaskInput(body, { mode: 'create' }), { by, agent, needsOwner: !!body.needsOwner });
           return { task: formatTaskForApi(data, t) };
         });
         if (result) send(res, 201, result);
@@ -594,15 +630,46 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
         }
         if (method === 'PATCH') {
           const result = await mutate((data, body) => {
-            const out = applyTaskPatch(data, ref, mapApiTaskInput(body), {
-              by: resolveActor(data, body.by),
-              agent: resolveRequestAgent(req, body),
+            const { comment: rawComment, ...patchBody } = body;
+            const hasComment = rawComment !== undefined;
+            if (hasComment && (typeof rawComment !== 'string' || !rawComment.trim())) {
+              throw new DomainError('Comment text cannot be empty', 400);
+            }
+            const by = resolveActor(data, body.by);
+            const agent = resolveRequestAgent(req, body);
+            const notifsBeforePatch = (data.notifs || []).length;
+            const trimmedComment = hasComment ? rawComment.trim() : '';
+            const targetBefore = hasComment ? requireTask(data, ref) : null;
+            const effectiveAssignee =
+              hasComment && patchBody.assignee !== undefined ? resolveMember(data, patchBody.assignee) : (targetBefore?.assignee ?? null);
+            const willCommentNotify =
+              hasComment && commentWillPushNotif(data, effectiveAssignee, { by, agent, needsOwner: !!body.needsOwner, text: trimmedComment });
+            const out = applyTaskPatch(data, ref, mapApiTaskInput(patchBody), {
+              by,
+              agent,
               needsOwner: !!body.needsOwner,
-              skipNeedsOwnerNotif: !!body.skipNeedsOwnerNotif,
+              skipNeedsOwnerNotif: hasComment ? true : !!body.skipNeedsOwnerNotif,
+              skipStatusNotif: hasComment ? Boolean(body.skipStatusNotif || willCommentNotify) : !!body.skipStatusNotif,
+              ...(hasComment ? { snippet: trimmedComment } : {}),
             });
+            const addedNotifs = (data.notifs || []).slice(0, (data.notifs || []).length - notifsBeforePatch);
+            const statusFoldedComment =
+              hasComment && addedNotifs.some(n => n.task === out.task.id && n.type === 'update' && n.snippet === trimmedComment.replace(/\s+/g, ' ').trim());
+            const comment = hasComment
+              ? enrichComment(
+                  data,
+                  addComment(data, out.task, rawComment, {
+                    by,
+                    agent,
+                    needsOwner: !!body.needsOwner,
+                    skipNotif: statusFoldedComment && !body.needsOwner && !mentionsWorkspaceOwner(data, rawComment),
+                  }),
+                )
+              : undefined;
             return {
               task: formatTaskForApi(data, out.task),
               spawned: out.spawned ? formatTaskForApi(data, out.spawned) : null,
+              ...(comment ? { comment } : {}),
             };
           });
           if (result) send(res, 200, result);
@@ -624,19 +691,24 @@ export async function handleDomainApi({ req, res, url, getStore, commitState, re
         const result = await mutate((data, body) => {
           const by = resolveActor(data, body.by);
           const agent = resolveRequestAgent(req, body);
-          const t = isClaim
-            ? claimTask(data, taskRef, {
-                by,
-                agent,
-                force: !!body.force,
-                status: body.status,
-                assignee: body.assignee,
-              })
-            : releaseTask(data, taskRef, {
-                by,
-                agent,
-                status: body.status,
-              });
+          if (isClaim) {
+            const before = resolveTask(data, taskRef);
+            const beforeSnap = before ? JSON.stringify(before) : null;
+            const t = claimTask(data, taskRef, {
+              by,
+              agent,
+              force: !!body.force,
+              status: body.status,
+              assignee: body.assignee,
+            });
+            const unchanged = beforeSnap !== null && beforeSnap === JSON.stringify(t);
+            return { ...(unchanged ? { __unchanged: true } : {}), task: formatTaskForApi(data, t) };
+          }
+          const t = releaseTask(data, taskRef, {
+            by,
+            agent,
+            status: body.status,
+          });
           return { task: formatTaskForApi(data, t) };
         });
         if (result) send(res, 200, result);

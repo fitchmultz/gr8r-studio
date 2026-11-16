@@ -222,10 +222,16 @@ test('gr8r CLI guides user to GR8R_TOKEN when /api/config bootstrap is disabled,
   const detailOut = await invoke(['task', 'view', 'PID-201'], { env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' } });
   assert.match(detailOut.stdout, /Pull requests:\n\s+\[open\] fitchmultz\/pi-durable#447/);
 
+  const beforeCancelNotifs = JSON.parse((await invoke(['inbox', '-t', 'PID-201', '--json'], { env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' } })).stdout)
+    .notifications.length;
   const cancelOut = await invoke(['task', 'cancel', 'PID-201', '--comment', 'Superseded by PID-202'], {
-    env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' },
+    env: { ...baseEnv, GR8R_TOKEN: 'strict-secret', PI_SESSION_NAME: 'cancel-worker' },
   });
   assert.match(cancelOut.stdout, /Updated PID-201 -> canceled/);
+  const cancelInbox = JSON.parse((await invoke(['inbox', '-t', 'PID-201', '--json'], { env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' } })).stdout);
+  assert.equal(cancelInbox.notifications.length, beforeCancelNotifs + 1);
+  assert.equal(cancelInbox.notifications[0].type, 'comment');
+  assert.equal(cancelInbox.notifications[0].snippet, 'Superseded by PID-202');
   const openAfterCancel = await invoke(['tasks', '-p', 'PID', '-s', 'open', '--json'], {
     env: { ...baseEnv, GR8R_TOKEN: 'strict-secret' },
   });
@@ -258,7 +264,9 @@ test('gr8r CLI guides user to GR8R_TOKEN when /api/config bootstrap is disabled,
   await invoke(['comment', 'add', 'PID-202', 'Progress note from Pi session'], { env: autoEnv });
   const viewWithAgent = await invoke(['task', 'view', 'PID-202'], { env: autoEnv });
   assert.match(viewWithAgent.stdout, /Claimed by: pi:worker-a/);
-  assert.match(viewWithAgent.stdout, /\[pi:abcdef12-3456-7890-abcd-ef1234567890\]/);
+  assert.match(viewWithAgent.stdout, /\[pi:abcdef12\]/);
+  const activityOut = await invoke(['activity', '-t', 'PID-202'], { env: autoEnv });
+  assert.match(activityOut.stdout, /Mitch Fultz \[pi:abcdef12\] commented on PID-202/);
   await invoke(['task', 'release', 'PID-202', '--status', 'todo'], { env: autoEnv });
 
   await invoke(['comment', 'add', 'PID-202', 'Need owner sign-off on schema', '--needs-owner'], { env: autoEnv });
@@ -275,6 +283,8 @@ test('gr8r CLI guides user to GR8R_TOKEN when /api/config bootstrap is disabled,
   assert.match(attOut.stdout, /Attached qa-proof\.png .* to PID-202/);
   const filesJson = JSON.parse((await invoke(['files', '-t', 'PID-202', '--json'], { env: autoEnv })).stdout);
   assert.equal(filesJson.files.length, 1);
+  const viewWithAttachment = await invoke(['task', 'view', 'PID-202'], { env: autoEnv });
+  assert.match(viewWithAttachment.stdout, new RegExp(`Attachments \\(1\\): \\[${filesJson.files[0].id}\\] qa-proof\\.png \\([^,]+, persisted\\)`));
   const dlPath = path.join(dir, 'downloaded.png');
   await invoke(['file', 'download', filesJson.files[0].id, '-o', dlPath], { env: autoEnv });
   assert.deepEqual(fs.readFileSync(dlPath), pngBytes);
@@ -289,7 +299,9 @@ test('gr8r CLI guides user to GR8R_TOKEN when /api/config bootstrap is disabled,
 
   const searchOut = await invoke(['search', 'Verified live blob'], { env: autoEnv });
   assert.match(searchOut.stdout, /Docs \(1\):/);
-  assert.match(searchOut.stdout, /\[service-runbook\] Service Runbook/);
+  assert.match(searchOut.stdout, /\[service-runbook\] Service Runbook \(PID\)/);
+  const searchFileOut = await invoke(['search', 'qa-proof'], { env: autoEnv });
+  assert.match(searchFileOut.stdout, /Files \(1\):\n\s+qa-proof\.png \(PID\)/);
 
   // Deleting an attachment removes its unreferenced blob from /api/blobs.
   const delBlobId = filesJson.files[0].blobId;
@@ -305,4 +317,86 @@ test('gr8r CLI guides user to GR8R_TOKEN when /api/config bootstrap is disabled,
   await assert.rejects(() => invoke(['attach', 'PID-999', pngPath], { env: autoEnv }), /Task not found: PID-999/);
   const afterOrphanCount = fs.existsSync(blobsDir) ? fs.readdirSync(blobsDir).length : 0;
   assert.equal(afterOrphanCount, beforeOrphanCount);
+});
+
+test('gr8r CLI resolves Pi session identity, supports task create deps, validates per-command flags, and formats inbox/blocks output', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gr8r-cli-polish-'));
+  const srv = await startServer({ dataFile: path.join(dir, 'state.json'), distDir: dir, token: 'polish-secret' });
+  t.after(async () => {
+    await srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const env = {
+    HOME: dir,
+    GR8R_CONFIG: path.join(dir, 'config.json'),
+    GR8R_URL: `http://127.0.0.1:${srv.port}`,
+    GR8R_TOKEN: 'polish-secret',
+  };
+
+  // Session identity precedence: --agent / GR8R_AGENT > PI_SESSION_NAME > PI_SESSION_FILE > PI_SESSION_ID (UUID shortened).
+  const sessionFile = path.join(dir, 'session.jsonl');
+  fs.writeFileSync(
+    sessionFile,
+    [
+      JSON.stringify({ type: 'session_info', name: 'old-session-name' }),
+      '{not valid json',
+      JSON.stringify({ type: 'message', text: 'hello' }),
+      JSON.stringify({ type: 'session_info', name: 'latest-dogfood-session' }),
+      JSON.stringify({ type: 'session_info', name: '   ' }),
+    ].join('\n') + '\n',
+  );
+  assert.equal(new Gr8rClient({ agent: 'custom-cli', env: { ...env, GR8R_AGENT: 'env-agent', PI_SESSION_NAME: 'named' } }).agent, 'custom-cli');
+  assert.equal(new Gr8rClient({ env: { ...env, GR8R_AGENT: 'env-agent', PI_SESSION_NAME: 'named' } }).agent, 'env-agent');
+  assert.equal(new Gr8rClient({ env: { ...env, PI_SESSION_NAME: 'named', PI_SESSION_FILE: sessionFile } }).agent, 'pi:named');
+  assert.equal(
+    new Gr8rClient({ env: { ...env, PI_SESSION_FILE: sessionFile, PI_SESSION_ID: '12345678-aaaa-bbbb-cccc-1234567890ab' } }).agent,
+    'pi:latest-dogfood-session',
+  );
+  assert.equal(
+    new Gr8rClient({ env: { ...env, PI_SESSION_FILE: path.join(dir, 'missing.jsonl'), PI_SESSION_ID: '12345678-aaaa-bbbb-cccc-1234567890ab' } }).agent,
+    'pi:12345678',
+  );
+  assert.equal(new Gr8rClient({ env: { ...env, PI_SESSION_ID: 'custom-non-uuid' } }).agent, 'pi:custom-non-uuid');
+
+  // Reject unsupported flags per command/subcommand while allowing global flags and aliases.
+  await assert.rejects(
+    () => invoke(['task', 'create', 'Bad flag', '-p', 'GS', '--add-milestone', 'M1@2026-12-01'], { env }),
+    /Flag --add-milestone is not supported for "task create"/,
+  );
+  await assert.rejects(
+    () => invoke(['project', 'delete', 'GS', '--yes', '--status', 'active'], { env }),
+    /Flag --status is not supported for "project delete"/,
+  );
+  await assert.rejects(() => invoke(['task', 'done', 'GS-201', '--status', 'review'], { env }), /Flag --status is not supported for "task done"/);
+
+  await invoke(['project', 'create', 'Dogfood', '--key', 'DOG'], { env });
+  await invoke(['task', 'create', 'Base task', '-p', 'DOG'], { env });
+  await invoke(['task', 'create', 'Second dep', '-p', 'DOG'], { env });
+
+  // task create accepts --dep, --add-dep, and --deps and populates reverse blocksKeys in task view.
+  const depTaskRes = JSON.parse(
+    (await invoke(['task', 'create', 'Dependent slice', '-p', 'DOG', '--dep', 'DOG-201', '--add-dep', 'DOG-202', '--json'], { env })).stdout,
+  );
+  assert.deepEqual(depTaskRes.task.depKeys, ['DOG-201', 'DOG-202']);
+  const baseView = await invoke(['task', 'view', 'DOG-201', '--agent', 'pi:viewer'], { env });
+  assert.match(baseView.stdout, /Blocks: DOG-203/);
+
+  // Inbox table clips overly long summaries while preserving full text in --json, and omits " — " when snippet is empty.
+  const longComment = 'Detailed verification log: ' + 'x'.repeat(140);
+  await invoke(['task', 'done', 'DOG-201'], { env: { ...env, PI_SESSION_FILE: sessionFile } });
+  await invoke(['comment', 'add', 'DOG-202', longComment], { env: { ...env, PI_SESSION_FILE: sessionFile } });
+
+  const inboxTable = await invoke(['inbox', '-p', 'DOG'], { env });
+  assert.match(inboxTable.stdout, /pi:latest-dogfood-session/);
+  const doneLine = inboxTable.stdout.split('\n').find(l => l.includes('DOG-201'));
+  assert.ok(doneLine);
+  assert.doesNotMatch(doneLine, /\s—\s*$/);
+  const commentLine = inboxTable.stdout.split('\n').find(l => l.includes('DOG-202'));
+  assert.ok(commentLine);
+  assert.match(commentLine, /…$/);
+  assert.doesNotMatch(commentLine, new RegExp('x'.repeat(130)));
+
+  const inboxJson = JSON.parse((await invoke(['inbox', '-p', 'DOG', '--json'], { env })).stdout);
+  assert.equal(inboxJson.notifications.find(n => n.taskKey === 'DOG-202').snippet, longComment);
 });
