@@ -317,8 +317,11 @@ async function push() {
 
 async function pull() {
   if (!syncOn || pushing) return;
-  if (getPendingSave()) return push();
   try {
+    if (getPendingSave()) {
+      await push();
+      return;
+    }
     const r = await authedFetch('/state');
     if (!r) return;
     if (!r.ok) {
