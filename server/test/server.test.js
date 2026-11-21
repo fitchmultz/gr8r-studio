@@ -238,6 +238,8 @@ test('domain API applies atomic project, task, subtask, comment, search, and act
   assert.equal(createdProj.status, 201);
   assert.equal(createdProj.json.rev, 1);
   assert.equal(createdProj.json.project.key, 'PID');
+  // A project created without a target date keeps none instead of an invented deadline.
+  assert.equal(createdProj.json.project.due, null);
 
   const batch = await call('POST', '/api/tasks', {
     project: 'PID',

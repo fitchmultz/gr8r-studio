@@ -607,7 +607,7 @@ export function createProject(data, fields = {}, opts = {}) {
   if (!PICONS.includes(icon)) throw new DomainError(`Invalid project icon "${icon}"`);
   const lead = fields.lead !== undefined ? resolveMember(data, fields.lead) || by : by;
   const start = fields.start !== undefined ? validateOptionalDate(fields.start, 'start') : dOff(0, today);
-  const due = fields.due !== undefined ? validateOptionalDate(fields.due, 'due') : dOff(30, today);
+  const due = fields.due !== undefined ? validateOptionalDate(fields.due, 'due') : null;
   const milestones = Array.isArray(fields.milestones) ? fields.milestones.map(validateMilestone) : [];
   const p = {
     id: fields.id || uid('p'),
