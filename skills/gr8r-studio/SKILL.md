@@ -17,13 +17,13 @@ gr8r status
 node <SKILL_DIR>/../../cli/gr8r.js status
 ```
 
-In cloud `pi-durable` chats (which are not directly on the tailnet), run `gr8r` through `local_device` (`action: "execute"`, `tool: "bash"`, `args: { command: "gr8r ..." }`) on an online personal device (`alienarchy`, `m1-mbp`, or `mitchs-m5-mbp`).
+In cloud `pi-durable` chats (which are not directly on the tailnet), run `gr8r` through `local_device` (`action: "execute"`, `tool: "bash"`, `args: { command: "gr8r ..." }`) on an online personal device (`m1-mbp`, `mitchs-m5-mbp`, or `alienarchy`).
 
 ## Endpoint, Auth, and Tailscale Proxy Resolution
 
-Gr8r Studio runs on Alienarchy and is served privately across the tailnet via Tailscale Serve at `https://alienarchy.tail854973.ts.net:8443` (do not target `127.0.0.1:4180` from client devices). `gr8r` resolves connection settings automatically:
+Gr8r Studio runs on the M1 and is served privately across the tailnet via Tailscale Serve at `https://m1-mbp.tail854973.ts.net:8443` (do not target `127.0.0.1:4180` from client devices). `gr8r` resolves connection settings automatically:
 
-1. **Server URL:** `--url <url>`, `GR8R_URL`, `~/.config/gr8r/config.json` (`"url"`), or `https://alienarchy.tail854973.ts.net:8443`.
+1. **Server URL:** `--url <url>`, `GR8R_URL`, `~/.config/gr8r/config.json` (`"url"`), or `https://m1-mbp.tail854973.ts.net:8443`.
 2. **Token:** `--token`, `GR8R_TOKEN`, `~/.config/gr8r/config.json`, or fetched automatically from `GET <url>/api/config` on private Tailscale Serve / loopback routes (refreshing once on `401`). Non-Tailscale routes withhold `/api/config` bootstrap and require `GR8R_TOKEN` or `--token`.
 3. **Proxy:** `--proxy`, `GR8R_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, or `~/.config/gr8r/config.json` (`"proxy"`), routed through Node's built-in `http.Agent` / `https.Agent` `proxyEnv` support. When a `*.ts.net` hostname cannot connect directly (for example on split-Tailscale machines running `ts-personal`), `gr8r` automatically falls back to `http://127.0.0.1:1055`.
 
@@ -124,7 +124,7 @@ gr8r task update PID-202 --add-dep PID-201 --due 2026-11-18 --append-desc - <<'E
 Confirmed SSE updates land immediately.
 EOF
 
-# Link or sync a GitHub PR to KEY-123 tasks (also runs automatically every 60s on Alienarchy)
+# Link or sync a GitHub PR to KEY-123 tasks (also runs automatically every 60s on the M1)
 gr8r pr-sync --repo fitchmultz/pi-durable --pr 447 --title "feat: autofix (PID-206)" --state open
 
 # Escalate a blocker or decision directly to the owner's Inbox

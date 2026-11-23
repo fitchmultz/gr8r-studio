@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-const DEFAULT_URL = 'https://alienarchy.tail854973.ts.net:8443';
+const DEFAULT_URL = 'https://m1-mbp.tail854973.ts.net:8443';
 const TAILSCALE_PROXY = 'http://127.0.0.1:1055';
 const PROXY_RETRY_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH']);
 

@@ -81,7 +81,7 @@ test('gr8r CLI manages config, projects, tasks, Markdown stdin, subtasks, commen
   };
 
   const unconfigured = new Gr8rClient({ env });
-  assert.equal(unconfigured.apiBase, 'https://alienarchy.tail854973.ts.net:8443/api');
+  assert.equal(unconfigured.apiBase, 'https://m1-mbp.tail854973.ts.net:8443/api');
 
   // Pre-connect timeout stamps ETIMEDOUT and enters the .ts.net auto-proxy check.
   const blackholeClient = new Gr8rClient({ url: 'http://100.64.0.1:8443', proxy: '', env });
