@@ -56,8 +56,8 @@ ssh m1-mbp '
 '
 ```
 
-- **Frontend-only changes (`src/`, `public/`, `index.html`):** `server/server.js` reads `dist/` directly from disk, so rebuilding `dist/` takes effect immediately without restarting the server.
-- **Server or shared domain changes (`server/`, `src/core/domain.js`, `src/core/markdown.js`, `src/core/dates.js`, `src/core/constants.js`):** Restart the server after pulling:
+- **Browser-only frontend changes (`src/` outside `SHARED_CORE`, `public/`, `index.html`):** `server/server.js` reads `dist/` directly from disk, so rebuilding `dist/` takes effect immediately without restarting the server.
+- **Server or Node-shared module changes (`server/` or `SHARED_CORE` in `eslint.config.js`: `src/core/domain.js`, `src/core/markdown.js`, `src/core/dates.js`, `src/core/constants.js`, `src/data/seed.js`):** Restart the server after pulling:
   ```bash
   ssh m1-mbp 'launchctl kickstart -k user/$(id -u)/com.fitchmultz.gr8r'
   ```
