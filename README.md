@@ -14,43 +14,52 @@ Requires Node.js 24.5+ (`.nvmrc` pins 26 Active LTS).
 
 ```bash
 npm install
-npm run dev       # http://localhost:5173 with hot reload
-npm run build     # production build in dist/
-npm run preview   # serve the production build locally
-npm run lint      # ESLint
-npm run format    # Prettier
+npm run dev          # http://localhost:5173 with hot reload
+npm run build        # standalone static build in dist/ (localStorage only, no sync)
+npm run build:server # self-hosted build in dist/ with sync enabled (VITE_SYNC_URL=/api)
+npm run preview      # serve the production build locally
+npm run lint         # ESLint
+npm run format       # Prettier
+npm test             # server, domain, and CLI tests (node --test)
 ```
 
 ## Project structure
 
 ```
+AGENTS.md               project-level agent instructions and production deployment runbook
 index.html              HTML entry; loads src/main.js
 public/favicon.svg      brand mark
 vite.config.js          Vite config, including the Lucide icon-subset plugin
 eslint.config.js        lint rules (ESLint flat config); formatting by Prettier (.prettierrc.json)
-.github/workflows/      CI: lint, format check, build
+.github/workflows/      CI: lint, format check, build, tests, Docker build
 docs/preview.png        README screenshot
+cli/
+  gr8r.js               zero-dependency CLI for the domain API
+skills/
+  gr8r-studio/SKILL.md  agent skill documenting the gr8r CLI and workflows
 src/
   main.js               entry: imports styles and modules, then boots the app
   styles/
     index.css           imports every stylesheet in cascade order
     tokens.css          colours, spacing, type, radius, the shared --gutter
     base.css  components.css  shell.css  panels.css  overlays.css  states.css  motion.css  responsive.css
-    views/              list, board, table, calendar, timeline, projects & files
-    pages/              settings, projects, members, and more
-  core/                 utilities, constants, icons, store (state + lookups), theme, optional sync
+    views/              list, board, table, calendar, timeline, projects, files, docs
+    pages/              settings, projects, inbox, members, and more
+  core/                 shared domain/markdown/dates/constants, icons, store (state + lookups), theme, optional sync
   data/seed.js          starter workspace data
   ui/                   shared render helpers, toasts, the select dropdown
   shell/                render loop and router, sidebar/topbar layout, skeletons, view engine
   components/           task list renderer
-  pages/                one module per route
-  views/                project views: board, table, calendar, timeline, files, overview
+  pages/                one module per route (home, inbox, my-tasks, projects, activity, settings, …)
+  views/                project views: board, table, calendar, timeline, files, docs, overview
   overlays/             task drawer, modals, popovers, context menu, command palette
   features/             teams, subtasks, archive (rendering)
   actions/              user actions, event wiring, keyboard shortcuts, drag and drop
 server/
   server.js             optional self-hosted sync server: serves dist/ and the sync API
-  test/                 server protocol tests (node --test)
+  api.js                domain API routes (/api/projects, /api/tasks, /api/docs, /api/inbox, …)
+  blobs.js              content-addressed binary attachment storage (/api/blobs)
+  test/                 server, domain, and CLI tests (node --test)
 ```
 
 ### Layers
@@ -103,9 +112,11 @@ such as default nginx that omits `X-Forwarded-*` headers and rewrites `Host` to
 `GR8R_TOKEN`.
 
 ```bash
-VITE_SYNC_URL=/api npm run build
+npm run build:server    # equivalent to: VITE_SYNC_URL=/api npm run build
 cd server && GR8R_TOKEN=<secret> npm start    # app + sync API on 127.0.0.1:4180
 ```
+
+> **Important:** Self-hosted deployments must build with `npm run build:server` (or `VITE_SYNC_URL=/api npm run build`). A bare `npm run build` leaves `VITE_SYNC_URL` unset and builds a standalone localStorage-only frontend that does not sync with `/api`.
 
 - `GR8R_TOKEN` is the single shared bearer token. Clients on private loopback or
   Tailscale Serve routes fetch it from `GET /api/config` at startup, so rotating
